@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">VitureKit Cursor</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="reset">Reset targets</string>
+    <string name="toggle_3d">Mode: 2D</string>
+    <string name="mode_button">Mode: %1$s</string>
+    <string name="score">Targets %1$d / %2$d</string>
+    <string name="hint">Move your head to steer the cursor. Hold it on a ring to select.</string>
+</resources>

@@ -1,0 +1,25 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aar
+*.aab
+
+# Proprietary VITURE SDK — must NOT be committed or redistributed.
+# See SDK/Android/android/LICENSE; download it from https://www.viture.com/developer
+/SDK/
+/libs/viture-sdk/
+
+# Local Claude Code settings (machine-specific).
+.claude/settings.local.json
+
+# Pre-existing local files in this folder, unrelated to the project.
+history.db
+history.db-shm
+history.db-wal
