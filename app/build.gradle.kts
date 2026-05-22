@@ -49,6 +49,8 @@ kotlin {
 dependencies {
     // Head tracking + the native VITURE SDK bridge, behind its own library.
     implementation(project(":glasses"))
+    // The 3D workspace — camera, screens, GL renderer.
+    implementation(project(":spatial"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

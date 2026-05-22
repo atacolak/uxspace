@@ -23,4 +23,5 @@ dependencyResolutionManagement {
 rootProject.name = "VSpace"
 
 include(":glasses")
+include(":spatial")
 include(":app")
