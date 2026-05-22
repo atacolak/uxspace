@@ -272,26 +272,27 @@ class WorkspaceRenderer(
             drawExternalQuad(d.textureId, d.textureMatrix)
         }
 
-        // Launched app windows — the content quad and the title-bar quad above it, in front
-        // of the desktop (skipped while minimised, or while the app drawer is open).
+        // Launched app windows — the window frame (chrome), then the app's content quad
+        // composited on top of it, inset within the border. Painter's order, so the content
+        // covers the frame's centre and the grey shows only as the border + title bar.
+        // Skipped while minimised, or while the app drawer is open.
         if (!appsHidden && !drawerOpen && windows.isNotEmpty()) {
-            GLES20.glEnable(GLES20.GL_DEPTH_TEST)
             for (window in windows) {
+                val chrome = window.chrome
+                chrome.updateTexture()
+                buildModelRect(
+                    modelMatrix,
+                    window.frameX, window.frameY, window.frameZ,
+                    window.frameW, window.frameH,
+                )
+                Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+                drawExternalQuad(chrome.textureId, chrome.textureMatrix)
+
                 val content = window.content
                 content.updateTexture()
                 buildModel(modelMatrix, content)
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
                 drawExternalQuad(content.textureId, content.textureMatrix)
-
-                val chrome = window.chrome
-                chrome.updateTexture()
-                buildModelRect(
-                    modelMatrix,
-                    window.chromeX, window.chromeY, window.chromeZ,
-                    window.chromeW, window.chromeH,
-                )
-                Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-                drawExternalQuad(chrome.textureId, chrome.textureMatrix)
             }
         }
 
@@ -357,8 +358,8 @@ class WorkspaceRenderer(
         )
         val chrome = UiScreen(
             createExternalTexture(),
-            AppWindow.CHROME_WIDTH_PX,
-            AppWindow.CHROME_HEIGHT_PX,
+            AppWindow.FRAME_WIDTH_PX,
+            AppWindow.FRAME_HEIGHT_PX,
             mainHandler,
             "vspace-chrome-$id",
         )
@@ -393,14 +394,16 @@ class WorkspaceRenderer(
     private fun handleDrag() {
         if (dragBeginPending) {
             dragBeginPending = false
+            // Grab a window by its frame — the border or title bar, not the app content.
             grabbed = windows.firstOrNull { w ->
                 w.state == AppWindow.State.NORMAL &&
                     cursorToRectPx(
-                        w.chromeX, w.chromeY, w.chromeZ, w.chromeW, w.chromeH, 1, 1,
-                    ) != null
+                        w.frameX, w.frameY, w.frameZ, w.frameW, w.frameH, 1, 1,
+                    ) != null &&
+                    cursorToScreenPx(w.content) == null
             }
             grabbed?.let { w ->
-                val hit = cursorRayHit(w.chromeZ)
+                val hit = cursorRayHit(w.frameZ)
                 if (hit != null) {
                     grabOffsetX = w.centerX - hit[0]
                     grabOffsetY = w.centerY - hit[1]
@@ -412,7 +415,7 @@ class WorkspaceRenderer(
             return
         }
         val w = grabbed ?: return
-        val hit = cursorRayHit(w.chromeZ) ?: return
+        val hit = cursorRayHit(w.frameZ) ?: return
         w.centerX = hit[0] + grabOffsetX
         w.centerY = hit[1] + grabOffsetY
         w.layout(desktopHalfWidth, desktopHalfHeight)
@@ -504,23 +507,28 @@ class WorkspaceRenderer(
     private fun handleClick() {
         if (!appsHidden && !drawerOpen) {
             for (window in windows) {
-                val chromePx = cursorToRectPx(
-                    window.chromeX, window.chromeY, window.chromeZ,
-                    window.chromeW, window.chromeH,
-                    AppWindow.CHROME_WIDTH_PX, AppWindow.CHROME_HEIGHT_PX,
-                )
-                if (chromePx != null) {
-                    val chrome = window.chrome
-                    mainHandler.post { chrome.dispatchTap(chromePx[0], chromePx[1]) }
+                // The app content sits on top, inside the frame — try it first.
+                val contentPx = cursorToScreenPx(window.content)
+                if (contentPx != null) {
+                    if (window.content.displayId >= 0) {
+                        WorkspaceController.appTap?.invoke(
+                            window.content.displayId,
+                            contentPx[0].toInt(), contentPx[1].toInt(),
+                        )
+                    }
                     return
                 }
-                val px = cursorToScreenPx(window.content) ?: continue
-                if (window.content.displayId >= 0) {
-                    WorkspaceController.appTap?.invoke(
-                        window.content.displayId, px[0].toInt(), px[1].toInt(),
-                    )
+                // The surrounding frame — the title-bar buttons live in its view tree.
+                val framePx = cursorToRectPx(
+                    window.frameX, window.frameY, window.frameZ,
+                    window.frameW, window.frameH,
+                    AppWindow.FRAME_WIDTH_PX, AppWindow.FRAME_HEIGHT_PX,
+                )
+                if (framePx != null) {
+                    val chrome = window.chrome
+                    mainHandler.post { chrome.dispatchTap(framePx[0], framePx[1]) }
+                    return
                 }
-                return
             }
         }
         val d = desktop ?: return
