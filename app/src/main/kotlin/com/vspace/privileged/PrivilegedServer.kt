@@ -4,9 +4,12 @@ import android.content.Context
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.net.Uri
+import android.os.Binder
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import kotlin.system.exitProcess
@@ -263,7 +266,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 val systemContext = obtainSystemContext()
                     ?: throw IllegalStateException("could not obtain a system context")
                 val server = PrivilegedServer().also { it.setContext(systemContext) }
-                sendBinderToApp(systemContext, server)
+                sendBinderToApp(server)
                 Log.i(TAG, "PrivilegedServer ready; entering main loop")
                 Looper.loop()
             } catch (t: Throwable) {
@@ -281,47 +284,106 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
         /**
          * Pass [binder] back to the VSpace app process by calling its
-         * [BinderReceiverProvider] — Binders survive in a Bundle across the process
-         * boundary. This is the same trick Shizuku uses to publish its own server.
+         * [BinderReceiverProvider].
          *
-         * The call needs the calling package to belong to this process's uid (shell, 2000),
-         * or AMS rejects with "Given calling package android does not match caller's uid
-         * 2000". The system context boots with package "android" (uid 1000), and
-         * `createPackageContext("com.android.shell")` only changes `mBasePackageName` —
-         * `mOpPackageName` (what `ContentResolver` actually uses) is *inherited* from the
-         * parent. So we force both fields reflectively.
+         * Cannot use [Context.getContentResolver] because this process wasn't started by
+         * AMS — `acquireProvider` calls `IActivityManager.getContentProvider`, which
+         * requires a registered application record for the calling pid and rejects us with
+         * "Unable to find app for caller". Instead we go straight through
+         * `IActivityManager.getContentProviderExternal` — the same hidden API the `cmd
+         * content` shell command uses to call into providers from shell-uid — and invoke
+         * `IContentProvider.call` directly. Both are accessed reflectively because they
+         * are not in the public SDK.
          */
-        private fun sendBinderToApp(context: Context, binder: IBinder) {
-            val shellContext = makeShellContext(context)
-            val authority = Uri.parse("content://${BinderReceiverProvider.AUTHORITY}")
+        private fun sendBinderToApp(binder: IBinder) {
+            val authority = BinderReceiverProvider.AUTHORITY
+            val token = Binder()
             val extras = Bundle().apply { putBinder(BinderReceiverProvider.EXTRA_BINDER, binder) }
-            shellContext.contentResolver.call(
-                authority, BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
-            )
+            val activityManager = activityManagerService()
+                ?: throw IllegalStateException("no IActivityManager binder")
+            val iAmClass = Class.forName("android.app.IActivityManager")
+            val holder = iAmClass
+                .getMethod(
+                    "getContentProviderExternal",
+                    String::class.java,
+                    Int::class.javaPrimitiveType,
+                    IBinder::class.java,
+                    String::class.java,
+                )
+                .invoke(activityManager, authority, 0, token, SHELL_PACKAGE)
+                ?: throw IllegalStateException("getContentProviderExternal returned null")
+            val provider = holder.javaClass.getField("provider").get(holder)
+                ?: throw IllegalStateException("ContentProviderHolder.provider was null")
+            try {
+                invokeProviderCall(provider, authority, extras)
+                Log.i(TAG, "sent binder via getContentProviderExternal")
+            } finally {
+                runCatching {
+                    iAmClass.getMethod(
+                        "removeContentProviderExternal",
+                        String::class.java,
+                        IBinder::class.java,
+                    ).invoke(activityManager, authority, token)
+                }
+            }
         }
 
+        /** `ActivityManager.getService()` — the singleton `IActivityManager` binder proxy. */
+        private fun activityManagerService(): Any? = runCatching {
+            Class.forName("android.app.ActivityManager")
+                .getMethod("getService")
+                .invoke(null)
+        }.onFailure { Log.e(TAG, "ActivityManager.getService() failed", it) }.getOrNull()
+
         /**
-         * Wrap [base] in a context whose `getOpPackageName()` returns `com.android.shell`.
-         * Reflection is needed because `createPackageContext` doesn't override
-         * `mOpPackageName` — see the comment on [sendBinderToApp].
+         * Invoke `IContentProvider.call(...)` reflectively, building whichever calling
+         * identity the platform expects: API 31+ uses an `AttributionSource`; older
+         * versions take a plain `(callingPkg, callingFeatureId)` pair.
          */
-        private fun makeShellContext(base: Context): Context {
-            val shellContext = runCatching {
-                base.createPackageContext(SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
-            }.onFailure {
-                Log.e(TAG, "createPackageContext($SHELL_PACKAGE) failed", it)
-            }.getOrNull() ?: base
-            runCatching {
-                val cls = Class.forName("android.app.ContextImpl")
-                for (name in arrayOf("mOpPackageName", "mBasePackageName")) {
-                    val f = cls.getDeclaredField(name)
-                    f.isAccessible = true
-                    f.set(shellContext, SHELL_PACKAGE)
-                }
-            }.onFailure {
-                Log.e(TAG, "could not force op package to $SHELL_PACKAGE", it)
+        private fun invokeProviderCall(provider: Any, authority: String, extras: Bundle) {
+            val iCpClass = Class.forName("android.content.IContentProvider")
+            val callMethods = iCpClass.declaredMethods.filter {
+                it.name == "call" && it.returnType == Bundle::class.java
             }
-            return shellContext
+            val attribClass = runCatching { Class.forName("android.content.AttributionSource") }
+                .getOrNull()
+            val attribCall = if (attribClass != null) {
+                callMethods.firstOrNull { it.parameterTypes.firstOrNull() == attribClass }
+            } else {
+                null
+            }
+            if (attribCall != null) {
+                val ctor = attribClass!!.getConstructor(
+                    Int::class.javaPrimitiveType,
+                    String::class.java,
+                    String::class.java,
+                )
+                val src = ctor.newInstance(Process.SHELL_UID, SHELL_PACKAGE, null)
+                attribCall.invoke(
+                    provider, src, authority,
+                    BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
+                )
+                return
+            }
+            // Pre-API 31 fallback: (callingPkg, callingFeatureId?, authority, method, arg, extras).
+            val stringCall = callMethods.firstOrNull {
+                it.parameterTypes.firstOrNull() == String::class.java
+            } ?: throw IllegalStateException("no usable IContentProvider.call signature")
+            val params = stringCall.parameterTypes
+            val args: Array<Any?> = when (params.size) {
+                5 -> arrayOf(
+                    SHELL_PACKAGE, authority,
+                    BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
+                )
+                6 -> arrayOf(
+                    SHELL_PACKAGE, null, authority,
+                    BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
+                )
+                else -> throw IllegalStateException(
+                    "unexpected IContentProvider.call arity ${params.size}",
+                )
+            }
+            stringCall.invoke(provider, *args)
         }
     }
 }
