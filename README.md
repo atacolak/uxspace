@@ -1,70 +1,76 @@
 # VSpace
 
-An Android app that turns VITURE glasses into a **spatial multi-screen workspace**. Plug the
-phone into the glasses, launch installed Android apps onto up to **3 virtual screens**, and —
-when the glasses support DOF — turn your head to look across them.
+An Android app that turns VITURE glasses (or any external display) into a **DeX-style
+spatial workspace** — a desktop with a taskbar and an app drawer, floating in front of you,
+driven with the phone as a trackpad.
 
-> **Status:** early development. See the roadmap below for what works today.
+> **Status:** in active development. The desktop, app drawer, head tracking, and
+> phone-as-trackpad work today; see the roadmap.
 
 ## How it works
 
 The glasses are a USB-C external display. VSpace owns that display with a `Presentation`
-hosting an OpenGL scene, and draws the virtual screens as quads floating in 3D space:
+hosting an OpenGL scene:
 
 ```
 VITURE glasses ──USB-C──▶ phone
    │  external Display
    ▼
-Presentation + GLSurfaceView          ← 3D scene; camera = inverse head pose
-   │  draws up to 3 textured quads (the screens), world-fixed
-   ▼
-each quad sampled from a SurfaceTexture
-   ▲
-   │ Surface
-VirtualDisplay ◀── startActivity(setLaunchDisplayId) ── an installed app
+Presentation + GLSurfaceView            ← 3D scene; camera = inverse head pose
+   ├─ the desktop  — a UiScreen: a real Android UI (taskbar, app drawer,
+   │                 wallpaper) on its own VirtualDisplay, textured onto a quad
+   └─ app windows  — each a VirtualDisplay running an installed app, on a quad
 ```
 
-Each virtual screen is an Android `VirtualDisplay`; an installed app is launched onto it and
-its output is textured onto the screen's quad. Head pose (from the native VITURE SDK) drives
-the camera so the screens stay fixed in space.
+The desktop is a real Android view hierarchy on `Theme.DeviceDefault` — on a Samsung
+device it is styled as One UI, the same way Samsung DeX is. Launched apps render onto
+their own virtual displays. Head pose (from the native VITURE SDK) drives the camera: in
+**free** view the workspace stays fixed in space as you look around; in **pinned** view it
+follows your head. With no head tracker, pinned view and multiple screens still work on any
+external display.
 
-## Constraints (read before expecting magic)
+## Constraints
 
-This is a stock, non-rooted Android app, which bounds what is possible:
+A stock, non-rooted Android app, which bounds what is possible:
 
-- **Launching third-party apps is best-effort.** Android restricts placing arbitrary apps on
-  a virtual display. Many apps work; some bounce back to the phone screen or misbehave,
-  depending on the app and Android version.
-- **Input needs a Bluetooth mouse/keyboard.** Injecting touch into another app's virtual
-  display requires a privileged permission, so a paired BT pointer is the interaction path.
+- **Launching third-party apps needs Shizuku** — placing an app on a virtual display
+  requires shell privilege. VSpace uses [Shizuku](https://shizuku.rikka.app/) (borrowed
+  ADB-shell privilege, no root), bootstrapped once via Wireless debugging.
+- **The phone is the input device** — a trackpad (one finger moves the cursor, two fingers
+  scroll, a tap clicks) and, later, a keyboard. A Bluetooth mouse/keyboard also works.
 
 ## Modules
 
-| Module             | What it is                                                          |
-|--------------------|---------------------------------------------------------------------|
-| `app`              | The VSpace workspace app                                            |
-| `viturekit`        | Internal head-tracking layer — `VitureSession`, pose `Flow`s        |
-| `viturekit-native` | (M2) JNI bridge to the proprietary native VITURE SDK                |
+| Module    | What it is                                              |
+|-----------|---------------------------------------------------------|
+| `app`     | The phone control panel and the desktop UI layout       |
+| `spatial` | The 3D workspace — camera, screens, the GL renderer     |
+| `glasses` | VITURE head tracking and the native-SDK JNI bridge      |
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layered design and roadmap.
 
 ## Roadmap
 
 - **M0** — Repo restructured around the workspace app. ✅
-- **M1** — Launch one installed app onto a virtual screen rendered on the glasses.
-- **M2** — Head tracking via the native VITURE SDK; screens become world-fixed.
-- **M3** — Up to 3 screens with configurable placement and an app picker.
-- **M4** — Bluetooth mouse/keyboard input routing.
+- **M1** — Launch an installed app onto a virtual screen on the glasses. ✅
+- **M2** — Head tracking via the native VITURE SDK; screens become world-fixed. ✅
+- **M3** — Up to 3 screens with arc placement. ✅
+- **DeX UI** — A real One UI desktop: taskbar, app drawer, cursor, two-finger scroll. ✅
+- **M4** — Input: route the keyboard and clicks into launched app windows.
 - **M5** — Layout persistence, USB hotplug, lifecycle teardown.
 
 ## The VITURE SDK
 
-The native VITURE SDK (`.so` + C headers, proprietary) is **not** committed — see
-`SDK/Android/android/LICENSE`. Place it under `SDK/Android/` locally; M2 wires it in via a
-JNI bridge. It is only needed for head tracking and display-mode control — M1 needs no SDK.
+The native VITURE SDK (`.so` + C headers, proprietary) is **not** committed. Vendor it
+locally into `glasses/src/main/jniLibs` and `glasses/src/main/cpp/include` (both
+git-ignored) for the native build. It is needed only for head tracking — without it,
+VSpace still runs on any external display.
 
 ## Requirements
 
 - Android Studio with **AGP 9.0+** (Kotlin support is built in — no Kotlin plugin applied)
 - **Gradle 9.x**, **JDK 17+**, `compileSdk` 36, `minSdk` 26
+- **NDK 30** + **CMake 4.x** for the native build
 
 `local.properties` must point `sdk.dir` at your Android SDK.
 
