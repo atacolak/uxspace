@@ -284,22 +284,44 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
          * [BinderReceiverProvider] — Binders survive in a Bundle across the process
          * boundary. This is the same trick Shizuku uses to publish its own server.
          *
-         * The call goes through a `com.android.shell` package context. The system context
-         * we boot with has package "android" (uid 1000), but this process runs as shell
-         * (uid 2000), and AMS's `acquireProvider` rejects a package/uid mismatch with
-         * "Given calling package android does not match caller's uid 2000".
+         * The call needs the calling package to belong to this process's uid (shell, 2000),
+         * or AMS rejects with "Given calling package android does not match caller's uid
+         * 2000". The system context boots with package "android" (uid 1000), and
+         * `createPackageContext("com.android.shell")` only changes `mBasePackageName` —
+         * `mOpPackageName` (what `ContentResolver` actually uses) is *inherited* from the
+         * parent. So we force both fields reflectively.
          */
         private fun sendBinderToApp(context: Context, binder: IBinder) {
-            val shellContext = runCatching {
-                context.createPackageContext(SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
-            }.onFailure {
-                Log.e(TAG, "could not create a $SHELL_PACKAGE context for binder hand-off", it)
-            }.getOrNull() ?: context
+            val shellContext = makeShellContext(context)
             val authority = Uri.parse("content://${BinderReceiverProvider.AUTHORITY}")
             val extras = Bundle().apply { putBinder(BinderReceiverProvider.EXTRA_BINDER, binder) }
             shellContext.contentResolver.call(
                 authority, BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
             )
+        }
+
+        /**
+         * Wrap [base] in a context whose `getOpPackageName()` returns `com.android.shell`.
+         * Reflection is needed because `createPackageContext` doesn't override
+         * `mOpPackageName` — see the comment on [sendBinderToApp].
+         */
+        private fun makeShellContext(base: Context): Context {
+            val shellContext = runCatching {
+                base.createPackageContext(SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+            }.onFailure {
+                Log.e(TAG, "createPackageContext($SHELL_PACKAGE) failed", it)
+            }.getOrNull() ?: base
+            runCatching {
+                val cls = Class.forName("android.app.ContextImpl")
+                for (name in arrayOf("mOpPackageName", "mBasePackageName")) {
+                    val f = cls.getDeclaredField(name)
+                    f.isAccessible = true
+                    f.set(shellContext, SHELL_PACKAGE)
+                }
+            }.onFailure {
+                Log.e(TAG, "could not force op package to $SHELL_PACKAGE", it)
+            }
+            return shellContext
         }
     }
 }
