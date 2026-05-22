@@ -1,11 +1,15 @@
-// Interface to the helper that runs inside a Shizuku-spawned, ADB-shell-privileged process.
-package com.vspace.shizuku;
+// Interface to VSpace's shell-uid privileged helper — the process that launches apps onto
+// the workspace's virtual displays, injects input, and creates the displays themselves
+// (trusted, so apps don't escape to the phone). See docs/PRIVILEGE.md.
+package com.vspace.privileged;
 
 import android.view.Surface;
 
-interface IShizukuService {
+interface IPrivilegedService {
 
-    // Transaction id Shizuku itself uses to tear the service down.
+    // Transaction id used while the helper is still bound through Shizuku, which uses this
+    // specific id to tear the service down. Kept after we move to our own ADB bootstrap so a
+    // Shizuku-bound build remains interchangeable.
     void destroy() = 16777114;
 
     void exit() = 1;

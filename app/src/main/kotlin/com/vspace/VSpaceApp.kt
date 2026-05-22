@@ -3,7 +3,7 @@ package com.vspace
 import android.app.Application
 import com.vspace.desktop.DesktopPresentation
 import com.vspace.desktop.DrawerPresentation
-import com.vspace.shizuku.ShizukuManager
+import com.vspace.privileged.ShizukuManager
 import com.vspace.spatial.WorkspaceController
 
 /**

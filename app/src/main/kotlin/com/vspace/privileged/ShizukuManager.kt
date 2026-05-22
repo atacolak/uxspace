@@ -1,4 +1,4 @@
-package com.vspace.shizuku
+package com.vspace.privileged
 
 import android.content.ComponentName
 import android.content.Context
@@ -16,15 +16,16 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Detects Shizuku, walks the user through activating it, and — once ready — runs privileged
- * actions (launch an app onto a virtual display, inject input) through a shell-uid helper.
+ * Reaches the [PrivilegedServer] — launching apps onto a virtual display, injecting input,
+ * creating trusted virtual displays — over a Binder.
  *
- * VSpace cannot start Shizuku itself; activating it is the Shizuku app's job. What VSpace can
- * do is detect exactly which step is missing and send the user straight to it.
+ * Transitional: the helper is still bound through the Shizuku app. The renamed package
+ * (`com.vspace.privileged`) and the new [onPrivilegedBinder] entry point are in place ready
+ * for the embedded-ADB integration ([docs/PRIVILEGE.md]) to take over from Shizuku.
  */
 object ShizukuManager {
 
-    private const val TAG = "VSpace/Shizuku"
+    private const val TAG = "VSpace/Privileged"
     private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
     // GitHub releases, not Play Store: the Play Store build is not offered on Android 16.
@@ -57,15 +58,15 @@ object ShizukuManager {
         private set
 
     @Volatile
-    private var service: IShizukuService? = null
+    private var service: IPrivilegedService? = null
 
     @Volatile
     private var binding = false
 
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "vspace-shizuku") }
+    private val worker = Executors.newSingleThreadExecutor { Thread(it, "vspace-privileged") }
     private val scheduler =
-        Executors.newSingleThreadScheduledExecutor { Thread(it, "vspace-shizuku-sched") }
+        Executors.newSingleThreadScheduledExecutor { Thread(it, "vspace-privileged-sched") }
     private var appContext: Context? = null
 
     private val onBinderReceived = Shizuku.OnBinderReceivedListener { refresh() }
@@ -101,6 +102,27 @@ object ShizukuManager {
         setState(next)
     }
 
+    /**
+     * Called by [BinderReceiverProvider] when the embedded-ADB bootstrap has launched a
+     * [PrivilegedServer] and the server has handed its Binder back. Wires the binder in as
+     * the live privileged helper.
+     *
+     * Unused while Shizuku still binds the helper — wired in stage 4 of the integration.
+     */
+    fun onPrivilegedBinder(binder: IBinder) {
+        if (!binder.pingBinder()) {
+            Log.w(TAG, "onPrivilegedBinder: ping failed, ignoring")
+            return
+        }
+        service = IPrivilegedService.Stub.asInterface(binder)
+        binding = false
+        Log.i(TAG, "privileged binder received via provider")
+        // Best-effort refresh — once the embedded-ADB orchestrator owns state, it will
+        // drive its own state machine here. For now refresh() recomputes from Shizuku, so
+        // if Shizuku also went READY the manager state matches.
+        refresh()
+    }
+
     private fun setState(next: State) {
         if (next == state) return
         Log.i(TAG, "state: $state -> $next")
@@ -133,7 +155,7 @@ object ShizukuManager {
     fun launchApp(displayId: Int, packageName: String, activityName: String) {
         val helper = service
         if (helper == null) {
-            Log.w(TAG, "launchApp ignored — Shizuku not ready (state=$state)")
+            Log.w(TAG, "launchApp ignored — helper not ready (state=$state)")
             return
         }
         worker.execute {
@@ -146,8 +168,8 @@ object ShizukuManager {
 
     /**
      * Create a trusted virtual display rendering into [surface]; returns its id, or `null` if
-     * Shizuku is not ready or creation failed. Blocks on a binder round-trip — call off the
-     * main thread where possible.
+     * the helper is not ready or creation failed. Blocks on a binder round-trip — call off
+     * the main thread where possible.
      */
     fun createVirtualDisplay(
         name: String,
@@ -158,7 +180,7 @@ object ShizukuManager {
     ): Int? {
         val helper = service
         if (helper == null) {
-            Log.w(TAG, "createVirtualDisplay ignored — Shizuku not ready (state=$state)")
+            Log.w(TAG, "createVirtualDisplay ignored — helper not ready (state=$state)")
             return null
         }
         return runCatching {
@@ -217,11 +239,11 @@ object ShizukuManager {
         binding = true
         runCatching {
             Shizuku.bindUserService(
-                Shizuku.UserServiceArgs(ComponentName(context, ShizukuUserService::class.java))
+                Shizuku.UserServiceArgs(ComponentName(context, PrivilegedServer::class.java))
                     .daemon(false)
-                    .processNameSuffix("shizuku")
+                    .processNameSuffix("privileged")
                     .debuggable(false)
-                    .version(2),
+                    .version(3),
                 connection,
             )
         }.onFailure {
@@ -234,7 +256,7 @@ object ShizukuManager {
         override fun onServiceConnected(name: ComponentName, binder: IBinder?) {
             binding = false
             service = if (binder != null && binder.pingBinder()) {
-                IShizukuService.Stub.asInterface(binder)
+                IPrivilegedService.Stub.asInterface(binder)
             } else {
                 null
             }

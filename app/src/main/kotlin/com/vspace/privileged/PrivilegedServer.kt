@@ -1,23 +1,35 @@
-package com.vspace.shizuku
+package com.vspace.privileged
 
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.net.Uri
+import android.os.Bundle
+import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import kotlin.system.exitProcess
 
 /**
- * Runs inside a process Shizuku spawns with ADB-shell privileges (uid 2000).
+ * VSpace's shell-uid privileged helper — runs `am` / `input`, creates the workspace's
+ * trusted virtual displays, and hands itself back to the app over a Binder. It exists in
+ * two activation modes, both passing through this same class:
  *
- * From shell context, `am` may launch apps onto any display and `input` may inject events
- * into any display — neither of which a normal app is allowed to do. This helper shells out
- * to those commands on the workspace's behalf, and creates the workspace's virtual displays:
- * a display created here is *trusted*, which a normal app's display is not.
+ *  - **Shizuku** (transitional). Shizuku binds it as a user service; the AIDL Stub is
+ *    delivered through Shizuku's `bindUserService` callback.
+ *  - **VSpace's own bootstrap** (`docs/PRIVILEGE.md`). `app_process` invokes [main], the
+ *    server is constructed in the shell-uid process, and its Binder is handed to the app
+ *    through [BinderReceiverProvider].
+ *
+ * From either entry point the privileged work is identical — only the start-up path
+ * differs. `am`/`input` are shell-outs because shell uid may not call `ActivityTaskManager`
+ * directly; `createVirtualDisplay` uses the `DisplayManager` from a `com.android.shell`
+ * package context so the call passes `DisplayManagerService`'s package/uid check.
  */
-class ShizukuUserService() : IShizukuService.Stub() {
+class PrivilegedServer() : IPrivilegedService.Stub() {
 
-    /** Context Shizuku hands the user service — used to reach the DisplayManager. */
+    /** A Context — Shizuku-provided in the user-service path, system-context in [main]. */
     private var context: Context? = null
 
     /** Trusted virtual displays created for the workspace, keyed by display id. */
@@ -26,6 +38,11 @@ class ShizukuUserService() : IShizukuService.Stub() {
     /** Shizuku instantiates the user service with this constructor when a Context is available. */
     @Suppress("unused")
     constructor(context: Context) : this() {
+        this.context = context
+    }
+
+    /** Used by [main] to set the system context once the ActivityThread is up. */
+    internal fun setContext(context: Context) {
         this.context = context
     }
 
@@ -88,8 +105,8 @@ class ShizukuUserService() : IShizukuService.Stub() {
      *
      * The display must be created under the package that owns this process's uid (shell) —
      * `DisplayManagerService` rejects a mismatch with "packageName must match the calling
-     * uid". The Shizuku-provided context carries the *app's* package (`com.vspace`), so the
-     * display is created from a `com.android.shell` package context instead.
+     * uid". A Shizuku-provided or app context carries the *app's* package (`com.vspace`),
+     * so the display is created from a `com.android.shell` package context instead.
      */
     private fun displayManager(): DisplayManager? {
         val base = baseContext() ?: return null
@@ -100,7 +117,7 @@ class ShizukuUserService() : IShizukuService.Stub() {
         return shellContext.getSystemService(DisplayManager::class.java)
     }
 
-    /** The Shizuku-provided context, or this process's system context fetched reflectively. */
+    /** The provided context, or this process's system context fetched reflectively. */
     private fun baseContext(): Context? {
         context?.let { return it }
         val ctx = runCatching {
@@ -212,13 +229,14 @@ class ShizukuUserService() : IShizukuService.Stub() {
         }
     }
 
-    private companion object {
-        const val TAG = "VSpace/Shizuku"
+    companion object {
+        private const val TAG = "VSpace/Privileged"
+
         // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK
-        const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
+        private const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
 
         /** Package owning the shell uid — the virtual display is created under it. */
-        const val SHELL_PACKAGE = "com.android.shell"
+        private const val SHELL_PACKAGE = "com.android.shell"
 
         /**
          * Flags for the workspace's virtual displays. `PUBLIC` so the system places activities
@@ -226,11 +244,52 @@ class ShizukuUserService() : IShizukuService.Stub() {
          * secondary content; `TRUSTED` (1 << 10 — a hidden constant) so an app launched onto
          * it may follow its own activity launches there rather than escaping to the phone.
          */
-        const val VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 shl 10
-        const val TRUSTED_DISPLAY_FLAGS =
+        private const val VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 shl 10
+        private const val TRUSTED_DISPLAY_FLAGS =
             DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION or
                 VIRTUAL_DISPLAY_FLAG_TRUSTED
+
+        /**
+         * Entry point when this class is loaded by `app_process` from the ADB shell bootstrap
+         * (see `ServerBootstrap`). Sets up a system context, builds the Stub, hands its
+         * Binder to the VSpace app through [BinderReceiverProvider], then loops forever.
+         */
+        @JvmStatic
+        fun main(args: Array<String>) {
+            try {
+                Looper.prepareMainLooper()
+                val systemContext = obtainSystemContext()
+                    ?: throw IllegalStateException("could not obtain a system context")
+                val server = PrivilegedServer().also { it.setContext(systemContext) }
+                sendBinderToApp(systemContext, server)
+                Log.i(TAG, "PrivilegedServer ready; entering main loop")
+                Looper.loop()
+            } catch (t: Throwable) {
+                Log.e(TAG, "PrivilegedServer crashed during start-up", t)
+                exitProcess(1)
+            }
+        }
+
+        /** `ActivityThread.systemMain().getSystemContext()` — the standard app_process bootstrap. */
+        private fun obtainSystemContext(): Context? = runCatching {
+            val activityThread = Class.forName("android.app.ActivityThread")
+            val systemMain = activityThread.getMethod("systemMain").invoke(null)
+            activityThread.getMethod("getSystemContext").invoke(systemMain) as Context
+        }.onFailure { Log.e(TAG, "obtainSystemContext failed", it) }.getOrNull()
+
+        /**
+         * Pass [binder] back to the VSpace app process by calling its
+         * [BinderReceiverProvider] — Binders survive in a Bundle across the process
+         * boundary. This is the same trick Shizuku uses to publish its own server.
+         */
+        private fun sendBinderToApp(context: Context, binder: IBinder) {
+            val authority = Uri.parse("content://${BinderReceiverProvider.AUTHORITY}")
+            val extras = Bundle().apply { putBinder(BinderReceiverProvider.EXTRA_BINDER, binder) }
+            context.contentResolver.call(
+                authority, BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
+            )
+        }
     }
 }

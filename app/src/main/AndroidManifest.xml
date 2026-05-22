@@ -57,6 +57,19 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!--
+          Receives the PrivilegedServer's Binder back from the shell-uid process. The server
+          (started via app_process under the embedded-ADB bootstrap, see docs/PRIVILEGE.md)
+          calls this provider, passing its Binder in a Bundle; the provider hands it to the
+          ShizukuManager. exported=true so the shell-uid process can reach it; the call()
+          handler restricts callers to the shell or the app's own uid.
+        -->
+        <provider
+            android:name=".privileged.BinderReceiverProvider"
+            android:authorities="com.vspace.privileged"
+            android:enabled="true"
+            android:exported="true" />
+
     </application>
 
 </manifest>

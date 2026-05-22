@@ -15,8 +15,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import com.vspace.databinding.ActivityMainBinding
 import com.vspace.glasses.GlassesDisplay
-import com.vspace.shizuku.ShizukuManager
-import com.vspace.shizuku.ShizukuManager.State
+import com.vspace.privileged.ShizukuManager
+import com.vspace.privileged.ShizukuManager.State
 import com.vspace.spatial.WorkspaceController
 import com.vspace.spatial.WorkspacePresentation
 import com.vspace.spatial.WorkspaceRenderer
