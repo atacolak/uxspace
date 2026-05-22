@@ -1,10 +1,20 @@
 <resources>
-    <string name="app_name">VitureKit Cursor</string>
-    <string name="connect">Connect</string>
-    <string name="disconnect">Disconnect</string>
-    <string name="reset">Reset targets</string>
-    <string name="toggle_3d">Mode: 2D</string>
-    <string name="mode_button">Mode: %1$s</string>
-    <string name="score">Targets %1$d / %2$d</string>
-    <string name="hint">Move your head to steer the cursor. Hold it on a ring to select.</string>
+    <string name="app_name">VSpace</string>
+    <string name="workspace_title">VSpace Workspace</string>
+    <string name="apps_header">Installed apps</string>
+    <string name="capture_button">Capture workspace</string>
+
+    <string name="shizuku_not_installed">VSpace uses Shizuku to place apps on the glasses’ virtual screens. The Play Store build is not offered on Android 16 — install the latest APK from Shizuku’s GitHub releases (free, open-source).</string>
+    <string name="shizuku_not_running">Shizuku is installed but not started. Open it and start the service via Wireless debugging — it runs on-device, no PC needed.</string>
+    <string name="shizuku_needs_permission">Shizuku is running. Grant VSpace access to continue.</string>
+    <string name="shizuku_connecting">Connecting to Shizuku…</string>
+    <string name="shizuku_ready">Shizuku connected.</string>
+    <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>
+    <string name="status_no_glasses">Connect your VITURE glasses to open the workspace.</string>
+
+    <string name="shizuku_action_install">Install Shizuku</string>
+    <string name="shizuku_action_open">Open Shizuku</string>
+    <string name="shizuku_action_grant">Grant VSpace access</string>
+
+    <string name="shizuku_needed">Finish Shizuku setup first — see the banner above.</string>
 </resources>

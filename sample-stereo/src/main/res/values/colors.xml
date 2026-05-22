@@ -1,7 +1,0 @@
-<resources>
-    <color name="bg">#FF05070F</color>
-    <color name="hud_bg">#B3070B18</color>
-    <color name="accent">#FF00E5FF</color>
-    <color name="text_primary">#FFECEFF4</color>
-    <color name="divider">#33FFFFFF</color>
-</resources>

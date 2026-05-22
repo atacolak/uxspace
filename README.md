@@ -1,107 +1,80 @@
-# VitureKit-Android
+# VSpace
 
-A clean, idiomatic Kotlin library that wraps the official VITURE Android SDK and exposes
-head-tracking / IMU data as coroutine `Flow`s — with proper lifecycle scoping and verified
-Samsung DeX support.
+An Android app that turns VITURE glasses into a **spatial multi-screen workspace**. Plug the
+phone into the glasses, launch installed Android apps onto up to **3 virtual screens**, and —
+when the glasses support DOF — turn your head to look across them.
 
-> **Status:** 1.0 development. The core API, the head-tracked cursor reference app, and a
-> side-by-side stereo sample are implemented and build against AGP 9 / Kotlin 2.2.
+> **Status:** early development. See the roadmap below for what works today.
 
-## Why
+## How it works
 
-The official VITURE Android SDK is low-level: manual USB lifecycle, raw callback
-registration, byte-level IMU parsing, no `Flow` interface. Every app that wants head-tracked
-UI, gesture input, or stereo rendering re-implements the same boilerplate — and nothing makes
-the IMU pleasant to use inside a Samsung DeX session. VitureKit is the thin layer that smooths
-all of that over, the way EasyVXR does on Linux.
+The glasses are a USB-C external display. VSpace owns that display with a `Presentation`
+hosting an OpenGL scene, and draws the virtual screens as quads floating in 3D space:
+
+```
+VITURE glasses ──USB-C──▶ phone
+   │  external Display
+   ▼
+Presentation + GLSurfaceView          ← 3D scene; camera = inverse head pose
+   │  draws up to 3 textured quads (the screens), world-fixed
+   ▼
+each quad sampled from a SurfaceTexture
+   ▲
+   │ Surface
+VirtualDisplay ◀── startActivity(setLaunchDisplayId) ── an installed app
+```
+
+Each virtual screen is an Android `VirtualDisplay`; an installed app is launched onto it and
+its output is textured onto the screen's quad. Head pose (from the native VITURE SDK) drives
+the camera so the screens stay fixed in space.
+
+## Constraints (read before expecting magic)
+
+This is a stock, non-rooted Android app, which bounds what is possible:
+
+- **Launching third-party apps is best-effort.** Android restricts placing arbitrary apps on
+  a virtual display. Many apps work; some bounce back to the phone screen or misbehave,
+  depending on the app and Android version.
+- **Input needs a Bluetooth mouse/keyboard.** Injecting touch into another app's virtual
+  display requires a privileged permission, so a paired BT pointer is the interaction path.
 
 ## Modules
 
-| Module          | What it is                                                              |
-|-----------------|-------------------------------------------------------------------------|
-| `viturekit`     | The library — `VitureSession`, IMU `Flow`s, device control, DeX support |
-| `app`           | Reference app: a head-tracked cursor with dwell-to-select targets       |
-| `sample-stereo` | A minimal side-by-side (SBS) stereo renderer, head-tracked via OpenGL   |
+| Module             | What it is                                                          |
+|--------------------|---------------------------------------------------------------------|
+| `app`              | The VSpace workspace app                                            |
+| `viturekit`        | Internal head-tracking layer — `VitureSession`, pose `Flow`s        |
+| `viturekit-native` | (M2) JNI bridge to the proprietary native VITURE SDK                |
 
-## Quick start
+## Roadmap
 
-```kotlin
-// 1. Create a session over a backend, and bind it to your Activity/Fragment lifecycle.
-val session = VitureSession.create(context, StubVitureGlasses())
-    .bindToLifecycle(this)
+- **M0** — Repo restructured around the workspace app. ✅
+- **M1** — Launch one installed app onto a virtual screen rendered on the glasses.
+- **M2** — Head tracking via the native VITURE SDK; screens become world-fixed.
+- **M3** — Up to 3 screens with configurable placement and an app picker.
+- **M4** — Bluetooth mouse/keyboard input routing.
+- **M5** — Layout persistence, USB hotplug, lifecycle teardown.
 
-// 2. Start connecting — the USB permission dialog is handled for you.
-session.connect()
+## The VITURE SDK
 
-// 3. Collect IMU samples as a Flow.
-lifecycleScope.launch {
-    repeatOnLifecycle(Lifecycle.State.STARTED) {
-        session.imu.collect { reading ->
-            val yaw = reading.euler.yawDeg
-            val pitch = reading.euler.pitchDeg
-            // ... drive your UI / renderer ...
-        }
-    }
-}
-```
-
-`VitureSession` also exposes `connectionState`, `displayMode`, `imuEnabled` and `latestImu`
-as `StateFlow`s, plus one-shot `events`. It pauses the IMU when the lifecycle stops and
-releases the device on `onDestroy`, so there are no leaked USB handles across configuration
-changes.
-
-## The SDK seam — stub vs. real hardware
-
-VitureKit never references the closed-source VITURE SDK directly. Everything goes through the
-[`VitureGlasses`](viturekit/src/main/kotlin/com/viturekit/VitureGlasses.kt) interface, and you
-choose the backend:
-
-- **`StubVitureGlasses`** — a synthetic backend that generates a gentle head-sway motion. It
-  needs no hardware and no SDK, so the sample apps (and unit tests) run anywhere, including
-  inside DeX. Both samples use it by default.
-- **A real-SDK adapter** — for physical glasses. The official SDK's redistribution terms mean
-  you must obtain it yourself; VitureKit deliberately does not bundle it.
-
-To wire up real hardware:
-
-1. Drop the official VITURE Android SDK `.aar` into `viturekit/libs/` and add
-   `implementation(files("libs/viture-sdk.aar"))` to `viturekit/build.gradle.kts`.
-2. Copy [`viturekit/integration/RealVitureGlasses.kt.template`](viturekit/integration/RealVitureGlasses.kt.template)
-   to `viturekit/src/main/kotlin/com/viturekit/integration/RealVitureGlasses.kt` and fill in
-   the `TODO`s against your SDK version.
-3. Create the session with it: `VitureSession.create(context, RealVitureGlasses(context))`.
-
-## Samsung DeX
-
-DeX is still ordinary Android, so VitureKit works there without special handling. The library
-watches the system display set and emits `VitureEvent.DisplaysChanged` when the user enters or
-leaves a DeX session; `VitureSession.isDexActive` and `DexEnvironment` report current state.
+The native VITURE SDK (`.so` + C headers, proprietary) is **not** committed — see
+`SDK/Android/android/LICENSE`. Place it under `SDK/Android/` locally; M2 wires it in via a
+JNI bridge. It is only needed for head tracking and display-mode control — M1 needs no SDK.
 
 ## Requirements
 
 - Android Studio with **AGP 9.0+** (Kotlin support is built in — no Kotlin plugin applied)
-- **Gradle 9.x**, **JDK 17+**
-- `compileSdk` 36, `minSdk` 26
+- **Gradle 9.x**, **JDK 17+**, `compileSdk` 36, `minSdk` 26
 
 `local.properties` must point `sdk.dir` at your Android SDK.
 
 ## Build
 
 ```sh
-./gradlew assembleDebug          # build all three modules
-./gradlew :viturekit:testDebugUnitTest   # run the library unit tests
-./gradlew :app:installDebug      # install the cursor demo
-./gradlew :sample-stereo:installDebug    # install the stereo sample
+./gradlew assembleDebug      # build the app
+./gradlew :app:installDebug  # install on a connected phone
 ```
-
-## Roadmap
-
-This repository implements milestones M2–M4 of the
-[project one-pager](viture-android-imu-library-onepager.md): the core API, the reference app,
-and the stereo sample. Remaining for 1.0: validation against physical Pro / Luma hardware
-(M1 hardware spike) and Maven Central publication (M5).
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). Permissive on purpose, so the library can be vendored
-into other projects.
+Apache-2.0 — see [LICENSE](LICENSE).

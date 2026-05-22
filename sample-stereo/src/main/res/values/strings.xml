@@ -1,4 +1,0 @@
-<resources>
-    <string name="app_name">VitureKit Stereo</string>
-    <string name="status_format">%1$s · %2$s · move your head to look around</string>
-</resources>

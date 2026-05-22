@@ -20,8 +20,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VitureKit-Android"
+rootProject.name = "VSpace"
 
 include(":viturekit")
 include(":app")
-include(":sample-stereo")

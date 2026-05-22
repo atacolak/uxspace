@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- VITURE glasses — USB vendor id 0x35CA (13770); matches every VITURE product id. -->
+    <usb-device vendor-id="13770" />
+</resources>
