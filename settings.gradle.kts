@@ -22,5 +22,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "VSpace"
 
-include(":viturekit")
+include(":glasses")
 include(":app")

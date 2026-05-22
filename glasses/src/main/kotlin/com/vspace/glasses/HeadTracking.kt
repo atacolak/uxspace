@@ -4,20 +4,24 @@ import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.util.Log
-import com.vspace.workspace.WorkspaceRenderer
 import java.util.concurrent.Executors
 
 /**
  * Drives head tracking: finds the glasses on USB, runs the native SDK lifecycle, polls head
- * pose, and feeds it to the [WorkspaceRenderer] camera so the screens stay world-fixed.
+ * pose, and delivers a recentred orientation quaternion via [onPose] so the workspace camera
+ * can stay world-fixed.
  *
  * Capability is detected at runtime — on-glasses native DOF, Carina VIO, or Gen1/2 host IMU —
  * and the matching tracking path is used. Recentre is done in VSpace: the first pose becomes
  * the reference, so wherever the user is looking when tracking starts becomes "straight ahead".
+ *
+ * It knows nothing of the renderer or the rest of VSpace — `:app` wires [onPose] to the
+ * camera — so the module is a self-contained, swappable head-tracking provider.
  */
 class HeadTracking(
     context: Context,
-    private val renderer: WorkspaceRenderer,
+    /** Receives each recentred head-orientation quaternion as (w, x, y, z). */
+    private val onPose: (Float, Float, Float, Float) -> Unit,
 ) {
     private val appContext = context.applicationContext
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "vspace-tracking") }
@@ -139,7 +143,7 @@ class HeadTracking(
         }
     }
 
-    /** Recentre against the reference orientation, then hand the result to the renderer. */
+    /** Recentre against the reference orientation, then deliver the result via [onPose]. */
     private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
         if (!haveRef) {
             refW = w; refX = x; refY = y; refZ = z
@@ -151,7 +155,7 @@ class HeadTracking(
         val ex = cw * x + cx * w + cy * z - cz * y
         val ey = cw * y - cx * z + cy * w + cz * x
         val ez = cw * z + cx * y - cy * x + cz * w
-        renderer.setHeadPose(ew, ex, ey, ez)
+        onPose(ew, ex, ey, ez)
     }
 
     private companion object {

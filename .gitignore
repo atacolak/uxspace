@@ -17,9 +17,9 @@ captures/
 # See SDK/Android/android/LICENSE; download it from https://www.viture.com/developer
 /SDK/
 /libs/viture-sdk/
-# VITURE SDK binaries/headers vendored into the app for the native build.
-/app/src/main/jniLibs/
-/app/src/main/cpp/include/
+# VITURE SDK binaries/headers vendored into the :glasses module's native build.
+/glasses/src/main/jniLibs/
+/glasses/src/main/cpp/include/
 
 # Local Claude Code settings (machine-specific).
 .claude/settings.local.json

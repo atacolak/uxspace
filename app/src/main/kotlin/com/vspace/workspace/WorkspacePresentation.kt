@@ -30,7 +30,10 @@ class WorkspacePresentation(
         setContentView(view)
         WorkspaceController.register(view.workspaceRenderer)
         // Drive the camera from the glasses' head pose, so the screens stay world-fixed.
-        headTracking = HeadTracking(context, view.workspaceRenderer).also { it.start() }
+        val renderer = view.workspaceRenderer
+        headTracking = HeadTracking(context) { w, x, y, z ->
+            renderer.setHeadPose(w, x, y, z)
+        }.also { it.start() }
     }
 
     override fun onStart() {
