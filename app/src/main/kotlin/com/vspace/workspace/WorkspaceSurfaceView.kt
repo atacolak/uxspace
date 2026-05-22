@@ -15,12 +15,14 @@ import android.os.Looper
 class WorkspaceSurfaceView(context: Context) : GLSurfaceView(context) {
 
     val workspaceRenderer = WorkspaceRenderer(
-        appContext = context.applicationContext,
+        context = context,
         mainHandler = Handler(Looper.getMainLooper()),
     )
 
     init {
         setEGLContextClientVersion(2)
+        // Keep the GL context across pause/resume, so the desktop and screens survive a blip.
+        preserveEGLContextOnPause = true
         setRenderer(workspaceRenderer)
         renderMode = RENDERMODE_CONTINUOUSLY
     }

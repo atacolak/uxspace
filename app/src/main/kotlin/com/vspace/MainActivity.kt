@@ -135,8 +135,6 @@ class MainActivity : ComponentActivity() {
             binding.appList.setOnItemClickListener { parent, _, position, _ ->
                 openInWorkspace(parent.getItemAtPosition(position) as InstalledApp)
             }
-            // Same list drives the in-workspace app drawer's icon grid.
-            WorkspaceController.setApps(apps)
         }
     }
 

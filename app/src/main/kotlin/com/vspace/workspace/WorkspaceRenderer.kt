@@ -2,21 +2,13 @@ package com.vspace.workspace
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
-import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.os.Handler
-import android.text.TextPaint
-import android.text.TextUtils
 import android.util.Log
 import android.widget.Toast
-import com.vspace.apps.InstalledApp
 import com.vspace.shizuku.ShizukuManager
 import java.io.File
 import java.io.FileOutputStream
@@ -31,20 +23,22 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Renders the workspace: a backdrop image, then a 3D scene of textured quads — one per
- * [VirtualScreen].
+ * Renders the workspace as a 3D scene of textured quads: the desktop (a [UiScreen] — the
+ * One UI taskbar, app drawer, and wallpaper) as the back plane, then one quad per launched
+ * app ([VirtualScreen]), then the touchpad cursor as an overlay.
  *
- * Each screen quad samples an external-OES texture fed by a `VirtualDisplay`. The camera
- * orientation comes from [setHeadOrientation] — feeding it head pose (M2) makes the screens
- * world-fixed; until then the camera is static and the screens sit straight ahead.
+ * Every quad samples an external-OES texture fed by a VirtualDisplay. The camera comes from
+ * [setHeadPose]: PINNED locks the scene to the view, FREE world-fixes it as the head turns.
  *
- * App launches arrive on any thread via [requestApp] and are realised on the GL thread inside
- * [onDrawFrame], where a GL context is guaranteed to exist.
+ * App launches arrive on any thread via [requestApp] and are realised on the GL thread in
+ * [onDrawFrame], where a GL context is guaranteed.
  */
 class WorkspaceRenderer(
-    private val appContext: Context,
+    private val context: Context,
     private val mainHandler: Handler,
 ) : GLSurfaceView.Renderer {
+
+    private val appContext: Context = context.applicationContext
 
     private data class AppRequest(val packageName: String, val activityName: String)
 
@@ -52,34 +46,28 @@ class WorkspaceRenderer(
     private val screens = ArrayList<VirtualScreen>()
     private var nextScreenId = 1
 
+    /** The desktop — VSpace's own One UI home, hosted on its own virtual display. */
+    private var desktop: UiScreen? = null
+
     // Head-orientation quaternion (w, x, y, z); identity means looking straight ahead.
     @Volatile private var headW = 1f
     @Volatile private var headX = 0f
     @Volatile private var headY = 0f
     @Volatile private var headZ = 0f
 
-    /** How the screen tracks the head. */
+    /** How the scene tracks the head. */
     @Volatile private var viewMode = ViewMode.PINNED
 
-    /** Whether the screen follows the head ([PINNED]) or stays put in the world ([FREE]). */
+    /** Whether the scene follows the head ([PINNED]) or stays put in the world ([FREE]). */
     enum class ViewMode { PINNED, FREE }
 
-    // Screen-quad program (samples a SurfaceTexture as an external-OES texture).
+    // Screen-quad program — samples a SurfaceTexture as an external-OES texture.
     private var screenProgram = 0
     private var screenAPosition = 0
     private var screenATexCoord = 0
     private var screenUMvp = 0
     private var screenUTexMatrix = 0
     private var screenUTexture = 0
-
-    // Backdrop program (samples a plain 2D image, drawn full-screen behind the scene).
-    private var backgroundProgram = 0
-    private var backgroundAPosition = 0
-    private var backgroundATexCoord = 0
-    private var backgroundUMvp = 0
-    private var backgroundUTexture = 0
-    private var backgroundTextureId = 0
-    private var backgroundImageAspect = DEFAULT_BACKGROUND_ASPECT
 
     // Cursor program — a flat-colour quad drawn as a screen-space overlay.
     private var cursorProgram = 0
@@ -93,33 +81,15 @@ class WorkspaceRenderer(
     private var cursorFlashFrames = 0
     private var surfaceAspect = 1.78f
 
-    // UI program — a textured world-space quad (the app button and drawer panel).
-    private var uiProgram = 0
-    private var uiAPosition = 0
-    private var uiATexCoord = 0
-    private var uiUMvp = 0
-    private var uiUTexture = 0
-    private var appButtonTexture = 0
-    private var panelTexture = 0
-    private var taskbarTexture = 0
-    @Volatile private var drawerOpen = false
     @Volatile private var captureRequested = false
-
-    // Scratch for projecting world-space UI to NDC for cursor hit-testing.
-    private val projectScratch = FloatArray(4)
-    private val worldPoint = FloatArray(4)
-
-    // Installed apps shown as the drawer's icon grid; textures upload lazily on the GL thread.
-    private class DrawerIcon(val app: InstalledApp) {
-        var textureId = 0
-    }
-
-    @Volatile private var drawerIcons: List<DrawerIcon> = emptyList()
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
-    private lateinit var backgroundQuad: FloatBuffer
+    /** Desktop quad half-extents (metres), sized in [onSurfaceChanged] to fill the view. */
+    private var desktopHalfWidth = 3.7f
+    private var desktopHalfHeight = 2.1f
+
     private lateinit var screenQuad: FloatBuffer
     private lateinit var cursorArrow: FloatBuffer
 
@@ -128,6 +98,11 @@ class WorkspaceRenderer(
     private val modelMatrix = FloatArray(16)
     private val viewProjection = FloatArray(16)
     private val mvpMatrix = FloatArray(16)
+
+    // Scratch for unprojecting the cursor onto the desktop plane.
+    private val invViewProjection = FloatArray(16)
+    private val clipPoint = FloatArray(4)
+    private val worldPoint = FloatArray(4)
 
     /** Queue an app to be placed on a virtual screen. Safe to call from any thread. */
     fun requestApp(packageName: String, activityName: String) {
@@ -142,14 +117,9 @@ class WorkspaceRenderer(
         headZ = z
     }
 
-    /** Switch how the screen tracks the head. Safe to call from any thread. */
+    /** Switch how the scene tracks the head. Safe to call from any thread. */
     fun setViewMode(mode: ViewMode) {
         viewMode = mode
-    }
-
-    /** Provide the installed apps shown as the drawer's icon grid. Safe from any thread. */
-    fun setApps(apps: List<InstalledApp>) {
-        drawerIcons = apps.map { DrawerIcon(it) }
     }
 
     /** Request a PNG snapshot of the next rendered frame. Safe to call from any thread. */
@@ -168,14 +138,19 @@ class WorkspaceRenderer(
         cursorClickPending = true
     }
 
-    /** Release every screen's VirtualDisplay and GL resources. Call on the GL thread. */
+    /** Release the desktop, every screen, and their GL resources. Call on the GL thread. */
     fun releaseAll() {
+        desktop?.release()
+        desktop = null
         screens.forEach { it.release() }
         screens.clear()
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0.04f, 0.05f, 0.08f, 1f)
+        GLES20.glClearColor(0.03f, 0.04f, 0.06f, 1f)
+
+        // A fresh GL context — discard anything bound to a previous one.
+        releaseAll()
 
         screenProgram = buildProgram(SCREEN_VERTEX_SHADER, SCREEN_FRAGMENT_SHADER)
         screenAPosition = GLES20.glGetAttribLocation(screenProgram, "aPosition")
@@ -184,31 +159,23 @@ class WorkspaceRenderer(
         screenUTexMatrix = GLES20.glGetUniformLocation(screenProgram, "uTexMatrix")
         screenUTexture = GLES20.glGetUniformLocation(screenProgram, "uTexture")
 
-        backgroundProgram = buildProgram(BACKGROUND_VERTEX_SHADER, BACKGROUND_FRAGMENT_SHADER)
-        backgroundAPosition = GLES20.glGetAttribLocation(backgroundProgram, "aPosition")
-        backgroundATexCoord = GLES20.glGetAttribLocation(backgroundProgram, "aTexCoord")
-        backgroundUMvp = GLES20.glGetUniformLocation(backgroundProgram, "uMvp")
-        backgroundUTexture = GLES20.glGetUniformLocation(backgroundProgram, "uTexture")
-
         cursorProgram = buildProgram(CURSOR_VERTEX_SHADER, CURSOR_FRAGMENT_SHADER)
         cursorAPosition = GLES20.glGetAttribLocation(cursorProgram, "aPosition")
         cursorUCenter = GLES20.glGetUniformLocation(cursorProgram, "uCenter")
         cursorUHalfSize = GLES20.glGetUniformLocation(cursorProgram, "uHalfSize")
         cursorUColor = GLES20.glGetUniformLocation(cursorProgram, "uColor")
 
-        uiProgram = buildProgram(UI_VERTEX_SHADER, UI_FRAGMENT_SHADER)
-        uiAPosition = GLES20.glGetAttribLocation(uiProgram, "aPosition")
-        uiATexCoord = GLES20.glGetAttribLocation(uiProgram, "aTexCoord")
-        uiUMvp = GLES20.glGetUniformLocation(uiProgram, "uMvp")
-        uiUTexture = GLES20.glGetUniformLocation(uiProgram, "uTexture")
-
-        backgroundQuad = directBufferOf(BACKGROUND_QUAD_VERTICES)
         screenQuad = directBufferOf(SCREEN_QUAD_VERTICES)
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
-        loadBackgroundTexture()
-        appButtonTexture = uploadTexture(buildAppsGlyph())
-        panelTexture = uploadTexture(buildRoundedPanel(512, 299, 46f, 232))
-        taskbarTexture = uploadTexture(buildRoundedPanel(1024, 75, 37f, 225))
+
+        // The desktop: an external texture fed by our own Presentation on a virtual display.
+        val ui = UiScreen(
+            createExternalTexture(), DESKTOP_WIDTH_PX, DESKTOP_HEIGHT_PX, mainHandler,
+        )
+        desktop = ui
+        mainHandler.post {
+            ui.start(context) { ctx, display -> DesktopPresentation(ctx, display) }
+        }
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -216,9 +183,13 @@ class WorkspaceRenderer(
         surfaceHeight = height
         GLES20.glViewport(0, 0, width, height)
 
-        val aspect = width.toFloat() / height.toFloat()
-        surfaceAspect = aspect
-        Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, aspect, NEAR_PLANE, FAR_PLANE)
+        surfaceAspect = width.toFloat() / height.toFloat()
+        Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, surfaceAspect, NEAR_PLANE, FAR_PLANE)
+
+        // Size the desktop quad to exactly fill the field of view at its distance.
+        val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
+        desktopHalfHeight = (DESKTOP_DISTANCE * Math.tan(halfFov)).toFloat()
+        desktopHalfWidth = desktopHalfHeight * surfaceAspect
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -230,16 +201,27 @@ class WorkspaceRenderer(
         buildView(viewMatrix)
         Matrix.multiplyMM(viewProjection, 0, projection, 0, viewMatrix, 0)
 
-        drawBackground()
+        GLES20.glUseProgram(screenProgram)
 
+        // The desktop — back plane, filling the view.
+        desktop?.let { d ->
+            d.updateTexture()
+            Matrix.setIdentityM(modelMatrix, 0)
+            Matrix.translateM(modelMatrix, 0, 0f, 0f, -DESKTOP_DISTANCE)
+            Matrix.scaleM(modelMatrix, 0, desktopHalfWidth, desktopHalfHeight, 1f)
+            Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+            drawExternalQuad(d.textureId, d.textureMatrix)
+        }
+
+        // Launched apps — quads in front of the desktop.
         if (screens.isNotEmpty()) {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-            GLES20.glUseProgram(screenProgram)
             for (screen in screens) {
                 screen.updateTexture()
                 buildModel(modelMatrix, screen)
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-                drawScreen(screen)
+                drawExternalQuad(screen.textureId, screen.textureMatrix)
             }
         }
 
@@ -248,7 +230,6 @@ class WorkspaceRenderer(
             cursorFlashFrames = CURSOR_FLASH_FRAMES
             handleClick()
         }
-        drawDrawerUi()
         drawCursor()
 
         if (captureRequested) {
@@ -257,27 +238,14 @@ class WorkspaceRenderer(
         }
     }
 
-    /** Draw the backdrop image full-screen behind the 3D scene. */
-    /** Draw the backdrop as a large world-fixed wall behind the screens — head-tracked too. */
-    private fun drawBackground() {
-        if (backgroundTextureId == 0) return
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-        GLES20.glUseProgram(backgroundProgram)
-
-        Matrix.setIdentityM(modelMatrix, 0)
-        Matrix.translateM(modelMatrix, 0, 0f, 0f, -BACKGROUND_DISTANCE)
-        Matrix.scaleM(
-            modelMatrix, 0,
-            BACKGROUND_HALF_WIDTH, BACKGROUND_HALF_WIDTH / backgroundImageAspect, 1f,
-        )
-        Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-        GLES20.glUniformMatrix4fv(backgroundUMvp, 1, false, mvpMatrix, 0)
-
+    /** Draw a [screenProgram] quad textured with an external-OES texture; [mvpMatrix] is set. */
+    private fun drawExternalQuad(textureId: Int, textureMatrix: FloatArray) {
+        GLES20.glUniformMatrix4fv(screenUMvp, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(screenUTexMatrix, 1, false, textureMatrix, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, backgroundTextureId)
-        GLES20.glUniform1i(backgroundUTexture, 0)
-
-        bindQuad(backgroundQuad, backgroundAPosition, backgroundATexCoord)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+        GLES20.glUniform1i(screenUTexture, 0)
+        bindQuad(screenQuad, screenAPosition, screenATexCoord)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
     }
 
@@ -291,7 +259,7 @@ class WorkspaceRenderer(
     }
 
     private fun addScreen(request: AppRequest) {
-        // Up to three screens; a fourth evicts the oldest.
+        // A single screen for now; a second launch evicts the first.
         if (screens.size >= MAX_SCREENS) {
             screens.removeAt(0).release()
         }
@@ -306,7 +274,7 @@ class WorkspaceRenderer(
         relayout()
 
         // Create the display on the main thread, then launch the app onto it via Shizuku —
-        // a normal app is not allowed to place another app on a virtual display.
+        // a normal app may not place another app on a virtual display.
         mainHandler.post {
             val displayId = screen.createDisplay(appContext)
             if (displayId != null) {
@@ -326,18 +294,6 @@ class WorkspaceRenderer(
             screen.worldYawDeg = -angleDeg
             screen.worldWidth = SCREEN_FILL_WIDTH
         }
-    }
-
-    private fun drawScreen(screen: VirtualScreen) {
-        GLES20.glUniformMatrix4fv(screenUMvp, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(screenUTexMatrix, 1, false, screen.textureMatrix, 0)
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, screen.textureId)
-        GLES20.glUniform1i(screenUTexture, 0)
-
-        bindQuad(screenQuad, screenAPosition, screenATexCoord)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
     }
 
     /** Draw the touchpad cursor — an arrow pointer — as a flat overlay on top of everything. */
@@ -373,125 +329,40 @@ class WorkspaceRenderer(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, CURSOR_ARROW_VERTEX_COUNT)
     }
 
-    /** Resolve a cursor click against the workspace UI. */
+    /**
+     * Resolve a cursor click: ray-cast the screen-space cursor onto the desktop plane and
+     * dispatch a tap at the matching desktop pixel into the hosted One UI view tree.
+     */
     private fun handleClick() {
-        if (drawerOpen) {
-            // A click on an icon launches that app; any click closes the drawer.
-            val visible = drawerIcons.take(GRID_COLS * GRID_ROWS)
-            val hit = visible.indices.firstOrNull { index ->
-                cursorOverWorldQuad(iconX(index), iconY(index), ICON_Z, ICON_HALF_W, ICON_HALF_H)
-            }
-            if (hit != null) {
-                val app = visible[hit].app
-                requestApp(app.packageName, app.activityName)
-            }
-            drawerOpen = false
-        } else if (cursorOverWorldQuad(
-                APP_BUTTON_X, APP_BUTTON_Y, APP_BUTTON_Z, APP_BUTTON_HALF, APP_BUTTON_HALF,
-            )
-        ) {
-            drawerOpen = true
-        }
+        val d = desktop ?: return
+        if (!Matrix.invertM(invViewProjection, 0, viewProjection, 0)) return
+        val near = unproject(cursorX, cursorY, -1f) ?: return
+        val far = unproject(cursorX, cursorY, 1f) ?: return
+        val dirZ = far[2] - near[2]
+        if (abs(dirZ) < 1e-5f) return
+        // Intersect the cursor ray with the desktop plane at z = -DESKTOP_DISTANCE.
+        val t = (-DESKTOP_DISTANCE - near[2]) / dirZ
+        if (t < 0f) return
+        val hitX = near[0] + t * (far[0] - near[0])
+        val hitY = near[1] + t * (far[1] - near[1])
+        val hw = desktopHalfWidth
+        val hh = desktopHalfHeight
+        if (hitX < -hw || hitX > hw || hitY < -hh || hitY > hh) return
+        val px = (hitX + hw) / (2f * hw) * DESKTOP_WIDTH_PX
+        val py = (hh - hitY) / (2f * hh) * DESKTOP_HEIGHT_PX
+        mainHandler.post { d.dispatchTap(px, py) }
     }
 
-    /** Whether the cursor (NDC) lies over a world-space quad, found by projecting the quad. */
-    private fun cursorOverWorldQuad(
-        cx: Float,
-        cy: Float,
-        cz: Float,
-        halfW: Float,
-        halfH: Float,
-    ): Boolean {
-        val center = projectToNdc(cx, cy, cz) ?: return false
-        val edgeX = projectToNdc(cx + halfW, cy, cz) ?: return false
-        val edgeY = projectToNdc(cx, cy + halfH, cz) ?: return false
-        val ndcHalfX = abs(edgeX[0] - center[0])
-        val ndcHalfY = abs(edgeY[1] - center[1])
-        return cursorX >= center[0] - ndcHalfX && cursorX <= center[0] + ndcHalfX &&
-            cursorY >= center[1] - ndcHalfY && cursorY <= center[1] + ndcHalfY
-    }
-
-    /** Project a world point to NDC via the current view-projection; null if behind the eye. */
-    private fun projectToNdc(x: Float, y: Float, z: Float): FloatArray? {
-        worldPoint[0] = x
-        worldPoint[1] = y
-        worldPoint[2] = z
-        worldPoint[3] = 1f
-        Matrix.multiplyMV(projectScratch, 0, viewProjection, 0, worldPoint, 0)
-        val w = projectScratch[3]
-        if (w <= 0.0001f) return null
-        return floatArrayOf(projectScratch[0] / w, projectScratch[1] / w)
-    }
-
-    /** World X of the drawer icon at [index] — its column, centred across the panel. */
-    private fun iconX(index: Int): Float =
-        (index % GRID_COLS - (GRID_COLS - 1) / 2f) * GRID_CELL_W
-
-    /** World Y of the drawer icon at [index] — its row, laid out down from the panel's top. */
-    private fun iconY(index: Int): Float =
-        GRID_TOP_Y - (index / GRID_COLS) * GRID_CELL_H
-
-    /** Draw the workspace UI — the open app drawer, or the taskbar with its launcher button. */
-    private fun drawDrawerUi() {
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-        if (drawerOpen) {
-            drawUiWorldQuad(panelTexture, 0f, 0f, DRAWER_Z, DRAWER_HALF_WIDTH, DRAWER_HALF_HEIGHT)
-            val visible = drawerIcons.take(GRID_COLS * GRID_ROWS)
-            visible.forEachIndexed { index, icon ->
-                if (icon.textureId == 0) {
-                    icon.textureId = uploadTexture(iconBitmap(icon.app))
-                }
-                drawUiWorldQuad(
-                    icon.textureId, iconX(index), iconY(index), ICON_Z, ICON_HALF_W, ICON_HALF_H,
-                )
-            }
-        } else {
-            drawUiWorldQuad(
-                taskbarTexture, 0f, TASKBAR_Y, TASKBAR_Z,
-                TASKBAR_HALF_WIDTH, TASKBAR_HALF_HEIGHT,
-            )
-            drawUiWorldQuad(
-                appButtonTexture, APP_BUTTON_X, APP_BUTTON_Y, APP_BUTTON_Z,
-                APP_BUTTON_HALF, APP_BUTTON_HALF,
-            )
-        }
-    }
-
-    /** Draw a textured quad in world space — a UI element anchored near the screen. */
-    private fun drawUiWorldQuad(
-        texture: Int,
-        centerX: Float,
-        centerY: Float,
-        centerZ: Float,
-        halfWidth: Float,
-        halfHeight: Float,
-    ) {
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        GLES20.glUseProgram(uiProgram)
-
-        Matrix.setIdentityM(modelMatrix, 0)
-        Matrix.translateM(modelMatrix, 0, centerX, centerY, centerZ)
-        Matrix.scaleM(modelMatrix, 0, halfWidth, halfHeight, 1f)
-        Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-        GLES20.glUniformMatrix4fv(uiUMvp, 1, false, mvpMatrix, 0)
-
-        backgroundQuad.position(0)
-        GLES20.glVertexAttribPointer(
-            uiAPosition, POSITION_FLOATS, GLES20.GL_FLOAT, false, STRIDE_BYTES, backgroundQuad,
-        )
-        GLES20.glEnableVertexAttribArray(uiAPosition)
-        backgroundQuad.position(POSITION_FLOATS)
-        GLES20.glVertexAttribPointer(
-            uiATexCoord, TEXCOORD_FLOATS, GLES20.GL_FLOAT, false, STRIDE_BYTES, backgroundQuad,
-        )
-        GLES20.glEnableVertexAttribArray(uiATexCoord)
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-        GLES20.glUniform1i(uiUTexture, 0)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
-        GLES20.glDisable(GLES20.GL_BLEND)
+    /** Unproject an NDC point to world space via the inverse view-projection. */
+    private fun unproject(ndcX: Float, ndcY: Float, ndcZ: Float): FloatArray? {
+        clipPoint[0] = ndcX
+        clipPoint[1] = ndcY
+        clipPoint[2] = ndcZ
+        clipPoint[3] = 1f
+        Matrix.multiplyMV(worldPoint, 0, invViewProjection, 0, clipPoint, 0)
+        val w = worldPoint[3]
+        if (abs(w) < 1e-6f) return null
+        return floatArrayOf(worldPoint[0] / w, worldPoint[1] / w, worldPoint[2] / w)
     }
 
     /** Read back the just-rendered frame and save it as a PNG, for off-device inspection. */
@@ -535,95 +406,6 @@ class WorkspaceRenderer(
         }.start()
     }
 
-    private fun uploadTexture(bitmap: Bitmap): Int {
-        val ids = IntArray(1)
-        GLES20.glGenTextures(1, ids, 0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
-        GLES20.glTexParameteri(
-            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR,
-        )
-        GLES20.glTexParameteri(
-            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR,
-        )
-        GLES20.glTexParameteri(
-            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE,
-        )
-        GLES20.glTexParameteri(
-            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE,
-        )
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-        return ids[0]
-    }
-
-    /** Build the launcher glyph — a translucent disc with a 3×3 grid of soft dots. */
-    private fun buildAppsGlyph(): Bitmap {
-        val size = 128
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        // Translucent dark disc — the round button surface; outside it stays transparent.
-        val disc = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(205, 26, 28, 36) }
-        canvas.drawCircle(size / 2f, size / 2f, size * 0.48f, disc)
-        // 3x3 grid of soft round dots — the app-grid mark.
-        val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(235, 232, 235, 242) }
-        val margin = size * 0.32f
-        val gap = size * 0.10f
-        val cell = (size - 2f * margin - 2f * gap) / 3f
-        for (row in 0..2) {
-            for (col in 0..2) {
-                val cx = margin + col * (cell + gap) + cell / 2f
-                val cy = margin + row * (cell + gap) + cell / 2f
-                canvas.drawCircle(cx, cy, cell * 0.42f, dot)
-            }
-        }
-        return bitmap
-    }
-
-    /** A rounded, translucent dark surface — One UI 8 styling for the drawer and taskbar. */
-    private fun buildRoundedPanel(
-        widthPx: Int,
-        heightPx: Int,
-        radius: Float,
-        fillAlpha: Int,
-    ): Bitmap {
-        val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val inset = 2.5f
-        val right = widthPx - inset
-        val bottom = heightPx - inset
-        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(fillAlpha, 20, 22, 30) }
-        canvas.drawRoundRect(inset, inset, right, bottom, radius, radius, fill)
-        val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2.5f
-            color = Color.argb(40, 255, 255, 255)
-        }
-        canvas.drawRoundRect(inset, inset, right, bottom, radius, radius, edge)
-        return bitmap
-    }
-
-    /** Compose an app's icon and label into one drawer-cell bitmap — One UI 8 styling. */
-    private fun iconBitmap(app: InstalledApp): Bitmap {
-        val w = ICON_CELL_PX_W
-        val h = ICON_CELL_PX_H
-        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val iconSize = (w * 0.72f).toInt()
-        val iconLeft = (w - iconSize) / 2
-        val iconTop = (w * 0.07f).toInt()
-        app.icon.setBounds(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize)
-        app.icon.draw(canvas)
-        val label = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(235, 232, 235, 242)
-            textAlign = Paint.Align.CENTER
-            textSize = w * 0.125f
-        }
-        val text = TextUtils.ellipsize(app.label, label, w * 0.95f, TextUtils.TruncateAt.END)
-        canvas.drawText(
-            text.toString(), w / 2f, iconTop + iconSize + label.textSize * 1.4f, label,
-        )
-        return bitmap
-    }
-
     private fun bindQuad(quad: FloatBuffer, positionHandle: Int, texCoordHandle: Int) {
         quad.position(0)
         GLES20.glVertexAttribPointer(
@@ -644,7 +426,7 @@ class WorkspaceRenderer(
      */
     private fun buildView(out: FloatArray) {
         if (viewMode == ViewMode.PINNED) {
-            // Pinned: the screen is locked to the viewport — it follows the head.
+            // Pinned: the scene is locked to the viewport — it follows the head.
             Matrix.setIdentityM(out, 0)
             return
         }
@@ -684,61 +466,21 @@ class WorkspaceRenderer(
         return ids[0]
     }
 
-    /** Decode the backdrop image from assets and upload it as a 2D texture. */
-    private fun loadBackgroundTexture() {
-        try {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            appContext.assets.open(BACKGROUND_ASSET).use {
-                BitmapFactory.decodeStream(it, null, bounds)
-            }
-            val decode = BitmapFactory.Options().apply {
-                inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight)
-            }
-            val bitmap = appContext.assets.open(BACKGROUND_ASSET).use {
-                BitmapFactory.decodeStream(it, null, decode)
-            } ?: return
-
-            backgroundImageAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
-            GLES20.glTexParameteri(
-                GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR,
-            )
-            GLES20.glTexParameteri(
-                GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR,
-            )
-            GLES20.glTexParameteri(
-                GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE,
-            )
-            GLES20.glTexParameteri(
-                GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE,
-            )
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-            backgroundTextureId = ids[0]
-            Log.i(TAG, "backdrop loaded: ${bitmap.width}x${bitmap.height}")
-            bitmap.recycle()
-        } catch (e: Exception) {
-            Log.w(TAG, "backdrop image unavailable: ${e.message}")
-        }
-    }
-
     private companion object {
         const val TAG = "VSpace/Renderer"
 
-        const val BACKGROUND_ASSET = "workspace_background.jpg"
-        const val DEFAULT_BACKGROUND_ASPECT = 16f / 10f
-        const val MAX_TEXTURE_DIM = 2048
+        /** Pixel resolution of the desktop UI surface (16:9). */
+        const val DESKTOP_WIDTH_PX = 1920
+        const val DESKTOP_HEIGHT_PX = 1080
 
-        /** The desktop wallpaper — a flat plane just behind the screen, filling the view. */
-        const val BACKGROUND_DISTANCE = 4.05f
-        const val BACKGROUND_HALF_WIDTH = 4.6f
+        /** The desktop sits just behind the launched-app screens, filling the view. */
+        const val DESKTOP_DISTANCE = 4.2f
 
-        /** Pixel resolution of each virtual screen (16:9). */
+        /** Pixel resolution of each launched-app virtual screen (16:9). */
         const val SCREEN_WIDTH_PX = 1600
         const val SCREEN_HEIGHT_PX = 900
 
-        /** A single screen for now, sized to fill the view. */
+        /** A single launched app for now, sized to fill the view. */
         const val MAX_SCREENS = 1
         const val SCREEN_DISTANCE = 4.0f
         const val SCREEN_SPREAD_DEGREES = 28f
@@ -759,35 +501,6 @@ class WorkspaceRenderer(
             0.7f, -0.7f,
         )
 
-        /** The launcher button, centred on the taskbar — world coordinates near the screen. */
-        const val APP_BUTTON_X = 0f
-        const val APP_BUTTON_Y = -1.73f
-        const val APP_BUTTON_Z = -3.80f
-        const val APP_BUTTON_HALF = 0.20f
-
-        /** DeX-style taskbar — a full-width translucent bar along the bottom edge. */
-        const val TASKBAR_Y = -1.73f
-        const val TASKBAR_Z = -3.82f
-        const val TASKBAR_HALF_WIDTH = 3.55f
-        const val TASKBAR_HALF_HEIGHT = 0.26f
-
-        /** The app drawer — a rounded translucent panel over the screen. */
-        const val DRAWER_Z = -3.8f
-        const val DRAWER_HALF_WIDTH = 3.6f
-        const val DRAWER_HALF_HEIGHT = 2.1f
-
-        /** Drawer app-icon grid: 6 × 3 cells of icon + label — world metres and bitmap pixels. */
-        const val GRID_COLS = 6
-        const val GRID_ROWS = 3
-        const val GRID_CELL_W = 1.06f
-        const val GRID_CELL_H = 1.16f
-        const val GRID_TOP_Y = 1.14f
-        const val ICON_Z = -3.78f
-        const val ICON_HALF_W = 0.45f
-        const val ICON_HALF_H = 0.548f
-        const val ICON_CELL_PX_W = 184
-        const val ICON_CELL_PX_H = 224
-
         const val FOV_Y_DEGREES = 55f
         const val NEAR_PLANE = 0.1f
         const val FAR_PLANE = 100f
@@ -799,17 +512,6 @@ class WorkspaceRenderer(
         const val QUAD_VERTEX_COUNT = 4
 
         /**
-         * Backdrop quad: x, y, z, u, v. Texture v rises from 0 at the top to 1 at the
-         * bottom, matching `BitmapFactory` row order for a plain 2D image.
-         */
-        val BACKGROUND_QUAD_VERTICES = floatArrayOf(
-            -1f, -1f, 0f, 0f, 1f,
-            1f, -1f, 0f, 1f, 1f,
-            -1f, 1f, 0f, 0f, 0f,
-            1f, 1f, 0f, 1f, 0f,
-        )
-
-        /**
          * Screen quad: x, y, z, u, v. Texture v rises from 0 at the bottom to 1 at the top —
          * the convention a SurfaceTexture's transform matrix is built for.
          */
@@ -819,15 +521,6 @@ class WorkspaceRenderer(
             -1f, 1f, 0f, 0f, 1f,
             1f, 1f, 0f, 1f, 1f,
         )
-
-        /** Smallest power-of-two subsample that keeps both dimensions within the GL limit. */
-        fun sampleSizeFor(width: Int, height: Int): Int {
-            var sample = 1
-            while (width / sample > MAX_TEXTURE_DIM || height / sample > MAX_TEXTURE_DIM) {
-                sample *= 2
-            }
-            return sample
-        }
 
         const val SCREEN_VERTEX_SHADER = """
             uniform mat4 uMvp;
@@ -851,26 +544,6 @@ class WorkspaceRenderer(
                 "    gl_FragColor = texture2D(uTexture, vTexCoord);\n" +
                 "}\n"
 
-        const val BACKGROUND_VERTEX_SHADER = """
-            uniform mat4 uMvp;
-            attribute vec4 aPosition;
-            attribute vec2 aTexCoord;
-            varying vec2 vTexCoord;
-            void main() {
-                gl_Position = uMvp * aPosition;
-                vTexCoord = aTexCoord;
-            }
-        """
-
-        const val BACKGROUND_FRAGMENT_SHADER = """
-            precision mediump float;
-            uniform sampler2D uTexture;
-            varying vec2 vTexCoord;
-            void main() {
-                gl_FragColor = texture2D(uTexture, vTexCoord);
-            }
-        """
-
         const val CURSOR_VERTEX_SHADER = """
             uniform vec2 uCenter;
             uniform vec2 uHalfSize;
@@ -885,26 +558,6 @@ class WorkspaceRenderer(
             uniform vec4 uColor;
             void main() {
                 gl_FragColor = uColor;
-            }
-        """
-
-        const val UI_VERTEX_SHADER = """
-            uniform mat4 uMvp;
-            attribute vec4 aPosition;
-            attribute vec2 aTexCoord;
-            varying vec2 vTexCoord;
-            void main() {
-                gl_Position = uMvp * aPosition;
-                vTexCoord = aTexCoord;
-            }
-        """
-
-        const val UI_FRAGMENT_SHADER = """
-            precision mediump float;
-            uniform sampler2D uTexture;
-            varying vec2 vTexCoord;
-            void main() {
-                gl_FragColor = texture2D(uTexture, vTexCoord);
             }
         """
 

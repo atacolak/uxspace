@@ -1,7 +1,5 @@
 package com.vspace.workspace
 
-import com.vspace.apps.InstalledApp
-
 /**
  * Process-wide handle to the workspace running inside the glasses' `Presentation`, so the
  * phone-side control panel can launch apps into it and switch its view mode.
@@ -14,9 +12,6 @@ object WorkspaceController {
     @Volatile
     private var viewMode = WorkspaceRenderer.ViewMode.PINNED
 
-    @Volatile
-    private var apps: List<InstalledApp> = emptyList()
-
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 
@@ -26,7 +21,6 @@ object WorkspaceController {
     internal fun register(renderer: WorkspaceRenderer) {
         this.renderer = renderer
         renderer.setViewMode(viewMode)
-        renderer.setApps(apps)
     }
 
     internal fun unregister(renderer: WorkspaceRenderer) {
@@ -48,12 +42,6 @@ object WorkspaceController {
     fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
         viewMode = mode
         renderer?.setViewMode(mode)
-    }
-
-    /** Supply the installed-app list shown as the drawer's icon grid in the workspace. */
-    fun setApps(list: List<InstalledApp>) {
-        apps = list
-        renderer?.setApps(list)
     }
 
     /** Save a PNG snapshot of the current workspace frame to the device's storage. */

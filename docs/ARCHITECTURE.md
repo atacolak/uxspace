@@ -23,21 +23,23 @@ layers below.
 | 3 | **UI framework** | A 2D widget toolkit — widgets, layout, input, animation           | `:ui`      | `Widget`, `UiRoot`, `Button`, `IconGrid`, `Animator` |
 | 4 | **UI layout**| A concrete screenful of widgets — the DeX desktop                     | `:app`     | `DesktopLayout`, `Taskbar`, `AppDrawer`        |
 
-Plus `:glasses` — the VITURE hardware (USB, native SDK, head tracking). Already
-well-isolated; promoted to its own library.
+Plus two infrastructure libraries: `:tracking` + `:viture` — pluggable head tracking,
+VITURE being one implementation (§10) — and `:privileged` — bundled Shizuku (§8).
 
 ## 3. Modules and dependencies
 
 ```
-:glasses     VITURE USB + native SDK + head tracking          -> Android + native .so
-:privileged  bundled Shizuku server + client + Wi-Fi pairing   -> Android
-:ui          cursor, input mapping, shared One UI components   -> Android
-:spatial     GL toolkit + Camera + Screen + Scene              -> :ui
-:app         control panel + desktop layout + wiring           -> :spatial, :ui, :glasses, :privileged
+:tracking    head-tracking abstraction — HeadTracker, HeadPose     -> Android
+:viture      VITURE head-tracker: native SDK + USB + JNI bridge    -> :tracking
+:privileged  bundled Shizuku server + client + Wi-Fi pairing       -> Android
+:ui          cursor, input mapping, shared One UI components       -> Android
+:spatial     GL toolkit + Camera + Screen + Scene                  -> :ui
+:app         control panel + desktop + provider wiring             -> :spatial, :ui, :tracking, :viture, :privileged
 ```
 
-Acyclic. `:glasses` and `:privileged` stand alone. The native CMake build moves into
-`:glasses`. See §8 for `:privileged`.
+Acyclic. `:tracking`, `:privileged` and `:viture` stand alone; the native CMake build
+lives in `:viture`. Only `:app` names a concrete vendor — swap `:viture` for another
+glasses SDK and nothing else changes. See §8 (`:privileged`) and §10 (`:tracking`).
 
 ## 4. Layer detail
 
@@ -45,6 +47,7 @@ Acyclic. `:glasses` and `:privileged` stand alone. The native CMake build moves 
 
 - `Camera` — owns the projection + view matrix and the **ViewMode** (PINNED / FREE).
   Consumes a head-pose quaternion: PINNED → identity view; FREE → inverse head rotation.
+  FREE is offered only when a head tracker is connected (§10).
 - `Surface3D` — a textured quad with a 3D transform (position, yaw, size). The atomic
   visible thing.
 - `ScreenLayout` — a placement strategy: `Single`, `ArcOfThree`, `Stack`. Maps logical
@@ -90,17 +93,27 @@ With Option C the heavy lifting is Android's own widget toolkit, so `:ui` stays 
 
 ## 5. Input flow
 
+The phone touchpad and a Bluetooth mouse both drive one screen-space cursor.
+
 ```
-Trackpad (phone)  --delta-->  Scene moves the cursor overlay
-Click  -->  Scene projects the cursor onto the front-most Surface3D
-        |-- UiScreen  -> UiRoot hit-tests widgets -> fires onClick
-        '-- AppScreen -> inject a touch event into the VirtualDisplay (M4, via Shizuku)
-Keyboard  -->  routed to the focused Screen the same way
+Move     trackpad drag / mouse move        -> Scene moves the cursor overlay
+Click    trackpad tap / mouse click        -> ray-cast cursor onto the front Screen,
+                                              dispatch a tap into it
+Scroll   two-finger trackpad drag /         -> ray-cast cursor onto the front Screen,
+         mouse wheel                          dispatch an ACTION_SCROLL event into it
+Keys     phone keyboard / BT keyboard      -> dispatch KeyEvents to the focused Screen
 ```
 
-The cursor lives in the View; the View maps cursor → Screen → screen-local pixels; each
-Screen handles input in its own space. The UI framework only ever sees clean 2D
-widget-space events.
+The cursor lives in the View; the View ray-casts it onto the front-most Screen and maps
+to that Screen's pixels. For a `UiScreen` (the desktop) the synthesised events go
+straight into our Presentation's view tree — `dispatchTouchEvent` /
+`dispatchGenericMotionEvent` / `dispatchKeyEvent`, no Shizuku, since it is our own
+window. For an `AppScreen` (a third-party app) they are injected via Shizuku.
+
+Scroll specifically: a `GridView`/`ScrollView` consumes a generic `ACTION_SCROLL`
+motion event (`AXIS_VSCROLL`) — the same event a mouse wheel produces — so two-finger
+trackpad drags and the wheel both map to one path. `TrackpadView` reports a two-pointer
+drag as a scroll delta; M4 wires it through.
 
 ## 6. Migration — incremental, app stays runnable at every step
 
@@ -112,8 +125,9 @@ packages now; Gradle modules are extracted once the structure has settled.
    taskbar + app drawer. The renderer draws this `UiScreen` instead of the hand-drawn
    GL quads; cursor clicks dispatch into it. Proves Option C end-to-end and is the
    visible "looks like DeX" win.
-2. **Extract `:glasses`.** Move head tracking + the native build into a library — it is
-   already isolated, lowest risk.
+2. **Extract `:tracking` + `:viture`.** Move head tracking behind a vendor-neutral
+   `HeadTracker` interface (`:tracking`); the VITURE SDK + native build become `:viture`,
+   one implementation. Already isolated, lowest risk. See §10.
 3. **Extract `:spatial`.** Pull `Camera`, `Surface3D`, `DisplayScreen` / `AppScreen` /
    `UiScreen`, `ScreenLayout`, `Scene` out of `WorkspaceRenderer`; the renderer becomes
    a thin `Scene` driver.
@@ -204,3 +218,24 @@ bottom:
 App launching lives entirely in the in-glasses app drawer, so the phone no longer shows
 an app list. Before Shizuku is set up, the panel shows the setup banner instead of the
 toolbar.
+
+## 10. Vendor-agnostic — any display, pluggable trackers
+
+VSpace must not be welded to the VITURE SDK. Two capabilities, independent:
+
+- **An external display.** The workspace `Presentation` runs on *any* connected external
+  display — no SDK needed. With only a display, VSpace still gives the full desktop:
+  multiple screens, taskbar, app drawer, cursor — in **PINNED** view (the desktop locked
+  to the display).
+- **Head tracking.** An *optional* capability behind the `HeadTracker` interface
+  (`:tracking`) — `start()`, `stop()`, `recenter()`, a pose stream. `:viture` implements
+  it with the VITURE SDK; other glasses are other implementations (`:xreal`, …). The app
+  selects whichever provider matches the connected device.
+
+**Graceful degradation:** the `Camera`'s **FREE** mode (world-locked desktop) needs a
+live `HeadTracker`. With none — a plain monitor, or unsupported glasses — the view-mode
+toggle offers PINNED only. Everything else — multi-screen layouts, desktop, drawer,
+cursor, input — is unchanged.
+
+Only `:app` knows VITURE exists; it composes a provider in, and the rest of VSpace sees
+just the `HeadTracker` interface and "an external display."
