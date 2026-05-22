@@ -113,6 +113,30 @@ tree (same `Theme.DeviceDefault` styling as the taskbar), shown/hidden via
 
 ---
 
+## Auto-hide / always-show
+
+The bar's visibility is a user choice, stored in [`WorkspaceSettings`](SETTINGS.md):
+
+- **Always shown** (default) — current behaviour: the bar sits at the bottom edge of the
+  workspace permanently, the desktop area reserves `TASKBAR_RESERVE` (currently 8.5% of
+  the desktop height) for it.
+- **Auto-hide** — the bar collapses to a thin reveal strip (a couple of dp tall) along
+  the bottom edge. It animates up to full height when the cursor enters a hot-zone near
+  the bottom of the workspace (or while the quick-settings panel is open), and slides
+  back down once the cursor leaves it and the panel is closed. The desktop area expands
+  to the full render band when the bar is collapsed, so app windows can use the extra
+  room.
+
+A toggle in the [settings screen](SETTINGS.md) plus a long-press menu item on the bar
+itself ("Auto-hide taskbar") flip between the two modes.
+
+**Touch points.** `WorkspaceSettings` (new `taskbarVisibility` enum); `DesktopPresentation`
+(reveal-strip view + slide animation, cursor-Y listener); `AppWindow.layout`
+(`TASKBAR_RESERVE` switches between the current value and 0 based on the setting); the
+settings screen.
+
+---
+
 ## Build order
 
 1. Restructure `buildTaskbar()` into the three-zone layout, all buttons present (most as

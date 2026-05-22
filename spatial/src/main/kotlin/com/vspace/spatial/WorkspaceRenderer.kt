@@ -96,6 +96,9 @@ class WorkspaceRenderer(
     @Volatile private var cursorY = 0f
     @Volatile private var cursorClickPending = false
     private var cursorFlashFrames = 0
+
+    /** Last time the touchpad sent any cursor-affecting input; drives the idle hide. */
+    @Volatile private var lastInputAtMs: Long = android.os.SystemClock.uptimeMillis()
     private var surfaceAspect = 1.78f
 
     @Volatile private var captureRequested = false
@@ -154,17 +157,20 @@ class WorkspaceRenderer(
     /** Accumulate a scroll delta (fraction of the touchpad height). Safe from any thread. */
     fun requestScroll(dyFraction: Float) {
         pendingScroll += dyFraction
+        noteInput()
     }
 
     /** Begin a window drag — grabs whatever window the cursor is over. Any thread. */
     fun beginDrag() {
         dragBeginPending = true
         dragActive = true
+        noteInput()
     }
 
     /** End the window drag. Safe to call from any thread. */
     fun endDrag() {
         dragActive = false
+        noteInput()
     }
 
     /**
@@ -179,11 +185,18 @@ class WorkspaceRenderer(
     fun moveCursor(dxFraction: Float, dyFraction: Float) {
         cursorX = (cursorX + dxFraction * CURSOR_SENSITIVITY).coerceIn(-1f, 1f)
         cursorY = (cursorY - dyFraction * CURSOR_SENSITIVITY).coerceIn(-1f, 1f)
+        noteInput()
     }
 
     /** Register a cursor click. Safe to call from any thread. */
     fun cursorClick() {
         cursorClickPending = true
+        noteInput()
+    }
+
+    /** Bump the idle timer — any touchpad activity wakes the cursor. */
+    private fun noteInput() {
+        lastInputAtMs = android.os.SystemClock.uptimeMillis()
     }
 
     /**
@@ -587,6 +600,11 @@ class WorkspaceRenderer(
 
     /** Draw the touchpad cursor — an arrow pointer — as a flat overlay on top of everything. */
     private fun drawCursor() {
+        // Hide the cursor after CURSOR_IDLE_TIMEOUT_MS of no touchpad input — any move /
+        // scroll / click / drag bumps lastInputAtMs and brings it back.
+        if (android.os.SystemClock.uptimeMillis() - lastInputAtMs > CURSOR_IDLE_TIMEOUT_MS) {
+            return
+        }
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glUseProgram(cursorProgram)
 
@@ -940,6 +958,9 @@ class WorkspaceRenderer(
         const val CURSOR_SCALE = 0.0281f
         const val CURSOR_SENSITIVITY = 2.6f
         const val CURSOR_FLASH_FRAMES = 12
+
+        /** How long with no touchpad input before the cursor is hidden. */
+        const val CURSOR_IDLE_TIMEOUT_MS = 5_000L
 
         /** Scroll units (AXIS_VSCROLL) per full touchpad-height of two-finger drag. */
         const val SCROLL_SENSITIVITY = 12f

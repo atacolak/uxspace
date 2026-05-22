@@ -50,6 +50,8 @@ the toolbar or a row under the status banner. It holds:
 
 - the wallpaper picker (preset grid + "Choose from device"),
 - the display-mode selector (radio list),
+- **taskbar visibility** — always-show (default) vs auto-hide (see
+  [TASKBAR.md](TASKBAR.md)),
 - room to grow — screen-size default, theme colours ([[VSpaceTheme]]), etc.
 
 It is plain phone UI (no glasses needed), so it can be a normal `Activity` or a
