@@ -3,6 +3,7 @@ package com.vspace.spatial
 import android.app.Presentation
 import android.content.Context
 import android.view.Display
+import android.view.Surface
 import kotlin.math.abs
 
 /**
@@ -40,6 +41,21 @@ object WorkspaceController {
     @Volatile
     var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
 
+    /**
+     * Creates a *trusted* virtual display rendering into the given surface and returns its id
+     * (or `null` on failure). A trusted display is created through Shizuku's shell-uid helper;
+     * it is what lets a launched app keep its splash-screen / new-task launches on the
+     * workspace instead of escaping to the phone. Set by the app at startup.
+     */
+    @Volatile
+    var createVirtualDisplay: (
+        (name: String, width: Int, height: Int, densityDpi: Int, surface: Surface) -> Int?
+    )? = null
+
+    /** Releases a virtual display created via [createVirtualDisplay]. Set by the app at startup. */
+    @Volatile
+    var releaseVirtualDisplay: ((displayId: Int) -> Unit)? = null
+
     /** Injects a tap into a launched app's display. Set by the app at startup. */
     @Volatile
     var appTap: ((displayId: Int, x: Int, y: Int) -> Unit)? = null
@@ -64,16 +80,10 @@ object WorkspaceController {
     var onAppClosed: ((packageName: String) -> Unit)? = null
 
     @Volatile
-    private var appsHiddenState = false
-
-    @Volatile
     private var drawerOpenState = false
 
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
-
-    /** Whether the launched app windows are currently minimised. */
-    val appsHidden: Boolean get() = appsHiddenState
 
     /** Whether the app drawer is currently open. */
     val isDrawerOpen: Boolean get() = drawerOpenState
@@ -83,7 +93,6 @@ object WorkspaceController {
 
     internal fun register(renderer: WorkspaceRenderer) {
         this.renderer = renderer
-        appsHiddenState = false
         drawerOpenState = false
         renderer.setViewMode(viewMode)
         renderer.setScreenBand(screenBandState)
@@ -105,21 +114,20 @@ object WorkspaceController {
         return true
     }
 
-    /** Hide or restore the launched app windows (minimise / restore). */
-    fun setAppsHidden(hidden: Boolean) {
-        appsHiddenState = hidden
-        renderer?.setAppsHidden(hidden)
-    }
-
     /** Open or close the app-drawer overlay. */
     fun setDrawerOpen(open: Boolean) {
         drawerOpenState = open
         renderer?.setDrawerOpen(open)
     }
 
-    /** Restore a maximised app window to its normal framed size. */
-    fun restoreWindow() {
-        renderer?.restoreWindow()
+    /** Bring an app's window to the front, restoring it if minimised — a taskbar-icon tap. */
+    fun focusApp(packageName: String) {
+        renderer?.focusApp(packageName)
+    }
+
+    /** Un-maximise an app's window and raise it — a taskbar-icon double-tap. */
+    fun restoreApp(packageName: String) {
+        renderer?.restoreApp(packageName)
     }
 
     /** Begin / end a window drag — the touchpad reports a press-and-hold as a drag. */

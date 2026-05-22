@@ -100,7 +100,6 @@ class WorkspaceRenderer(
 
     @Volatile private var captureRequested = false
     @Volatile private var pendingScroll = 0f
-    @Volatile private var appsHidden = false
     @Volatile private var drawerOpen = false
 
     private var surfaceWidth = 0
@@ -166,11 +165,6 @@ class WorkspaceRenderer(
     /** End the window drag. Safe to call from any thread. */
     fun endDrag() {
         dragActive = false
-    }
-
-    /** Hide or restore launched app windows (minimise). Safe to call from any thread. */
-    fun setAppsHidden(hidden: Boolean) {
-        appsHidden = hidden
     }
 
     /**
@@ -335,11 +329,11 @@ class WorkspaceRenderer(
         }
 
         // Launched app windows — the window frame (chrome), then the app's content quad
-        // composited on top of it, inset within the border. Painter's order, so the content
-        // covers the frame's centre and the grey shows only as the border + title bar.
-        // Skipped while minimised.
-        if (!appsHidden && windows.isNotEmpty()) {
+        // composited on top of it, inset within the border. Drawn in list order, so the last
+        // window is on top; minimised windows are skipped.
+        if (windows.isNotEmpty()) {
             for (window in windows) {
+                if (window.minimized) continue
                 // The window frame (chrome) — drawn only when not maximised; a maximised app
                 // has no border or title bar.
                 if (window.state != AppWindow.State.MAXIMIZED) {
@@ -416,7 +410,7 @@ class WorkspaceRenderer(
     }
 
     private fun addWindow(request: AppRequest) {
-        // A single window for now; a second launch evicts (and closes) the first.
+        // Up to MAX_SCREENS windows; a further launch evicts (and closes) the oldest.
         if (windows.size >= MAX_SCREENS) {
             closeWindow(windows.first())
         }
@@ -437,6 +431,7 @@ class WorkspaceRenderer(
             "vspace-chrome-$id",
         )
         val window = AppWindow(content, chrome, request.label)
+        window.cascadeIndex = windows.size
         windows.add(window)
         relayout()
 
@@ -461,7 +456,7 @@ class WorkspaceRenderer(
                             glTasks.add { closeWindow(window) }
                         }
                     },
-                    onMinimize = { WorkspaceController.setAppsHidden(true) },
+                    onMinimize = { glTasks.add { window.minimized = true } },
                     onMaximize = { glTasks.add { toggleMaximize(window) } },
                     onClose = { glTasks.add { closeWindow(window) } },
                 )
@@ -473,15 +468,18 @@ class WorkspaceRenderer(
     private fun handleDrag() {
         if (dragBeginPending) {
             dragBeginPending = false
-            // Grab a window by its frame — the border or title bar, not the app content.
-            grabbed = windows.firstOrNull { w ->
-                w.state == AppWindow.State.NORMAL &&
+            // Grab the topmost window the cursor is over, by its frame — the border or title
+            // bar, not the app content — and raise it to the front.
+            grabbed = windows.asReversed().firstOrNull { w ->
+                !w.minimized &&
+                    w.state == AppWindow.State.NORMAL &&
                     cursorToRectPx(
                         w.frameX, w.frameY, w.frameZ, w.frameW, w.frameH, 1, 1,
                     ) != null &&
                     cursorToScreenPx(w.content) == null
             }
             grabbed?.let { w ->
+                raise(w)
                 val hit = cursorRayHit(w.frameZ)
                 if (hit != null) {
                     grabOffsetX = w.centerX - hit[0]
@@ -511,16 +509,35 @@ class WorkspaceRenderer(
         relayout()
     }
 
-    /**
-     * Restore a maximised window to its normal framed size — bound to a double-tap of the
-     * taskbar icon, since a maximised window has no title bar to restore from. Any thread.
-     */
-    fun restoreWindow() {
+    /** Move [window] to the front of the draw and hit-test order. GL thread only. */
+    private fun raise(window: AppWindow) {
+        if (windows.lastOrNull() === window) return
+        if (windows.remove(window)) windows.add(window)
+    }
+
+    /** Bring an app's window to the front, restoring it if minimised. Any thread. */
+    fun focusApp(packageName: String) {
         glTasks.add {
-            windows.firstOrNull { it.state == AppWindow.State.MAXIMIZED }?.let {
-                it.state = AppWindow.State.NORMAL
+            val w = windows.firstOrNull { it.packageName == packageName } ?: return@add
+            w.minimized = false
+            raise(w)
+        }
+    }
+
+    /**
+     * Un-maximise an app's window and bring it to the front — a maximised window has no
+     * title bar to restore from, so this is bound to a double-tap of the taskbar icon. Any
+     * thread.
+     */
+    fun restoreApp(packageName: String) {
+        glTasks.add {
+            val w = windows.firstOrNull { it.packageName == packageName } ?: return@add
+            w.minimized = false
+            if (w.state == AppWindow.State.MAXIMIZED) {
+                w.state = AppWindow.State.NORMAL
                 relayout()
             }
+            raise(w)
         }
     }
 
@@ -612,32 +629,34 @@ class WorkspaceRenderer(
             }
             return
         }
-        if (!appsHidden) {
-            for (window in windows) {
-                // The app content sits on top, inside the frame — try it first.
-                val contentPx = cursorToScreenPx(window.content)
-                if (contentPx != null) {
-                    if (window.content.displayId >= 0) {
-                        WorkspaceController.appTap?.invoke(
-                            window.content.displayId,
-                            contentPx[0].toInt(), contentPx[1].toInt(),
-                        )
-                    }
-                    return
-                }
-                // The surrounding frame — the title-bar buttons live in its view tree.
-                // A maximised window has no frame.
-                if (window.state != AppWindow.State.MAXIMIZED) {
-                    val framePx = cursorToRectPx(
-                        window.frameX, window.frameY, window.frameZ,
-                        window.frameW, window.frameH,
-                        AppWindow.FRAME_WIDTH_PX, AppWindow.FRAME_HEIGHT_PX,
+        // Topmost window first (windows is back-to-front), so a click lands on the window
+        // on top; a hit also raises that window to the front.
+        for (window in windows.asReversed()) {
+            if (window.minimized) continue
+            // The app content sits on top, inside the frame — try it first.
+            val contentPx = cursorToScreenPx(window.content)
+            if (contentPx != null) {
+                raise(window)
+                if (window.content.displayId >= 0) {
+                    WorkspaceController.appTap?.invoke(
+                        window.content.displayId,
+                        contentPx[0].toInt(), contentPx[1].toInt(),
                     )
-                    if (framePx != null) {
-                        val chrome = window.chrome
-                        mainHandler.post { chrome.dispatchTap(framePx[0], framePx[1]) }
-                        return
-                    }
+                }
+                return
+            }
+            // The surrounding frame — the title-bar buttons live in its view tree.
+            // A maximised window has no frame.
+            if (window.state != AppWindow.State.MAXIMIZED) {
+                val framePx = cursorToRectPx(
+                    window.frameX, window.frameY, window.frameZ,
+                    window.frameW, window.frameH,
+                    AppWindow.FRAME_WIDTH_PX, AppWindow.FRAME_HEIGHT_PX,
+                )
+                if (framePx != null) {
+                    val chrome = window.chrome
+                    mainHandler.post { chrome.dispatchTap(framePx[0], framePx[1]) }
+                    return
                 }
             }
         }
@@ -900,8 +919,8 @@ class WorkspaceRenderer(
         /** The render band cannot shrink below this fraction of the display. */
         const val MIN_SCREEN_BAND = 0.5f
 
-        /** A single launched app window for now. */
-        const val MAX_SCREENS = 1
+        /** Up to this many app windows open at once; a further launch evicts the oldest. */
+        const val MAX_SCREENS = 3
 
         /** Grace period between force-stopping a closed app and releasing its display. */
         const val CLOSE_RELEASE_DELAY_NANOS = 600_000_000L

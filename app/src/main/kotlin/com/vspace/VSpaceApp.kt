@@ -21,6 +21,12 @@ class VSpaceApp : Application() {
         WorkspaceController.drawerContent = { context, display ->
             DrawerPresentation(context, display)
         }
+        WorkspaceController.createVirtualDisplay = { name, width, height, dpi, surface ->
+            ShizukuManager.createVirtualDisplay(name, width, height, dpi, surface)
+        }
+        WorkspaceController.releaseVirtualDisplay = { displayId ->
+            ShizukuManager.releaseVirtualDisplay(displayId)
+        }
         WorkspaceController.appLauncher = { displayId, packageName, activityName ->
             ShizukuManager.launchApp(displayId, packageName, activityName)
         }

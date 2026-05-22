@@ -27,8 +27,14 @@ class AppWindow(
     var centerX: Float = 0f
     var centerY: Float = 0f
 
-    /** False until [layout] has first placed the window, so it opens centred. */
+    /** False until [layout] has first placed the window, so it opens at its cascade slot. */
     var placed: Boolean = false
+
+    /** Cascade slot — a new window opens offset down-right from the centre by this many steps. */
+    var cascadeIndex: Int = 0
+
+    /** Minimised — hidden from the workspace but still running; restored from the taskbar. */
+    var minimized: Boolean = false
 
     // The window frame quad (the chrome surface). The content quad's geometry lives on [content].
     var frameX: Float = 0f
@@ -78,10 +84,11 @@ class AppWindow(
             fw = fh * frameAspect
         }
 
-        // Opens centred; once placed, only a drag moves it.
+        // Opens at its cascade slot — offset down-right from the centre; a drag then moves it.
         if (!placed) {
-            centerX = 0f
-            centerY = (topY + bottomY) / 2f
+            centerX = cascadeIndex * (2f * desktopHalfWidth) * CASCADE_FRACTION
+            centerY = (topY + bottomY) / 2f -
+                cascadeIndex * (2f * desktopHalfHeight) * CASCADE_FRACTION
             placed = true
         }
         centerX = centerX.coerceIn(-desktopHalfWidth + fw / 2f, desktopHalfWidth - fw / 2f)
@@ -133,5 +140,8 @@ class AppWindow(
 
         /** A NORMAL (un-maximised) window's frame width, as a fraction of the available width. */
         private const val NORMAL_FRACTION = 0.66f
+
+        /** Each cascade step offsets a new window by this fraction of the desktop size. */
+        private const val CASCADE_FRACTION = 0.045f
     }
 }

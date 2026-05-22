@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.IBinder
 import android.util.Log
 import android.view.KeyEvent
+import android.view.Surface
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
@@ -143,6 +144,33 @@ object ShizukuManager {
         }
     }
 
+    /**
+     * Create a trusted virtual display rendering into [surface]; returns its id, or `null` if
+     * Shizuku is not ready or creation failed. Blocks on a binder round-trip — call off the
+     * main thread where possible.
+     */
+    fun createVirtualDisplay(
+        name: String,
+        width: Int,
+        height: Int,
+        densityDpi: Int,
+        surface: Surface,
+    ): Int? {
+        val helper = service
+        if (helper == null) {
+            Log.w(TAG, "createVirtualDisplay ignored — Shizuku not ready (state=$state)")
+            return null
+        }
+        return runCatching {
+            helper.createVirtualDisplay(name, width, height, densityDpi, surface)
+                .takeIf { it >= 0 }
+        }.onFailure { Log.e(TAG, "createVirtualDisplay failed", it) }.getOrNull()
+    }
+
+    /** Release a virtual display created via [createVirtualDisplay]. */
+    fun releaseVirtualDisplay(displayId: Int) =
+        onWorker { service?.releaseVirtualDisplay(displayId) }
+
     fun tap(displayId: Int, x: Int, y: Int) =
         onWorker { service?.tap(displayId, x, y) }
 
@@ -193,7 +221,7 @@ object ShizukuManager {
                     .daemon(false)
                     .processNameSuffix("shizuku")
                     .debuggable(false)
-                    .version(1),
+                    .version(2),
                 connection,
             )
         }.onFailure {

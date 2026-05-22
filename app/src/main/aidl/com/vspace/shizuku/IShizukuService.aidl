@@ -1,6 +1,8 @@
 // Interface to the helper that runs inside a Shizuku-spawned, ADB-shell-privileged process.
 package com.vspace.shizuku;
 
+import android.view.Surface;
+
 interface IShizukuService {
 
     // Transaction id Shizuku itself uses to tear the service down.
@@ -28,4 +30,15 @@ interface IShizukuService {
 
     /** Whether the given display currently has an activity on it. */
     boolean displayHasActivity(int displayId) = 8;
+
+    /**
+     * Create a *trusted* virtual display rendering into surface. Created from this shell-uid
+     * process so the TRUSTED flag is honoured — only a trusted display lets a launched app
+     * follow its own splash-screen / new-task launches instead of escaping to the phone.
+     * Returns the new display's id, or -1 on failure.
+     */
+    int createVirtualDisplay(String name, int width, int height, int densityDpi, in Surface surface) = 9;
+
+    /** Release a virtual display previously created via createVirtualDisplay. */
+    void releaseVirtualDisplay(int displayId) = 10;
 }

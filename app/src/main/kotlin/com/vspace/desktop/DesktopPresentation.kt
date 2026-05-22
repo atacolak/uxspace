@@ -27,7 +27,7 @@ import java.util.Locale
 
 /**
  * The desktop shown on the workspace's back plane — VSpace's DeX-style home: a wallpaper and
- * a bottom taskbar with an app-drawer launcher, the running-app icon, and a clock.
+ * a bottom taskbar with an app-drawer launcher, an icon per open app window, and a clock.
  *
  * It is a real Android view hierarchy on `Theme.DeviceDefault`, so on a Samsung device the
  * widgets are styled as One UI. The app drawer is a separate overlay ([DrawerPresentation])
@@ -42,8 +42,8 @@ class DesktopPresentation(
     private lateinit var clock: TextView
     private lateinit var runningApps: LinearLayout
 
-    /** Package of the app currently shown in the taskbar, or null if none is running. */
-    private var runningPackage: String? = null
+    /** Taskbar icons for the open app windows, keyed by package, in launch order. */
+    private val runningIcons = LinkedHashMap<String, View>()
 
     /** Refreshes the taskbar clock; re-posts itself while the desktop is shown. */
     private val clockTick = object : Runnable {
@@ -66,10 +66,10 @@ class DesktopPresentation(
         // The taskbar reflects the launched app: shown when one launches, cleared when its
         // window closes (from the title bar, or because Back emptied it).
         WorkspaceController.onAppLaunched = { packageName, label ->
-            mainHandler.post { showRunningApp(packageName, label) }
+            mainHandler.post { addRunningApp(packageName, label) }
         }
         WorkspaceController.onAppClosed = { packageName ->
-            mainHandler.post { onAppClosed(packageName) }
+            mainHandler.post { removeRunningApp(packageName) }
         }
     }
 
@@ -156,14 +156,12 @@ class DesktopPresentation(
     }
 
     /**
-     * Show the launched app in the taskbar — its icon toggles minimise / restore, a double
-     * tap restores a maximised window. Closing is done from the window's own title bar.
+     * Add the launched app to the taskbar — its icon raises (and un-minimises) the window on
+     * a tap, and restores a maximised window to its frame on a double tap. Closing is done
+     * from the window's own title bar. A no-op if the app already has an icon.
      */
-    private fun showRunningApp(packageName: String, label: String) {
-        if (!::runningApps.isInitialized) return
-        // One window at a time today, so the strip shows the current app.
-        runningApps.removeAllViews()
-        runningPackage = packageName
+    private fun addRunningApp(packageName: String, label: String) {
+        if (!::runningApps.isInitialized || runningIcons.containsKey(packageName)) return
         val icon = ImageView(context)
         icon.setImageDrawable(appIcon(packageName))
         icon.contentDescription = label
@@ -171,22 +169,23 @@ class DesktopPresentation(
             context,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    toggleMinimized(icon)
+                    WorkspaceController.focusApp(packageName)
                     return true
                 }
 
                 override fun onDoubleTap(e: MotionEvent): Boolean {
-                    WorkspaceController.restoreWindow()
+                    WorkspaceController.restoreApp(packageName)
                     return true
                 }
             },
         )
         // Always consume, so the icon keeps receiving events after the down — otherwise the
         // gesture detector never sees the up and single/double taps are lost.
-        icon.setOnTouchListener { _, e ->
-            gestures.onTouchEvent(e)
+        icon.setOnTouchListener { v, e ->
+            if (gestures.onTouchEvent(e)) v.performClick()
             true
         }
+        runningIcons[packageName] = icon
         runningApps.addView(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },
@@ -197,19 +196,10 @@ class DesktopPresentation(
         context.packageManager.getApplicationIcon(packageName)
     }.getOrNull()
 
-    /** Tap the running-app icon: minimise the window, or restore it. */
-    private fun toggleMinimized(icon: ImageView) {
-        val hidden = !WorkspaceController.appsHidden
-        WorkspaceController.setAppsHidden(hidden)
-        icon.alpha = if (hidden) 0.4f else 1f
-    }
-
-    /** Clear the taskbar entry when its window is closed. */
-    private fun onAppClosed(packageName: String) {
-        if (packageName == runningPackage && ::runningApps.isInitialized) {
-            runningApps.removeAllViews()
-            runningPackage = null
-        }
+    /** Remove an app's taskbar icon when its window is closed. */
+    private fun removeRunningApp(packageName: String) {
+        if (!::runningApps.isInitialized) return
+        runningIcons.remove(packageName)?.let { runningApps.removeView(it) }
     }
 
     private fun clockText(): String =
