@@ -1,4 +1,4 @@
-package com.vspace.workspace
+package com.vspace.spatial
 
 import android.app.Presentation
 import android.content.Context

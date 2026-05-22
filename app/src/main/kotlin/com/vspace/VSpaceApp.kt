@@ -1,9 +1,9 @@
 package com.vspace
 
 import android.app.Application
+import com.vspace.desktop.DesktopPresentation
 import com.vspace.shizuku.ShizukuManager
-import com.vspace.workspace.DesktopPresentation
-import com.vspace.workspace.WorkspaceController
+import com.vspace.spatial.WorkspaceController
 
 /**
  * Application entry point — initialises Shizuku detection and wires the workspace's

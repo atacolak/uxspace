@@ -1,4 +1,4 @@
-package com.vspace.workspace
+package com.vspace.spatial
 
 import android.content.Context
 import android.graphics.SurfaceTexture

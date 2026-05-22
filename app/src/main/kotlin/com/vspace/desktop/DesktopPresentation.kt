@@ -1,4 +1,4 @@
-package com.vspace.workspace
+package com.vspace.desktop
 
 import android.app.Presentation
 import android.content.Context
@@ -27,6 +27,7 @@ import android.widget.TextView
 import com.vspace.R
 import com.vspace.apps.InstalledApp
 import com.vspace.apps.InstalledApps
+import com.vspace.spatial.WorkspaceController
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

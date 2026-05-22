@@ -20,9 +20,9 @@ import com.vspace.databinding.ActivityMainBinding
 import com.vspace.glasses.GlassesDisplay
 import com.vspace.shizuku.ShizukuManager
 import com.vspace.shizuku.ShizukuManager.State
-import com.vspace.workspace.WorkspaceController
-import com.vspace.workspace.WorkspacePresentation
-import com.vspace.workspace.WorkspaceRenderer
+import com.vspace.spatial.WorkspaceController
+import com.vspace.spatial.WorkspacePresentation
+import com.vspace.spatial.WorkspaceRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
