@@ -1,9 +1,12 @@
 package com.vspace
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.hardware.usb.UsbManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,8 +17,11 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import com.vspace.databinding.ActivityMainBinding
 import com.vspace.glasses.GlassesDisplay
+import com.vspace.privileged.PairingNotifier
 import com.vspace.privileged.PrivilegedService
 import com.vspace.privileged.PrivilegedService.State
 import com.vspace.spatial.WorkspaceController
@@ -53,6 +59,15 @@ class MainActivity : ComponentActivity() {
 
     private val privilegeListener: () -> Unit = { runOnUiThread { renderStatus() } }
 
+    /**
+     * Result-launcher for POST_NOTIFICATIONS (API 33+). The notification path is the
+     * primary pairing UX; if the user denies, the form below the wizard still works as a
+     * fallback so the activity ignores the result.
+     */
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* ignored — the form fallback works without notifications */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -83,7 +98,16 @@ class MainActivity : ComponentActivity() {
         PrivilegedService.addListener(privilegeListener)
         // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
+        requestNotificationPermissionIfNeeded()
         renderStatus()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val perm = Manifest.permission.POST_NOTIFICATIONS
+        if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+            requestNotificationPermission.launch(perm)
+        }
     }
 
     /**
@@ -194,6 +218,13 @@ class MainActivity : ComponentActivity() {
             !glassesShowing -> showScene(showWizard = false, showWaiting = true)
             else -> showScene(showWizard = false, showWaiting = false)
         }
+        // The RemoteInput pairing notification is the primary path — post it when the user
+        // is at the pair step, take it down otherwise.
+        if (PrivilegedService.state == State.NEEDS_PAIRING) {
+            PairingNotifier.showPairingPrompt(this)
+        } else {
+            PairingNotifier.cancel(this)
+        }
     }
 
     private fun showWizard() {
@@ -260,7 +291,9 @@ class MainActivity : ComponentActivity() {
     ) {
         binding.wizardTitle.setText(title)
         binding.wizardMessage.setText(message)
-        binding.pairingCode.visibility = if (codeFieldVisible) View.VISIBLE else View.GONE
+        val pairingVisibility = if (codeFieldVisible) View.VISIBLE else View.GONE
+        binding.pairingCode.visibility = pairingVisibility
+        binding.pairingPort.visibility = pairingVisibility
         if (actionLabel == null) {
             binding.setupButton.visibility = View.GONE
         } else {
@@ -295,12 +328,13 @@ class MainActivity : ComponentActivity() {
 
     private fun startPairing() {
         val code = binding.pairingCode.text.toString().trim()
-        if (code.length != PAIRING_CODE_LENGTH) {
-            Toast.makeText(this, R.string.privilege_pairing_hint, Toast.LENGTH_SHORT).show()
+        val port = binding.pairingPort.text.toString().trim().toIntOrNull()
+        if (code.length != PAIRING_CODE_LENGTH || port == null || port !in 1..65535) {
+            Toast.makeText(this, R.string.privilege_pair_invalid, Toast.LENGTH_SHORT).show()
             return
         }
         binding.setupButton.isEnabled = false
-        PrivilegedService.activate(code) { ok ->
+        PrivilegedService.activate(code, pairingPort = port) { ok ->
             runOnUiThread {
                 if (!ok) {
                     binding.setupButton.isEnabled = true
@@ -311,6 +345,7 @@ class MainActivity : ComponentActivity() {
                     ).show()
                 } else {
                     binding.pairingCode.text.clear()
+                    binding.pairingPort.text.clear()
                 }
             }
         }

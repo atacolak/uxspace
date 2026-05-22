@@ -9,6 +9,14 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!--
+      The wireless-debugging "Pair device with a pairing code" dialog stops advertising its
+      mDNS service the moment it backgrounds. To pair without leaving the dialog, VSpace
+      posts a notification with a RemoteInput field — the user types the code in the
+      notification shade *over* the dialog. Needs POST_NOTIFICATIONS on Android 13+.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
       VSpace lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->
@@ -65,6 +73,18 @@
             android:authorities="com.vspace.privileged"
             android:enabled="true"
             android:exported="true" />
+
+        <!--
+          Catches the RemoteInput pairing code typed into PairingNotifier's notification.
+          Not exported — only VSpace's own notification can deliver into it.
+        -->
+        <receiver
+            android:name=".privileged.PairingInputReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.vspace.privileged.SUBMIT_PAIRING_CODE" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

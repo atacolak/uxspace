@@ -16,7 +16,7 @@
     <string name="privilege_msg_unsupported">Needs Android 11 or newer. VSpace activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
     <string name="privilege_msg_dev_options">Open Settings → About phone → Software information, then tap “Build number” seven times until it confirms Developer options is unlocked. Return here when done.</string>
     <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — VSpace reconnects automatically.</string>
-    <string name="privilege_msg_pair">In Wireless Debugging, tap “Pair device with a pairing code”, then enter the 6 digits here. VSpace pairs once; the device trusts it thereafter.</string>
+    <string name="privilege_msg_pair">In Wireless Debugging on this phone, tap “Pair device with a pairing code”. The dialog shows a 6-digit code — pull down the notification shade *over the dialog* and type the code into the VSpace pairing notification. Don\'t leave the dialog: VSpace pairs while it\'s still in front. The fields below are a fallback if your shade doesn\'t cooperate — they need the code *and* the port from the dialog.</string>
     <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
     <string name="privilege_msg_connecting">Connecting to the local ADB service…</string>
     <string name="privilege_msg_starting">Starting the privileged helper…</string>
@@ -26,6 +26,14 @@
     <string name="privilege_action_open_developer_settings">Open Developer settings</string>
     <string name="privilege_action_pair">Pair</string>
     <string name="privilege_pairing_hint">6-digit pairing code</string>
+    <string name="privilege_pairing_port_hint">Port (number after the colon)</string>
+    <string name="privilege_pair_invalid">Enter the 6-digit code and the port from the pairing dialog.</string>
+
+    <!-- Pairing notification (RemoteInput) — see com.vspace.privileged.PairingNotifier. -->
+    <string name="privilege_notification_channel">VSpace pairing</string>
+    <string name="privilege_notification_channel_desc">Lets you enter the wireless-debugging pairing code from the notification shade.</string>
+    <string name="privilege_notification_title">VSpace pairing</string>
+    <string name="privilege_notification_text">Type the 6-digit code from the Wireless Debugging pair dialog. Pull this shade down over the dialog and answer here — VSpace pairs while the dialog is still in front.</string>
 
     <!-- Waiting scene — paired, but the glasses are not plugged in. -->
     <string name="waiting_for_glasses">Connect your VITURE glasses to start.</string>
