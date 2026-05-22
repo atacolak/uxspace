@@ -1,135 +1,219 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+  Three scenes swapped by MainActivity:
+    wizardScene — wireless-debugging setup card (splash image as a hero banner).
+    waitingScene — paired but no glasses connected; centered "connect glasses" message.
+    mainScene — paired AND glasses connected: the existing toolbar + trackpad.
+
+  fitsSystemWindows on the root inset-pads the content so the wizard title is no longer
+  drawn under the status bar.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg"
-    android:orientation="vertical">
+    android:fitsSystemWindows="true">
 
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@color/surface"
-        android:padding="16dp"
-        android:text="@string/privilege_connecting"
-        android:textColor="@color/text"
-        android:textSize="14sp" />
-
-    <!--
-      6-digit code from the device's "Pair device with pairing code" dialog. Visible only
-      while PrivilegedService is in the NEEDS_PAIRING state — see MainActivity.renderStatus.
-    -->
-    <EditText
-        android:id="@+id/pairingCode"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="16dp"
-        android:layout_marginTop="12dp"
-        android:background="@color/surface"
-        android:hint="@string/privilege_pairing_hint"
-        android:inputType="number"
-        android:maxLength="6"
-        android:padding="14dp"
-        android:textColor="@color/text"
-        android:textColorHint="@color/text_dim"
-        android:visibility="gone" />
-
-    <Button
-        android:id="@+id/setupButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="16dp"
-        android:layout_marginTop="12dp"
-        android:visibility="gone" />
-
-    <!-- Toolbar: view mode, capture, screen layout, keyboard. -->
+    <!-- Wizard scene — wireless-debugging activation. -->
     <LinearLayout
-        android:id="@+id/toolbar"
+        android:id="@+id/wizardScene"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_margin="16dp"
-        android:background="@color/surface"
-        android:orientation="horizontal"
-        android:padding="4dp">
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
 
-        <ImageButton
-            android:id="@+id/viewModeButton"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="View mode"
-            android:padding="14dp"
+        <ImageView
+            android:id="@+id/wizardSplash"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
+            android:contentDescription="@null"
             android:scaleType="fitCenter"
-            android:src="@drawable/ic_pin" />
+            android:src="@drawable/splash_bg" />
 
-        <ImageButton
-            android:id="@+id/captureButton"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
             android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="Capture workspace"
-            android:padding="14dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_capture" />
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="24dp">
 
-        <ImageButton
-            android:id="@+id/layoutButton"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="Screen layout"
-            android:padding="14dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_layout" />
+            <TextView
+                android:id="@+id/wizardTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:gravity="center"
+                android:textColor="@color/text"
+                android:textSize="20sp"
+                android:textStyle="bold" />
 
-        <ImageButton
-            android:id="@+id/screenHeightButton"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="Screen size"
-            android:padding="14dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_screen_height" />
+            <TextView
+                android:id="@+id/wizardMessage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="20dp"
+                android:gravity="center"
+                android:textColor="@color/text_dim"
+                android:textSize="14sp" />
 
-        <ImageButton
-            android:id="@+id/keyboardButton"
-            android:layout_width="0dp"
-            android:layout_height="56dp"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="Keyboard"
-            android:padding="14dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_keyboard" />
+            <EditText
+                android:id="@+id/pairingCode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:background="@color/surface"
+                android:hint="@string/privilege_pairing_hint"
+                android:inputType="number"
+                android:maxLength="6"
+                android:padding="14dp"
+                android:textColor="@color/text"
+                android:textColorHint="@color/text_dim"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/setupButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
+
+        </LinearLayout>
     </LinearLayout>
 
-    <com.vspace.input.TrackpadView
-        android:id="@+id/trackpad"
+    <!-- Waiting scene — paired, no glasses yet. -->
+    <LinearLayout
+        android:id="@+id/waitingScene"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginHorizontal="16dp"
-        android:layout_marginBottom="16dp"
-        android:background="@color/surface" />
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
 
-    <!-- Raised by the keyboard toolbar button; the system IME types into it. -->
-    <EditText
-        android:id="@+id/keyboardField"
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter"
+            android:src="@drawable/splash_bg" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:text="@string/waiting_for_glasses"
+                android:textColor="@color/text"
+                android:textSize="16sp" />
+
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Main scene — touchpad + toolbar, shown only when paired AND glasses connected. -->
+    <LinearLayout
+        android:id="@+id/mainScene"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="16dp"
-        android:layout_marginBottom="16dp"
-        android:background="@color/surface"
-        android:hint="@string/keyboard_hint"
-        android:inputType="textNoSuggestions"
-        android:padding="14dp"
-        android:textColor="@color/text"
-        android:textColorHint="@color/text_dim"
-        android:visibility="gone" />
+        android:layout_height="match_parent"
+        android:background="@color/bg"
+        android:orientation="vertical"
+        android:visibility="gone">
 
-</LinearLayout>
+        <LinearLayout
+            android:id="@+id/toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="16dp"
+            android:background="@color/surface"
+            android:orientation="horizontal"
+            android:padding="4dp">
+
+            <ImageButton
+                android:id="@+id/viewModeButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="View mode"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_pin" />
+
+            <ImageButton
+                android:id="@+id/captureButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="Capture workspace"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_capture" />
+
+            <ImageButton
+                android:id="@+id/layoutButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="Screen layout"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_layout" />
+
+            <ImageButton
+                android:id="@+id/screenHeightButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="Screen size"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_screen_height" />
+
+            <ImageButton
+                android:id="@+id/keyboardButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="Keyboard"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_keyboard" />
+        </LinearLayout>
+
+        <com.vspace.input.TrackpadView
+            android:id="@+id/trackpad"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="16dp"
+            android:background="@color/surface" />
+
+        <!-- Raised by the keyboard toolbar button; the system IME types into it. -->
+        <EditText
+            android:id="@+id/keyboardField"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="16dp"
+            android:background="@color/surface"
+            android:hint="@string/keyboard_hint"
+            android:inputType="textNoSuggestions"
+            android:padding="14dp"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_dim"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
+</FrameLayout>

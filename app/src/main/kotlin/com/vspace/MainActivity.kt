@@ -25,13 +25,15 @@ import com.vspace.spatial.WorkspaceRenderer
 /**
  * The phone-side control panel — VSpace's input device.
  *
- * It is a toolbar (view mode, capture, screen layout, keyboard) over a touchpad; the system
- * keyboard rises on demand. Apps are launched from the in-glasses app drawer, so the phone
- * shows no app list — the glasses show the workspace, the phone drives it.
+ * One activity, three scenes swapped by state:
  *
- * A setup card sits on top until the [PrivilegedService] is `READY`: it explains where the
- * user is in the wireless-debugging activation flow and offers the next action (open
- * Developer settings, or enter the 6-digit pairing code).
+ *  - **Wizard** (`PrivilegedService.state != READY`) walks the user through wireless-debugging
+ *    activation: turn on Wireless Debugging, then enter the 6-digit pairing code. The splash
+ *    image sits at the top as a hero banner.
+ *  - **Waiting** (paired but no glasses) — centered "Connect your VITURE glasses".
+ *  - **Main** (paired + glasses connected) — the existing toolbar (view mode, capture, screen
+ *    layout, screen size, keyboard) over the trackpad. The phone shows no app list — the
+ *    glasses do, and the phone drives them.
  */
 class MainActivity : ComponentActivity() {
 
@@ -81,6 +83,7 @@ class MainActivity : ComponentActivity() {
         PrivilegedService.addListener(privilegeListener)
         // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
+        renderStatus()
     }
 
     /**
@@ -120,7 +123,7 @@ class MainActivity : ComponentActivity() {
         if (WorkspaceController.isRunning) {
             WorkspaceController.capture()
         } else {
-            Toast.makeText(this, R.string.status_no_glasses, Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.waiting_for_glasses, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -157,7 +160,7 @@ class MainActivity : ComponentActivity() {
     private fun displayManager(): DisplayManager =
         getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
 
-    /** Show the workspace on the glasses while they are connected; refresh the banner. */
+    /** Show the workspace on the glasses while they are connected; refresh the active scene. */
     private fun syncGlasses() {
         val display = GlassesDisplay.find(this)
         if (display != null) {
@@ -181,57 +184,87 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Setup card content depending on where we are in the wireless-debugging flow; once
-     * `READY`, the card collapses to the plain glasses-connection status.
+     * Pick which of the three scenes is visible from [PrivilegedService.state] and whether the
+     * glasses are connected, and populate the wizard with its current step.
      */
     private fun renderStatus() {
-        when (PrivilegedService.state) {
-            State.UNSUPPORTED ->
-                setupBanner(R.string.privilege_unsupported, actionLabel = null, codeFieldVisible = false)
-            State.NEEDS_WIRELESS_DEBUGGING ->
-                setupBanner(
-                    R.string.privilege_needs_wireless_debugging,
-                    R.string.privilege_action_open_developer_settings,
-                    codeFieldVisible = false,
-                )
-            State.NEEDS_PAIRING ->
-                setupBanner(
-                    R.string.privilege_needs_pairing,
-                    R.string.privilege_action_pair,
-                    codeFieldVisible = true,
-                )
-            State.DISCOVERING ->
-                setupBanner(R.string.privilege_discovering, actionLabel = null, codeFieldVisible = false)
-            State.CONNECTING ->
-                setupBanner(R.string.privilege_connecting, actionLabel = null, codeFieldVisible = false)
-            State.STARTING ->
-                setupBanner(R.string.privilege_starting, actionLabel = null, codeFieldVisible = false)
-            State.READY -> {
-                binding.setupButton.visibility = View.GONE
-                binding.pairingCode.visibility = View.GONE
-                binding.statusText.setText(
-                    if (presentation?.isShowing == true) {
-                        R.string.status_ready
-                    } else {
-                        R.string.status_no_glasses
-                    },
-                )
-            }
+        val glassesShowing = presentation?.isShowing == true
+        when {
+            PrivilegedService.state != State.READY -> showWizard()
+            !glassesShowing -> showScene(showWizard = false, showWaiting = true)
+            else -> showScene(showWizard = false, showWaiting = false)
         }
     }
 
-    private fun setupBanner(status: Int, actionLabel: Int?, codeFieldVisible: Boolean) {
-        binding.statusText.setText(status)
+    private fun showWizard() {
+        showScene(showWizard = true, showWaiting = false)
+        when (PrivilegedService.state) {
+            State.UNSUPPORTED -> populateWizard(
+                R.string.privilege_title_unsupported,
+                R.string.privilege_msg_unsupported,
+                actionLabel = null,
+                codeFieldVisible = false,
+            )
+            State.NEEDS_WIRELESS_DEBUGGING -> populateWizard(
+                R.string.privilege_title_wireless_debugging,
+                R.string.privilege_msg_wireless_debugging,
+                actionLabel = R.string.privilege_action_open_developer_settings,
+                codeFieldVisible = false,
+            )
+            State.NEEDS_PAIRING -> populateWizard(
+                R.string.privilege_title_pair,
+                R.string.privilege_msg_pair,
+                actionLabel = R.string.privilege_action_pair,
+                codeFieldVisible = true,
+            )
+            State.DISCOVERING -> populateWizard(
+                R.string.privilege_title_working,
+                R.string.privilege_msg_discovering,
+                actionLabel = null,
+                codeFieldVisible = false,
+            )
+            State.CONNECTING -> populateWizard(
+                R.string.privilege_title_working,
+                R.string.privilege_msg_connecting,
+                actionLabel = null,
+                codeFieldVisible = false,
+            )
+            State.STARTING -> populateWizard(
+                R.string.privilege_title_working,
+                R.string.privilege_msg_starting,
+                actionLabel = null,
+                codeFieldVisible = false,
+            )
+            State.READY -> Unit // showWizard would not have been called
+        }
+    }
+
+    private fun showScene(showWizard: Boolean, showWaiting: Boolean) {
+        binding.wizardScene.visibility = if (showWizard) View.VISIBLE else View.GONE
+        binding.waitingScene.visibility = if (showWaiting) View.VISIBLE else View.GONE
+        binding.mainScene.visibility =
+            if (!showWizard && !showWaiting) View.VISIBLE else View.GONE
+    }
+
+    private fun populateWizard(
+        title: Int,
+        message: Int,
+        actionLabel: Int?,
+        codeFieldVisible: Boolean,
+    ) {
+        binding.wizardTitle.setText(title)
+        binding.wizardMessage.setText(message)
         binding.pairingCode.visibility = if (codeFieldVisible) View.VISIBLE else View.GONE
         if (actionLabel == null) {
             binding.setupButton.visibility = View.GONE
         } else {
             binding.setupButton.visibility = View.VISIBLE
             binding.setupButton.setText(actionLabel)
+            binding.setupButton.isEnabled = true
         }
     }
 
-    /** The setup card's button: action depends on the current state. */
+    /** The wizard button: action depends on the current state. */
     private fun onSetupAction() {
         when (PrivilegedService.state) {
             State.NEEDS_WIRELESS_DEBUGGING -> openDeveloperSettings()
@@ -257,8 +290,8 @@ class MainActivity : ComponentActivity() {
         binding.setupButton.isEnabled = false
         PrivilegedService.activate(code) { ok ->
             runOnUiThread {
-                binding.setupButton.isEnabled = true
                 if (!ok) {
+                    binding.setupButton.isEnabled = true
                     Toast.makeText(
                         this,
                         R.string.privilege_pair_failed,

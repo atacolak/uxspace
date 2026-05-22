@@ -5,23 +5,28 @@
     <string name="capture_button">Capture workspace</string>
     <string name="keyboard_hint">Type — keys go to the focused app</string>
 
-    <!-- Privileged-helper setup card. VSpace activates its own shell-uid helper over
-         Wireless Debugging — no separate Shizuku app required. See docs/PRIVILEGE.md. -->
-    <string name="privilege_unsupported">Needs Android 11 or newer. VSpace activates its own shell-uid helper through Wireless Debugging, which is an Android 11+ feature.</string>
-    <string name="privilege_needs_wireless_debugging">Enable Wireless Debugging in Developer options, then return — VSpace will reconnect automatically.</string>
-    <string name="privilege_needs_pairing">In Wireless Debugging on this phone, tap “Pair device with a pairing code”, then enter the 6 digits below. VSpace pairs once; the device trusts it thereafter.</string>
-    <string name="privilege_discovering">Looking for the wireless-debugging service…</string>
-    <string name="privilege_connecting">Connecting to the local ADB service…</string>
-    <string name="privilege_starting">Starting the privileged helper…</string>
+    <!-- Wizard scene — privileged-helper setup over Wireless Debugging.
+         See docs/PRIVILEGE.md. -->
+    <string name="privilege_title_unsupported">VSpace can\'t run here</string>
+    <string name="privilege_title_wireless_debugging">Turn on Wireless Debugging</string>
+    <string name="privilege_title_pair">Pair VSpace with this phone</string>
+    <string name="privilege_title_working">Setting things up…</string>
+
+    <string name="privilege_msg_unsupported">Needs Android 11 or newer. VSpace activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
+    <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — VSpace reconnects automatically.</string>
+    <string name="privilege_msg_pair">In Wireless Debugging, tap “Pair device with a pairing code”, then enter the 6 digits here. VSpace pairs once; the device trusts it thereafter.</string>
+    <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
+    <string name="privilege_msg_connecting">Connecting to the local ADB service…</string>
+    <string name="privilege_msg_starting">Starting the privileged helper…</string>
     <string name="privilege_pair_failed">Pairing failed — check the code and that the “Pair device” dialog is still open, then try again.</string>
-    <string name="privilege_pair_no_service">Could not find the pairing service — open “Pair device with a pairing code” in Wireless Debugging first.</string>
 
     <string name="privilege_action_open_developer_settings">Open Developer settings</string>
     <string name="privilege_action_pair">Pair</string>
     <string name="privilege_pairing_hint">6-digit pairing code</string>
 
-    <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>
-    <string name="status_no_glasses">Connect your VITURE glasses to open the workspace.</string>
+    <!-- Waiting scene — paired, but the glasses are not plugged in. -->
+    <string name="waiting_for_glasses">Connect your VITURE glasses to start.</string>
 
-    <string name="privilege_needed">Finish wireless-debugging pairing first — see the banner above.</string>
+    <!-- Main scene — both ready. -->
+    <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>
 </resources>
