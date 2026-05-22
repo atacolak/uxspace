@@ -120,12 +120,11 @@ drag as a scroll delta; M4 wires it through.
 Sequenced value-first: each step is visible and self-contained. New code lands in clean
 packages now; Gradle modules are extracted once the structure has settled.
 
-**Status (2026-05-21):** steps 1–2 done; the DeX-feature work (step 6) — two-finger
-scroll and the taskbar buildout — also landed. Steps 3–4 (`:spatial` / `:ui`) are
-deferred: extracting `:spatial` means rewiring the renderer's desktop-creation and
-app-launch paths (decoupling `DesktopPresentation` and `ShizukuManager` behind injected
-hooks), which is runtime-sensitive and best done supervised, with the glasses to test
-against. `:ui` has no cohesive content yet — it arrives with the input/cursor framework.
+**Status (2026-05-22):** steps 1–3 done, plus the DeX-feature work of step 6 (two-finger
+scroll, taskbar buildout). Step 4 (`:ui`) is deferred — it has no cohesive content yet;
+the cursor/input framework that belongs there arrives with M4. Build-verified but not yet
+glasses-tested, so the renderer decoupling (step 3) is the first thing to confirm on
+device. The decoupling also sets up the `:tracking`/`:viture` split and Shizuku bundling.
 
 1. ✅ **`UiScreen` + the real desktop.** Built `UiScreen` and `DesktopPresentation` — a
    `Theme.DeviceDefault` Android layout with wallpaper + taskbar + app drawer. The
@@ -135,10 +134,14 @@ against. `:ui` has no cohesive content yet — it arrives with the input/cursor 
    `:glasses` library; `HeadTracking` decoupled from the renderer via an `onPose`
    callback. (The `:tracking`/`:viture` abstraction split — a vendor-neutral
    `HeadTracker` interface — is a later refinement; see §10.)
-3. ⏳ **Extract `:spatial`.** Pull `Camera`, `Surface3D`, `Screen` / `AppScreen` /
-   `UiScreen`, `ScreenLayout`, `Scene` out of `WorkspaceRenderer`; the renderer becomes
-   a thin `Scene` driver. Needs the `DesktopPresentation` / `ShizukuManager` decoupling.
-4. ⏳ **Extract `:ui`.** Cursor, input mapping, shared view components.
+3. ✅ **Extract `:spatial`.** Moved the rendering layer — `WorkspaceRenderer`, `UiScreen`,
+   `VirtualScreen`, `WorkspaceController`, `WorkspaceSurfaceView`, `WorkspacePresentation`
+   — into a `:spatial` library. The renderer reaches `DesktopPresentation` and Shizuku
+   only through injected `WorkspaceController` hooks, so the graph
+   `:glasses ← :spatial ← :app` is acyclic. (Code still in package `com.vspace.workspace`;
+   a rename to `com.vspace.spatial` is a later cleanup.)
+4. ⏳ **Extract `:ui`.** Cursor, input mapping, shared view components — once that
+   framework exists (M4).
 5. **Bundle Shizuku** into `:privileged` — server in the APK, in-app Wireless-Debugging
    pairing; drop the separate-app dependency. Independent of steps 1–4; can run in
    parallel. See §8.
