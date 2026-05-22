@@ -169,26 +169,28 @@ object PrivilegedService {
                 return@execute
             }
 
-            setState(State.CONNECTING)
             val adb = AdbConnectionManager.getInstance(ctx)
-            val connected = try {
-                adb.connect(endpoint.host, endpoint.port)
-            } catch (e: AdbPairingRequiredException) {
-                // The device no longer trusts our key — wipe the marker and walk the user
-                // back through pairing.
-                Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
-                markPaired(ctx, false)
-                setState(State.NEEDS_PAIRING)
-                return@execute
-            } catch (e: Exception) {
-                Log.e(TAG, "ADB connect failed", e)
-                setState(State.NEEDS_WIRELESS_DEBUGGING)
-                return@execute
-            }
-            if (!connected) {
-                Log.w(TAG, "ADB connect returned false — wireless debugging gone?")
-                setState(State.NEEDS_WIRELESS_DEBUGGING)
-                return@execute
+            if (!adb.isConnected) {
+                setState(State.CONNECTING)
+                val connected = try {
+                    adb.connect(endpoint.host, endpoint.port)
+                } catch (e: AdbPairingRequiredException) {
+                    // The device no longer trusts our key — wipe the marker and walk the
+                    // user back through pairing.
+                    Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
+                    markPaired(ctx, false)
+                    setState(State.NEEDS_PAIRING)
+                    return@execute
+                } catch (e: Exception) {
+                    Log.e(TAG, "ADB connect failed", e)
+                    setState(State.NEEDS_WIRELESS_DEBUGGING)
+                    return@execute
+                }
+                if (!connected) {
+                    Log.w(TAG, "ADB connect returned false — wireless debugging gone?")
+                    setState(State.NEEDS_WIRELESS_DEBUGGING)
+                    return@execute
+                }
             }
 
             setState(State.STARTING)

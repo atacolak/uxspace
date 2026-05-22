@@ -283,11 +283,21 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
          * Pass [binder] back to the VSpace app process by calling its
          * [BinderReceiverProvider] — Binders survive in a Bundle across the process
          * boundary. This is the same trick Shizuku uses to publish its own server.
+         *
+         * The call goes through a `com.android.shell` package context. The system context
+         * we boot with has package "android" (uid 1000), but this process runs as shell
+         * (uid 2000), and AMS's `acquireProvider` rejects a package/uid mismatch with
+         * "Given calling package android does not match caller's uid 2000".
          */
         private fun sendBinderToApp(context: Context, binder: IBinder) {
+            val shellContext = runCatching {
+                context.createPackageContext(SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY)
+            }.onFailure {
+                Log.e(TAG, "could not create a $SHELL_PACKAGE context for binder hand-off", it)
+            }.getOrNull() ?: context
             val authority = Uri.parse("content://${BinderReceiverProvider.AUTHORITY}")
             val extras = Bundle().apply { putBinder(BinderReceiverProvider.EXTRA_BINDER, binder) }
-            context.contentResolver.call(
+            shellContext.contentResolver.call(
                 authority, BinderReceiverProvider.METHOD_SET_BINDER, null, extras,
             )
         }
