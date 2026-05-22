@@ -32,9 +32,12 @@ object WorkspaceController {
     @Volatile
     var appTap: ((displayId: Int, x: Int, y: Int) -> Unit)? = null
 
-    /** Injects a key event into a launched app's display. Set by the app at startup. */
+    /**
+     * Sends Back to a launched app; [onEmptied] is run if Back closed it (its display went
+     * empty), so the window can be closed. Set by the app at startup.
+     */
     @Volatile
-    var appKey: ((displayId: Int, keyCode: Int) -> Unit)? = null
+    var appBack: ((displayId: Int, onEmptied: () -> Unit) -> Unit)? = null
 
     /** Force-stops a launched app when its window closes. Set by the app at startup. */
     @Volatile

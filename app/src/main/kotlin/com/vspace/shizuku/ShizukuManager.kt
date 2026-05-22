@@ -8,9 +8,11 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.IBinder
 import android.util.Log
+import android.view.KeyEvent
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Detects Shizuku, walks the user through activating it, and — once ready — runs privileged
@@ -27,6 +29,9 @@ object ShizukuManager {
     // GitHub releases, not Play Store: the Play Store build is not offered on Android 16.
     private const val DOWNLOAD_URL = "https://github.com/RikkaApps/Shizuku/releases/latest"
     private const val PERMISSION_REQUEST_CODE = 4001
+
+    /** How long to wait after a Back press before checking whether it closed the app. */
+    private const val BACK_SETTLE_MS = 800L
 
     /** Each value is one step the user (or VSpace) must clear before launches work. */
     enum class State {
@@ -58,6 +63,8 @@ object ShizukuManager {
 
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "vspace-shizuku") }
+    private val scheduler =
+        Executors.newSingleThreadScheduledExecutor { Thread(it, "vspace-shizuku-sched") }
     private var appContext: Context? = null
 
     private val onBinderReceived = Shizuku.OnBinderReceivedListener { refresh() }
@@ -151,6 +158,24 @@ object ShizukuManager {
     /** Force-stop [packageName] — used to close an app launched into the workspace. */
     fun forceStop(packageName: String) =
         onWorker { service?.forceStop(packageName) }
+
+    /**
+     * Send Back to the app on [displayId]. A short while later, if that display no longer
+     * has an activity — Back closed the app — [onEmptied] is invoked so the now-empty window
+     * can be closed.
+     */
+    fun sendBack(displayId: Int, onEmptied: () -> Unit) {
+        onWorker { service?.key(displayId, KeyEvent.KEYCODE_BACK) }
+        scheduler.schedule(
+            {
+                runCatching {
+                    if (service?.displayHasActivity(displayId) == false) onEmptied()
+                }.onFailure { Log.e(TAG, "back-empty check failed", it) }
+            },
+            BACK_SETTLE_MS,
+            TimeUnit.MILLISECONDS,
+        )
+    }
 
     // endregion
 

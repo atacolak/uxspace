@@ -66,6 +66,41 @@ class ShizukuUserService : IShizukuService.Stub() {
         run("am", "force-stop", packageName)
     }
 
+    /**
+     * Whether [displayId] currently has an activity on it. Used after a Back press to tell
+     * whether Back closed the app (so VSpace can close the now-empty window). Errs on the
+     * side of `true` if the dump cannot be read or parsed, so a live app is never closed.
+     */
+    override fun displayHasActivity(displayId: Int): Boolean {
+        val dump = runCapture("dumpsys", "activity", "activities") ?: return true
+        if (!dump.contains("ActivityRecord{") || !dump.contains("Display #")) return true
+        var inDisplay = false
+        for (raw in dump.lineSequence()) {
+            val line = raw.trim()
+            if (line.startsWith("Display #")) {
+                val num = line.removePrefix("Display #").takeWhile(Char::isDigit).toIntOrNull()
+                inDisplay = num == displayId
+            } else if (inDisplay && line.contains("ActivityRecord{")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /** Run a shell command and return its standard output, or `null` if it could not run. */
+    private fun runCapture(vararg command: String): String? {
+        return try {
+            val process = Runtime.getRuntime().exec(command)
+            val output = process.inputStream.bufferedReader().readText()
+            process.errorStream.bufferedReader().readText()
+            process.waitFor()
+            output
+        } catch (e: Exception) {
+            Log.e(TAG, "command failed: ${command.joinToString(" ")}", e)
+            null
+        }
+    }
+
     /** Run a shell command, log anything it prints, and report a clean exit. */
     private fun run(vararg command: String): Boolean {
         return try {

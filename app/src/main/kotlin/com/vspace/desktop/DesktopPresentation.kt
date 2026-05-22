@@ -313,7 +313,12 @@ class DesktopPresentation(
                 }
             },
         )
-        icon.setOnTouchListener { _, e -> gestures.onTouchEvent(e) }
+        // Always consume, so the icon keeps receiving events after the down — otherwise the
+        // gesture detector never sees the up and single/double taps are lost.
+        icon.setOnTouchListener { _, e ->
+            gestures.onTouchEvent(e)
+            true
+        }
         runningApps.addView(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },

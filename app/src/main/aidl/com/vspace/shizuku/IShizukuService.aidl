@@ -25,4 +25,7 @@ interface IShizukuService {
 
     /** Force-stop a package — closes its activities and kills its process. */
     void forceStop(String packageName) = 7;
+
+    /** Whether the given display currently has an activity on it. */
+    boolean displayHasActivity(int displayId) = 8;
 }

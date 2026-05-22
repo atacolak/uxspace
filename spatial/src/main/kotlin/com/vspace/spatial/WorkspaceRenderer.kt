@@ -8,7 +8,6 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
 import android.util.Log
-import android.view.KeyEvent
 import android.widget.Toast
 import java.io.File
 import java.io.FileOutputStream
@@ -399,9 +398,10 @@ class WorkspaceRenderer(
                 WindowChrome(
                     ctx, display,
                     onBack = {
-                        WorkspaceController.appKey?.invoke(
-                            window.content.displayId, KeyEvent.KEYCODE_BACK,
-                        )
+                        // Send Back; if it closes the app, the window auto-closes.
+                        WorkspaceController.appBack?.invoke(window.content.displayId) {
+                            glTasks.add { closeWindow(window) }
+                        }
                     },
                     onMinimize = { WorkspaceController.setAppsHidden(true) },
                     onMaximize = { glTasks.add { toggleMaximize(window) } },
