@@ -29,6 +29,14 @@ static XRDeviceProviderHandle g_handle = nullptr;
 static int                    g_pid    = -1;
 static int                    g_fd     = -1;
 
+// Serialises the device-handle lifecycle. The JNI lifecycle methods can be reached from more
+// than one tracking thread — e.g. an old HeadTracking tearing down on its worker while a new
+// one (after a reconnect) runs create() on another. Without this lock two threads could call
+// xr_device_provider_destroy() on the same g_handle and double-free it, which aborts the
+// whole process via Scudo. Pose/state getters use their own locks and never take this one,
+// so the 120 Hz poll path is unaffected.
+static std::mutex g_lifecycle_mtx;
+
 struct PoseState {
     std::mutex mtx;
     float data[7] = {};    // Gen1/Gen2: [roll,pitch,yaw,qw,qx,qy,qz]
@@ -117,6 +125,15 @@ static void read_initial_dev_state() {
         g_dev.film = static_cast<int>(film_v + 0.5f);
 }
 
+// Tear down the SDK handle. The caller must hold g_lifecycle_mtx. Nulling g_handle before
+// returning makes a second teardown a safe no-op rather than a double-free.
+static void destroy_handle_locked() {
+    if (g_handle) {
+        xr_device_provider_destroy(g_handle);
+        g_handle = nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JNI — all methods of com.vspace.glasses.NativeGlasses
 // ---------------------------------------------------------------------------
@@ -132,10 +149,8 @@ Java_com_vspace_glasses_NativeGlasses_getVersion(JNIEnv* env, jobject) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_vspace_glasses_NativeGlasses_create(JNIEnv*, jobject, jint pid, jint fd) {
-    if (g_handle) {
-        xr_device_provider_destroy(g_handle);
-        g_handle = nullptr;
-    }
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+    destroy_handle_locked();
     reset_pose_state();
     reset_dev_state();
     g_handle = xr_device_provider_create(pid, fd);
@@ -148,18 +163,21 @@ Java_com_vspace_glasses_NativeGlasses_create(JNIEnv*, jobject, jint pid, jint fd
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_getDeviceType(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return -1;
     return xr_device_provider_get_device_type(g_handle);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_registerStateCallback(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_register_state_callback(g_handle, state_cb);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_initialize(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     int r = xr_device_provider_initialize(g_handle, nullptr, nullptr);
     if (r != VITURE_GLASSES_SUCCESS) LOGE("initialize failed: %d", r);
@@ -168,6 +186,7 @@ Java_com_vspace_glasses_NativeGlasses_initialize(JNIEnv*, jobject) {
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_start(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     int r = xr_device_provider_start(g_handle);
     if (r != VITURE_GLASSES_SUCCESS) { LOGE("start failed: %d", r); return r; }
@@ -177,27 +196,28 @@ Java_com_vspace_glasses_NativeGlasses_start(JNIEnv*, jobject) {
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_stop(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_stop(g_handle);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_shutdown(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_shutdown(g_handle);
 }
 
 JNIEXPORT void JNICALL
 Java_com_vspace_glasses_NativeGlasses_destroy(JNIEnv*, jobject) {
-    if (g_handle) {
-        xr_device_provider_destroy(g_handle);
-        g_handle = nullptr;
-    }
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+    destroy_handle_locked();
 }
 
 // Gen1/Gen2: register the pose callback and open the IMU at the high sample rate.
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_openImu(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     xr_device_provider_register_imu_pose_callback(g_handle, imu_pose_cb);
     int r = xr_device_provider_open_imu(g_handle, VITURE_IMU_MODE_POSE, VITURE_IMU_FREQUENCY_HIGH);
@@ -207,6 +227,7 @@ Java_com_vspace_glasses_NativeGlasses_openImu(JNIEnv*, jobject) {
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_closeImu(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_close_imu(g_handle, VITURE_IMU_MODE_POSE);
 }
@@ -221,6 +242,7 @@ Java_com_vspace_glasses_NativeGlasses_isProductSupportNativeDof(JNIEnv*, jobject
 // Switch a native-DOF device into native mode for on-device 3DOF tracking.
 JNIEXPORT void JNICALL
 Java_com_vspace_glasses_NativeGlasses_setupNativeDofDevice(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return;
     int rc = xr_device_provider_native_set_mode(g_handle, 1);
     if (rc != VITURE_GLASSES_SUCCESS) LOGE("native_set_mode(1) failed: %d", rc);
@@ -238,6 +260,7 @@ Java_com_vspace_glasses_NativeGlasses_setupNativeDofDevice(JNIEnv*, jobject) {
 
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_nativeRecenterDof(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_native_recenter_dof(g_handle);
 }
@@ -245,12 +268,14 @@ Java_com_vspace_glasses_NativeGlasses_nativeRecenterDof(JNIEnv*, jobject) {
 // Carina: must be called after create and before initialize.
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_setDofTypeCarina(JNIEnv*, jobject, jboolean is6dof) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_set_dof_type_carina(g_handle, is6dof ? 1 : 0);
 }
 
 JNIEXPORT void JNICALL
 Java_com_vspace_glasses_NativeGlasses_startCarinaPollThread(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (g_poll_running) return;
     g_poll_running = true;
     g_poll_thread  = std::thread(carina_poll_fn);
@@ -258,6 +283,7 @@ Java_com_vspace_glasses_NativeGlasses_startCarinaPollThread(JNIEnv*, jobject) {
 
 JNIEXPORT void JNICALL
 Java_com_vspace_glasses_NativeGlasses_stopCarinaPollThread(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_poll_running) return;
     g_poll_running = false;
     if (g_poll_thread.joinable()) g_poll_thread.join();
@@ -265,16 +291,12 @@ Java_com_vspace_glasses_NativeGlasses_stopCarinaPollThread(JNIEnv*, jobject) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_vspace_glasses_NativeGlasses_carinaStopForModeSwitch(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (g_poll_running) {
         g_poll_running = false;
         if (g_poll_thread.joinable()) g_poll_thread.join();
     }
-    if (g_handle) {
-        xr_device_provider_stop(g_handle);
-        xr_device_provider_shutdown(g_handle);
-        xr_device_provider_destroy(g_handle);
-        g_handle = nullptr;
-    }
+    destroy_handle_locked();
     reset_pose_state();
     reset_dev_state();
     return JNI_TRUE;
@@ -283,10 +305,11 @@ Java_com_vspace_glasses_NativeGlasses_carinaStopForModeSwitch(JNIEnv*, jobject) 
 // Carina: SDK-level yaw + position reset — relocates the coordinate frame to the user.
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_resetOriginCarina(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     float pose[7];
     {
-        std::lock_guard<std::mutex> lk(g_pose.mtx);
+        std::lock_guard<std::mutex> pl(g_pose.mtx);
         memcpy(pose, g_pose.data, sizeof(pose));
     }
     return xr_device_provider_reset_origin_carina(g_handle, pose);
@@ -295,6 +318,7 @@ Java_com_vspace_glasses_NativeGlasses_resetOriginCarina(JNIEnv*, jobject) {
 // Carina: full VIO re-initialisation.
 JNIEXPORT jint JNICALL
 Java_com_vspace_glasses_NativeGlasses_resetPoseCarina(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_reset_pose_carina(g_handle);
 }

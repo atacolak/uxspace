@@ -32,6 +32,10 @@ class HeadTracking(
     @Volatile private var polling = false
     private var pollThread: Thread? = null
 
+    // Guards against a double start(): one HeadTracking owns one SDK session, and the native
+    // SDK handle is a process-wide singleton.
+    @Volatile private var started = false
+
     // Reference orientation for recentre; the first pose fills it in.
     @Volatile private var haveRef = false
     private var refW = 1f
@@ -41,6 +45,11 @@ class HeadTracking(
 
     /** Begin tracking: locate the glasses on USB and request permission. */
     fun start() {
+        if (started) {
+            Log.w(TAG, "start() ignored — head tracking already started")
+            return
+        }
+        started = true
         val glassesUsb = GlassesUsb(appContext, ::onUsbOpened, ::onUsbDenied)
         usb = glassesUsb
         val device = glassesUsb.find()
@@ -59,6 +68,7 @@ class HeadTracking(
 
     /** Stop tracking and release the SDK + USB. */
     fun stop() {
+        started = false
         polling = false
         pollThread?.interrupt()
         pollThread = null

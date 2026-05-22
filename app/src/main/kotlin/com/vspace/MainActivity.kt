@@ -75,14 +75,15 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Delivered when the glasses are connected while VSpace is already running. Receiving the
-     * attach intent also grants USB access, so restart the workspace.
+     * attach intent also grants USB access; [syncGlasses] then shows the workspace if it is
+     * not already up. It must NOT tear down a running workspace first — doing so spun up a
+     * second [WorkspacePresentation], and its [HeadTracking][com.vspace.glasses.HeadTracking]
+     * raced the first over the native SDK handle, crashing the process.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
-            presentation?.dismiss()
-            presentation = null
             syncGlasses()
         }
     }
