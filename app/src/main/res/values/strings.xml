@@ -8,11 +8,13 @@
     <!-- Wizard scene — privileged-helper setup over Wireless Debugging.
          See docs/PRIVILEGE.md. -->
     <string name="privilege_title_unsupported">VSpace can\'t run here</string>
+    <string name="privilege_title_dev_options">Unlock Developer options</string>
     <string name="privilege_title_wireless_debugging">Turn on Wireless Debugging</string>
     <string name="privilege_title_pair">Pair VSpace with this phone</string>
     <string name="privilege_title_working">Setting things up…</string>
 
     <string name="privilege_msg_unsupported">Needs Android 11 or newer. VSpace activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
+    <string name="privilege_msg_dev_options">Open Settings → About phone → Software information, then tap “Build number” seven times until it confirms Developer options is unlocked. Return here when done.</string>
     <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — VSpace reconnects automatically.</string>
     <string name="privilege_msg_pair">In Wireless Debugging, tap “Pair device with a pairing code”, then enter the 6 digits here. VSpace pairs once; the device trusts it thereafter.</string>
     <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
@@ -20,6 +22,7 @@
     <string name="privilege_msg_starting">Starting the privileged helper…</string>
     <string name="privilege_pair_failed">Pairing failed — check the code and that the “Pair device” dialog is still open, then try again.</string>
 
+    <string name="privilege_action_open_about">Open About phone</string>
     <string name="privilege_action_open_developer_settings">Open Developer settings</string>
     <string name="privilege_action_pair">Pair</string>
     <string name="privilege_pairing_hint">6-digit pairing code</string>

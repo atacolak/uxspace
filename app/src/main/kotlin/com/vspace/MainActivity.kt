@@ -205,6 +205,12 @@ class MainActivity : ComponentActivity() {
                 actionLabel = null,
                 codeFieldVisible = false,
             )
+            State.NEEDS_DEVELOPER_OPTIONS -> populateWizard(
+                R.string.privilege_title_dev_options,
+                R.string.privilege_msg_dev_options,
+                actionLabel = R.string.privilege_action_open_about,
+                codeFieldVisible = false,
+            )
             State.NEEDS_WIRELESS_DEBUGGING -> populateWizard(
                 R.string.privilege_title_wireless_debugging,
                 R.string.privilege_msg_wireless_debugging,
@@ -267,10 +273,16 @@ class MainActivity : ComponentActivity() {
     /** The wizard button: action depends on the current state. */
     private fun onSetupAction() {
         when (PrivilegedService.state) {
+            State.NEEDS_DEVELOPER_OPTIONS -> openAboutPhone()
             State.NEEDS_WIRELESS_DEBUGGING -> openDeveloperSettings()
             State.NEEDS_PAIRING -> startPairing()
             else -> Unit
         }
+    }
+
+    private fun openAboutPhone() {
+        runCatching { startActivity(Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)) }
+            .onFailure { runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) } }
     }
 
     private fun openDeveloperSettings() {

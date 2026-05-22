@@ -3,9 +3,11 @@ package com.vspace.privileged
 import android.content.Context
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import android.view.Surface
+import io.github.muntashirakon.adb.AdbPairingRequiredException
 import io.github.muntashirakon.adb.AdbStream
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
@@ -40,10 +42,21 @@ object PrivilegedService {
         /** Android < 11 — the wireless-debugging path does not exist. */
         UNSUPPORTED,
 
+        /**
+         * Developer options is locked. Wireless Debugging can't be turned on until the user
+         * unlocks Developer options (Settings → About → tap Build number 7×), so the wizard
+         * walks them through that first.
+         */
+        NEEDS_DEVELOPER_OPTIONS,
+
         /** Paired before, but the connect service is not on mDNS (wireless debugging off). */
         NEEDS_WIRELESS_DEBUGGING,
 
-        /** Never paired (or the pairing key was wiped). The setup card asks for a code. */
+        /**
+         * Never paired (or the device forgot our key — connect failed with
+         * AdbPairingRequiredException, which clears the paired marker). The wizard asks for
+         * a pairing code.
+         */
         NEEDS_PAIRING,
 
         /** mDNS / TCP work in progress. */
@@ -76,19 +89,46 @@ object PrivilegedService {
     /** Call once, from the Application. Computes the initial state from persisted identity. */
     fun init(context: Context) {
         appContext = context.applicationContext
-        state = when {
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.R -> State.UNSUPPORTED
-            hasPairedKey(context) -> State.NEEDS_WIRELESS_DEBUGGING
-            else -> State.NEEDS_PAIRING
-        }
+        state = computeInitialState(context)
         notifyListeners()
     }
 
     fun addListener(listener: () -> Unit) = listeners.add(listener)
     fun removeListener(listener: () -> Unit) = listeners.remove(listener)
 
-    private fun hasPairedKey(context: Context): Boolean =
-        File(context.filesDir, "adb/private.key").exists()
+    private fun computeInitialState(context: Context): State = when {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R -> State.UNSUPPORTED
+        !isDevOptionsEnabled(context) -> State.NEEDS_DEVELOPER_OPTIONS
+        hasPaired(context) -> State.NEEDS_WIRELESS_DEBUGGING
+        else -> State.NEEDS_PAIRING
+    }
+
+    /** Developer options unlocked? Read-only access to Settings.Global; no permission needed. */
+    private fun isDevOptionsEnabled(context: Context): Boolean = runCatching {
+        Settings.Global.getInt(
+            context.contentResolver,
+            Settings.Global.DEVELOPMENT_SETTINGS_ENABLED,
+            0,
+        ) != 0
+    }.getOrDefault(false)
+
+    /**
+     * Whether VSpace has previously paired successfully. A separate marker file from the key
+     * — the key is generated and persisted on first use of [AdbConnectionManager], whether or
+     * not the device ever accepted it, so the key file's existence proves nothing.
+     */
+    private fun hasPaired(context: Context): Boolean =
+        File(context.filesDir, PAIRED_MARKER).exists()
+
+    private fun markPaired(context: Context, paired: Boolean) {
+        val marker = File(context.filesDir, PAIRED_MARKER)
+        if (paired) {
+            marker.parentFile?.mkdirs()
+            runCatching { marker.createNewFile() }
+        } else {
+            runCatching { marker.delete() }
+        }
+    }
 
     private fun setState(next: State) {
         if (next == state) return
@@ -110,39 +150,57 @@ object PrivilegedService {
             val ctx = appContext ?: return@execute
             if (state == State.UNSUPPORTED) return@execute
             if (state == State.READY && service != null) return@execute
-            if (!hasPairedKey(ctx)) {
+            // Re-evaluate prerequisites on every attempt — the user may have just unlocked
+            // Developer options or toggled Wireless Debugging.
+            if (!isDevOptionsEnabled(ctx)) {
+                setState(State.NEEDS_DEVELOPER_OPTIONS)
+                return@execute
+            }
+            if (!hasPaired(ctx)) {
                 setState(State.NEEDS_PAIRING)
                 return@execute
             }
-            try {
-                setState(State.DISCOVERING)
-                val endpoint = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
-                if (endpoint == null) {
-                    Log.w(TAG, "connect service not advertised — wireless debugging off?")
-                    setState(State.NEEDS_WIRELESS_DEBUGGING)
-                    return@execute
-                }
-                setState(State.CONNECTING)
-                val adb = AdbConnectionManager.getInstance(ctx)
-                if (!adb.connect(endpoint.host, endpoint.port)) {
-                    Log.w(TAG, "ADB connect ${endpoint.host}:${endpoint.port} returned false")
-                    setState(State.NEEDS_PAIRING)
-                    return@execute
-                }
-                setState(State.STARTING)
-                val stream = ServerBootstrap.start(ctx, adb)
-                if (stream == null) {
-                    Log.w(TAG, "could not start PrivilegedServer over ADB")
-                    setState(State.NEEDS_PAIRING)
-                    return@execute
-                }
-                adbStream = stream
-                // BinderReceiverProvider.onPrivilegedBinder() drives us to READY when the
-                // server publishes its Binder back to the app.
-            } catch (e: Exception) {
-                Log.e(TAG, "ensureRunning failed", e)
-                setState(State.NEEDS_PAIRING)
+
+            setState(State.DISCOVERING)
+            val endpoint = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
+            if (endpoint == null) {
+                Log.w(TAG, "connect service not advertised — wireless debugging off?")
+                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                return@execute
             }
+
+            setState(State.CONNECTING)
+            val adb = AdbConnectionManager.getInstance(ctx)
+            val connected = try {
+                adb.connect(endpoint.host, endpoint.port)
+            } catch (e: AdbPairingRequiredException) {
+                // The device no longer trusts our key — wipe the marker and walk the user
+                // back through pairing.
+                Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
+                markPaired(ctx, false)
+                setState(State.NEEDS_PAIRING)
+                return@execute
+            } catch (e: Exception) {
+                Log.e(TAG, "ADB connect failed", e)
+                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                return@execute
+            }
+            if (!connected) {
+                Log.w(TAG, "ADB connect returned false — wireless debugging gone?")
+                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                return@execute
+            }
+
+            setState(State.STARTING)
+            val stream = ServerBootstrap.start(ctx, adb)
+            if (stream == null) {
+                Log.w(TAG, "could not start PrivilegedServer over ADB")
+                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                return@execute
+            }
+            adbStream = stream
+            // BinderReceiverProvider.onPrivilegedBinder() drives us to READY when the server
+            // publishes its Binder back to the app.
         }
     }
 
@@ -158,16 +216,19 @@ object PrivilegedService {
                 val endpoint = AdbDiscovery.discoverPairing(ctx, DISCOVERY_TIMEOUT_MS)
                 if (endpoint == null) {
                     Log.w(TAG, "pairing service not on mDNS — is the dialog open?")
+                    markPaired(ctx, false)
                     done(false); return@execute
                 }
                 val adb = AdbConnectionManager.getInstance(ctx)
                 val paired = adb.pair(endpoint.host, endpoint.port, pairingCode)
                 Log.i(TAG, "ADB pair ${endpoint.host}:${endpoint.port} ok=$paired")
+                markPaired(ctx, paired)
                 if (!paired) { done(false); return@execute }
                 done(true)
                 ensureRunning()
             } catch (e: Exception) {
                 Log.e(TAG, "activate failed", e)
+                markPaired(ctx, false)
                 done(false)
             }
         }
@@ -269,4 +330,7 @@ object PrivilegedService {
 
     /** How long to wait after a Back press before checking whether it closed the app. */
     private const val BACK_SETTLE_MS = 800L
+
+    /** Path of the marker file created on a successful [activate] (relative to filesDir). */
+    private const val PAIRED_MARKER = "adb/paired.flag"
 }
