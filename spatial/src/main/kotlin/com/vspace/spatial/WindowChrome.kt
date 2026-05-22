@@ -3,7 +3,6 @@ package com.vspace.spatial
 import android.app.Presentation
 import android.content.Context
 import android.os.Bundle
-import android.util.Log
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
@@ -18,9 +17,10 @@ import android.widget.TextView
  * Samsung DeX layout).
  *
  * The frame *is* the window: it is hosted on a full-window-sized [UiScreen], and the app's
- * own content quad is drawn on top of it — inset below the title bar and within the border —
- * by [WorkspaceRenderer], so the app is rendered inside the window. Colours come from
- * [VSpaceTheme]; the cursor's taps reach the buttons through [UiScreen.dispatchTap].
+ * own content quad is drawn on top of it by [WorkspaceRenderer], so the app is rendered
+ * inside the window. A NoActionBar theme is used so the Presentation draws no decor bar over
+ * the title bar. Colours come from [VSpaceTheme]; the cursor's taps reach the buttons through
+ * [UiScreen.dispatchTap].
  */
 class WindowChrome(
     outerContext: Context,
@@ -29,7 +29,7 @@ class WindowChrome(
     private val onMinimize: () -> Unit,
     private val onMaximize: () -> Unit,
     private val onClose: () -> Unit,
-) : Presentation(outerContext, display, android.R.style.Theme_DeviceDefault) {
+) : Presentation(outerContext, display, android.R.style.Theme_DeviceDefault_NoActionBar) {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +56,6 @@ class WindowChrome(
 
         root.addView(titleBar, LinearLayout.LayoutParams(MATCH, AppWindow.TITLE_BAR_PX))
         setContentView(root)
-        Log.i(TAG, "title bar built")
     }
 
     /** One title-bar button — a centred glyph with a borderless ripple. */
@@ -73,7 +72,6 @@ class WindowChrome(
     }
 
     private companion object {
-        const val TAG = "VSpace/Chrome"
         val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 
         /** Title-bar button width, and glyph size, in chrome-surface pixels. */

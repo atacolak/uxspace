@@ -51,7 +51,12 @@ class WorkspacePresentation(
         headTracking = null
         surfaceView?.let { view ->
             WorkspaceController.unregister(view.workspaceRenderer)
-            view.queueEvent { view.workspaceRenderer.releaseAll() }
+            view.queueEvent {
+                // Force-stop the launched apps before releasing their displays, so they close
+                // rather than being relocated onto the phone's screen.
+                view.workspaceRenderer.closeAllWindows()
+                view.workspaceRenderer.releaseAll()
+            }
             view.onPause()
         }
         surfaceView = null

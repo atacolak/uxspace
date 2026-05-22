@@ -48,19 +48,38 @@ class AppWindow(
     fun layout(desktopHalfWidth: Float, desktopHalfHeight: Float) {
         val topY = desktopHalfHeight
         val bottomY = -desktopHalfHeight + TASKBAR_RESERVE * (2f * desktopHalfHeight)
+
+        if (state == State.MAXIMIZED) {
+            // The app content fills the desktop area above the taskbar — no border, no title
+            // bar. Kept at the content's own aspect so the app is not distorted.
+            val areaW = 2f * desktopHalfWidth
+            val areaH = topY - bottomY
+            val aspect = CONTENT_WIDTH_PX.toFloat() / CONTENT_HEIGHT_PX
+            var cw = areaW
+            if (cw / aspect > areaH) cw = areaH * aspect
+            content.worldX = 0f
+            content.worldY = (topY + bottomY) / 2f
+            content.worldZ = -SCREEN_DISTANCE
+            content.worldYawDeg = 0f
+            content.worldWidth = cw
+            frameW = 0f
+            frameH = 0f
+            return
+        }
+
+        // NORMAL — a framed window.
         val availW = (2f * desktopHalfWidth) * WINDOW_MARGIN
         val availH = (topY - bottomY) * WINDOW_MARGIN
-
         val frameAspect = FRAME_WIDTH_PX.toFloat() / FRAME_HEIGHT_PX
-        var fw = if (state == State.MAXIMIZED) availW else availW * NORMAL_FRACTION
+        var fw = availW * NORMAL_FRACTION
         var fh = fw / frameAspect
         if (fh > availH) {
             fh = availH
             fw = fh * frameAspect
         }
 
-        // Opens centred; once placed, only a drag (or maximise) moves it.
-        if (!placed || state == State.MAXIMIZED) {
+        // Opens centred; once placed, only a drag moves it.
+        if (!placed) {
             centerX = 0f
             centerY = (topY + bottomY) / 2f
             placed = true

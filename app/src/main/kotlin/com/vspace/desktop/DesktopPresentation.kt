@@ -13,7 +13,9 @@ import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Display
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -48,7 +50,7 @@ import java.util.Locale
 class DesktopPresentation(
     outerContext: Context,
     display: Display,
-) : Presentation(outerContext, display, android.R.style.Theme_DeviceDefault) {
+) : Presentation(outerContext, display, android.R.style.Theme_DeviceDefault_NoActionBar) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
@@ -76,6 +78,7 @@ class DesktopPresentation(
         root.addView(buildWallpaper())
         root.addView(buildDrawer().also { drawer = it })
         root.addView(buildTaskbar())
+        root.addView(buildVersionLabel())
         setContentView(root)
         loadApps()
         // Clear the taskbar entry if its window is closed from the window's own title bar.
@@ -103,6 +106,25 @@ class DesktopPresentation(
         }.getOrNull()
         if (bitmap != null) setImageBitmap(bitmap) else setBackgroundColor(VOID_COLOR)
     }
+
+    /**
+     * A faint build stamp in the workspace's top-left corner. The time is the APK's install
+     * time, so a capture can be confirmed to come from the latest build.
+     */
+    private fun buildVersionLabel(): View = TextView(context).apply {
+        text = versionStamp()
+        setTextColor(0x73FFFFFF)
+        textSize = 11f
+        setPadding(dp(16), dp(12), dp(16), dp(12))
+        layoutParams = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START)
+    }
+
+    private fun versionStamp(): String = runCatching {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        val time = SimpleDateFormat("MMM d  HH:mm:ss", Locale.getDefault())
+            .format(Date(info.lastUpdateTime))
+        "VSpace · build $time"
+    }.getOrDefault("VSpace")
 
     private fun buildDrawer(): View {
         // Personal / Work tabs across the top.
@@ -274,10 +296,24 @@ class DesktopPresentation(
         // One window at a time today, so the strip shows the current app.
         runningApps.removeAllViews()
         runningPackage = app.packageName
-        val icon = ImageView(context).apply {
-            setImageDrawable(app.icon)
-            setOnClickListener { toggleMinimized(this) }
-        }
+        val icon = ImageView(context)
+        icon.setImageDrawable(app.icon)
+        // A single tap minimises / restores the window; a double tap un-maximises it.
+        val gestures = GestureDetector(
+            context,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    toggleMinimized(icon)
+                    return true
+                }
+
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    WorkspaceController.restoreWindow()
+                    return true
+                }
+            },
+        )
+        icon.setOnTouchListener { _, e -> gestures.onTouchEvent(e) }
         runningApps.addView(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },

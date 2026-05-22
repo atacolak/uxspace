@@ -88,6 +88,11 @@ object WorkspaceController {
         renderer?.setDrawerOpen(open)
     }
 
+    /** Restore a maximised app window to its normal framed size. */
+    fun restoreWindow() {
+        renderer?.restoreWindow()
+    }
+
     /** Begin / end a window drag — the touchpad reports a press-and-hold as a drag. */
     fun beginDrag() {
         renderer?.beginDrag()

@@ -185,6 +185,16 @@ class WorkspaceRenderer(
         cursorClickPending = true
     }
 
+    /**
+     * Force-stop every launched app — called when the workspace is torn down (the glasses
+     * are unplugged), so the apps close instead of being relocated onto the phone's screen.
+     */
+    fun closeAllWindows() {
+        windows.forEach { w ->
+            if (w.packageName.isNotEmpty()) WorkspaceController.closeApp?.invoke(w.packageName)
+        }
+    }
+
     /** Release the desktop, every screen, and their GL resources. Call on the GL thread. */
     fun releaseAll() {
         desktop?.release()
@@ -279,16 +289,21 @@ class WorkspaceRenderer(
         // Skipped while minimised, or while the app drawer is open.
         if (!appsHidden && !drawerOpen && windows.isNotEmpty()) {
             for (window in windows) {
-                val chrome = window.chrome
-                chrome.updateTexture()
-                buildModelRect(
-                    modelMatrix,
-                    window.frameX, window.frameY, window.frameZ,
-                    window.frameW, window.frameH,
-                )
-                Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-                drawExternalQuad(chrome.textureId, chrome.textureMatrix)
+                // The window frame (chrome) — drawn only when not maximised; a maximised app
+                // has no border or title bar.
+                if (window.state != AppWindow.State.MAXIMIZED) {
+                    val chrome = window.chrome
+                    chrome.updateTexture()
+                    buildModelRect(
+                        modelMatrix,
+                        window.frameX, window.frameY, window.frameZ,
+                        window.frameW, window.frameH,
+                    )
+                    Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+                    drawExternalQuad(chrome.textureId, chrome.textureMatrix)
+                }
 
+                // The app's content quad, composited on top of the frame.
                 val content = window.content
                 content.updateTexture()
                 buildModel(modelMatrix, content)
@@ -438,6 +453,19 @@ class WorkspaceRenderer(
         relayout()
     }
 
+    /**
+     * Restore a maximised window to its normal framed size — bound to a double-tap of the
+     * taskbar icon, since a maximised window has no title bar to restore from. Any thread.
+     */
+    fun restoreWindow() {
+        glTasks.add {
+            windows.firstOrNull { it.state == AppWindow.State.MAXIMIZED }?.let {
+                it.state = AppWindow.State.NORMAL
+                relayout()
+            }
+        }
+    }
+
     /** Force-stop a window's app and queue its surfaces for release. GL thread. */
     private fun closeWindow(window: AppWindow) {
         if (!windows.remove(window)) return
@@ -525,15 +553,18 @@ class WorkspaceRenderer(
                     return
                 }
                 // The surrounding frame — the title-bar buttons live in its view tree.
-                val framePx = cursorToRectPx(
-                    window.frameX, window.frameY, window.frameZ,
-                    window.frameW, window.frameH,
-                    AppWindow.FRAME_WIDTH_PX, AppWindow.FRAME_HEIGHT_PX,
-                )
-                if (framePx != null) {
-                    val chrome = window.chrome
-                    mainHandler.post { chrome.dispatchTap(framePx[0], framePx[1]) }
-                    return
+                // A maximised window has no frame.
+                if (window.state != AppWindow.State.MAXIMIZED) {
+                    val framePx = cursorToRectPx(
+                        window.frameX, window.frameY, window.frameZ,
+                        window.frameW, window.frameH,
+                        AppWindow.FRAME_WIDTH_PX, AppWindow.FRAME_HEIGHT_PX,
+                    )
+                    if (framePx != null) {
+                        val chrome = window.chrome
+                        mainHandler.post { chrome.dispatchTap(framePx[0], framePx[1]) }
+                        return
+                    }
                 }
             }
         }
