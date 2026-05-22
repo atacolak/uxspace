@@ -20,5 +20,8 @@ class VSpaceApp : Application() {
         WorkspaceController.appLauncher = { displayId, packageName, activityName ->
             ShizukuManager.launchApp(displayId, packageName, activityName)
         }
+        WorkspaceController.appTap = { displayId, x, y ->
+            ShizukuManager.tap(displayId, x, y)
+        }
     }
 }

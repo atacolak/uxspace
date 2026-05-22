@@ -28,6 +28,10 @@ object WorkspaceController {
     @Volatile
     var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
 
+    /** Injects a tap into a launched app's display. Set by the app at startup. */
+    @Volatile
+    var appTap: ((displayId: Int, x: Int, y: Int) -> Unit)? = null
+
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 

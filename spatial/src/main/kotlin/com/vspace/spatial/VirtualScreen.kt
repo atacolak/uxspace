@@ -43,6 +43,11 @@ class VirtualScreen(
     var worldWidth: Float = DEFAULT_WIDTH
     val worldHeight: Float get() = worldWidth * heightPx / widthPx
 
+    /** The backing VirtualDisplay's id (for input injection), or -1 before [createDisplay]. */
+    @Volatile
+    var displayId: Int = -1
+        private set
+
     private var virtualDisplay: VirtualDisplay? = null
 
     @Volatile
@@ -73,7 +78,7 @@ class VirtualScreen(
             return null
         }
         virtualDisplay = display
-        val displayId = display.display.displayId
+        displayId = display.display.displayId
         Log.i(TAG, "screen $id: virtual display created id=$displayId ${widthPx}x$heightPx")
         return displayId
     }

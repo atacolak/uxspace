@@ -364,10 +364,22 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Resolve a cursor click: ray-cast the screen-space cursor onto the desktop plane and
-     * dispatch a tap at the matching desktop pixel into the hosted One UI view tree.
+     * Resolve a cursor click. App windows sit in front of the desktop, so try them first —
+     * a hit injects a tap into that app's display via Shizuku; otherwise the click goes to
+     * the desktop's own One UI view tree.
      */
     private fun handleClick() {
+        if (!appsHidden) {
+            for (screen in screens) {
+                val px = cursorToScreenPx(screen) ?: continue
+                if (screen.displayId >= 0) {
+                    WorkspaceController.appTap?.invoke(
+                        screen.displayId, px[0].toInt(), px[1].toInt(),
+                    )
+                }
+                return
+            }
+        }
         val d = desktop ?: return
         val px = cursorToDesktopPx() ?: return
         mainHandler.post { d.dispatchTap(px[0], px[1]) }
@@ -381,27 +393,44 @@ class WorkspaceRenderer(
         mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
     }
 
-    /**
-     * Ray-cast the screen-space cursor onto the desktop plane; returns the matching desktop
-     * pixel as `[px, py]`, or null if the cursor misses the desktop.
-     */
-    private fun cursorToDesktopPx(): FloatArray? {
+    /** World (x, y) where the cursor ray meets the plane z = [planeZ]; null if it misses. */
+    private fun cursorRayHit(planeZ: Float): FloatArray? {
         if (!Matrix.invertM(invViewProjection, 0, viewProjection, 0)) return null
         val near = unproject(cursorX, cursorY, -1f) ?: return null
         val far = unproject(cursorX, cursorY, 1f) ?: return null
         val dirZ = far[2] - near[2]
         if (abs(dirZ) < 1e-5f) return null
-        // Intersect the cursor ray with the desktop plane at z = -DESKTOP_DISTANCE.
-        val t = (-DESKTOP_DISTANCE - near[2]) / dirZ
+        val t = (planeZ - near[2]) / dirZ
         if (t < 0f) return null
-        val hitX = near[0] + t * (far[0] - near[0])
-        val hitY = near[1] + t * (far[1] - near[1])
+        return floatArrayOf(
+            near[0] + t * (far[0] - near[0]),
+            near[1] + t * (far[1] - near[1]),
+        )
+    }
+
+    /** Cursor → desktop pixel `[px, py]`, or null if the cursor misses the desktop. */
+    private fun cursorToDesktopPx(): FloatArray? {
+        val hit = cursorRayHit(-DESKTOP_DISTANCE) ?: return null
         val hw = desktopHalfWidth
         val hh = desktopHalfHeight
-        if (hitX < -hw || hitX > hw || hitY < -hh || hitY > hh) return null
+        if (hit[0] < -hw || hit[0] > hw || hit[1] < -hh || hit[1] > hh) return null
         return floatArrayOf(
-            (hitX + hw) / (2f * hw) * DESKTOP_WIDTH_PX,
-            (hh - hitY) / (2f * hh) * DESKTOP_HEIGHT_PX,
+            (hit[0] + hw) / (2f * hw) * DESKTOP_WIDTH_PX,
+            (hh - hit[1]) / (2f * hh) * DESKTOP_HEIGHT_PX,
+        )
+    }
+
+    /** Cursor → [screen] pixel `[px, py]`, or null if the cursor misses that window. */
+    private fun cursorToScreenPx(screen: VirtualScreen): FloatArray? {
+        val hit = cursorRayHit(screen.worldZ) ?: return null
+        val hw = screen.worldWidth / 2f
+        val hh = screen.worldHeight / 2f
+        val lx = hit[0] - screen.worldX
+        val ly = hit[1] - screen.worldY
+        if (lx < -hw || lx > hw || ly < -hh || ly > hh) return null
+        return floatArrayOf(
+            (lx + hw) / (2f * hw) * SCREEN_WIDTH_PX,
+            (hh - ly) / (2f * hh) * SCREEN_HEIGHT_PX,
         )
     }
 
