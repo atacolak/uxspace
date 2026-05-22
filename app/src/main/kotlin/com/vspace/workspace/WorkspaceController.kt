@@ -1,8 +1,16 @@
 package com.vspace.workspace
 
+import android.app.Presentation
+import android.content.Context
+import android.view.Display
+
 /**
  * Process-wide handle to the workspace running inside the glasses' `Presentation`, so the
  * phone-side control panel can launch apps into it and switch its view mode.
+ *
+ * It also holds the workspace's injectable hooks ([desktopContent], [appLauncher]) — the
+ * app wires these at startup, which keeps the rendering layer free of any dependency on the
+ * desktop UI or on Shizuku.
  */
 object WorkspaceController {
 
@@ -11,6 +19,14 @@ object WorkspaceController {
 
     @Volatile
     private var viewMode = WorkspaceRenderer.ViewMode.PINNED
+
+    /** Builds the desktop UI shown on the workspace's UiScreen. Set by the app at startup. */
+    @Volatile
+    var desktopContent: ((Context, Display) -> Presentation)? = null
+
+    /** Launches an app onto a virtual display. Set by the app at startup. */
+    @Volatile
+    var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
 
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null

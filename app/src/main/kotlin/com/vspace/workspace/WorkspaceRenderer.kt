@@ -9,7 +9,6 @@ import android.opengl.Matrix
 import android.os.Handler
 import android.util.Log
 import android.widget.Toast
-import com.vspace.shizuku.ShizukuManager
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -175,12 +174,16 @@ class WorkspaceRenderer(
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
 
         // The desktop: an external texture fed by our own Presentation on a virtual display.
-        val ui = UiScreen(
-            createExternalTexture(), DESKTOP_WIDTH_PX, DESKTOP_HEIGHT_PX, mainHandler,
-        )
-        desktop = ui
-        mainHandler.post {
-            ui.start(context) { ctx, display -> DesktopPresentation(ctx, display) }
+        // The app injects the Presentation factory (see WorkspaceController.desktopContent).
+        val factory = WorkspaceController.desktopContent
+        if (factory != null) {
+            val ui = UiScreen(
+                createExternalTexture(), DESKTOP_WIDTH_PX, DESKTOP_HEIGHT_PX, mainHandler,
+            )
+            desktop = ui
+            mainHandler.post { ui.start(context, factory) }
+        } else {
+            Log.e(TAG, "no desktop content registered — desktop will not render")
         }
     }
 
@@ -283,12 +286,14 @@ class WorkspaceRenderer(
         screens.add(screen)
         relayout()
 
-        // Create the display on the main thread, then launch the app onto it via Shizuku —
-        // a normal app may not place another app on a virtual display.
+        // Create the display on the main thread, then launch the app onto it through the
+        // injected launcher (Shizuku) — a normal app may not place an app on a display.
         mainHandler.post {
             val displayId = screen.createDisplay(appContext)
             if (displayId != null) {
-                ShizukuManager.launchApp(displayId, request.packageName, request.activityName)
+                WorkspaceController.appLauncher?.invoke(
+                    displayId, request.packageName, request.activityName,
+                )
             }
         }
     }
