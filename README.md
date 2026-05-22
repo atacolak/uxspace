@@ -33,9 +33,11 @@ external display.
 
 A stock, non-rooted Android app, which bounds what is possible:
 
-- **Launching third-party apps needs Shizuku** — placing an app on a virtual display
-  requires shell privilege. VSpace uses [Shizuku](https://shizuku.rikka.app/) (borrowed
-  ADB-shell privilege, no root), bootstrapped once via Wireless debugging.
+- **Launching third-party apps needs shell-uid privilege** — placing an app on a virtual
+  display is not allowed for normal apps. VSpace activates its own shell-uid helper on
+  first run through Android 11's Wireless Debugging (`docs/PRIVILEGE.md`): the user enables
+  Wireless Debugging once, types the 6-digit pairing code into VSpace, and from then on
+  VSpace starts its helper itself on every launch — no separate app required.
 - **The phone is the input device** — a trackpad (one finger moves the cursor, two fingers
   scroll, a tap clicks) and, later, a keyboard. A Bluetooth mouse/keyboard also works.
 
