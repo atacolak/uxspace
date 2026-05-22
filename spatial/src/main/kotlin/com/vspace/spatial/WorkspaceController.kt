@@ -97,11 +97,35 @@ object WorkspaceController {
     @Volatile
     private var drawerOpenState = false
 
+    /** Which view the drawer is showing — every-installed-app, or only recently launched. */
+    enum class DrawerMode { ALL, RECENT }
+
+    @Volatile
+    var drawerMode: DrawerMode = DrawerMode.ALL
+        private set
+
+    /** Notified (on the main thread) when the drawer mode changes — the drawer re-filters. */
+    @Volatile
+    var onDrawerModeChanged: ((DrawerMode) -> Unit)? = null
+
+    /** Most-recent-first package names of apps launched into the workspace. */
+    private val recentAppsList = ArrayList<String>()
+
+    /** A snapshot of the workspace's recent-app launch history. */
+    val recentApps: List<String> get() = synchronized(recentAppsList) { recentAppsList.toList() }
+
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 
     /** Whether the app drawer is currently open. */
     val isDrawerOpen: Boolean get() = drawerOpenState
+
+    /** Set the drawer's filter mode; idempotent. The drawer re-filters via the hook. */
+    fun setDrawerMode(mode: DrawerMode) {
+        if (drawerMode == mode) return
+        drawerMode = mode
+        onDrawerModeChanged?.invoke(mode)
+    }
 
     /** The current view mode — pinned to the head, or free in the world. */
     val currentViewMode: WorkspaceRenderer.ViewMode get() = viewMode
@@ -125,6 +149,11 @@ object WorkspaceController {
     fun launchApp(packageName: String, activityName: String, label: String): Boolean {
         val current = renderer ?: return false
         current.requestApp(packageName, activityName, label)
+        synchronized(recentAppsList) {
+            recentAppsList.remove(packageName)
+            recentAppsList.add(0, packageName)
+            while (recentAppsList.size > MAX_RECENT_APPS) recentAppsList.removeAt(MAX_RECENT_APPS)
+        }
         onAppLaunched?.invoke(packageName, label)
         return true
     }
@@ -206,4 +235,7 @@ object WorkspaceController {
     fun click() {
         renderer?.cursorClick()
     }
+
+    /** How many distinct apps to remember in [recentApps]. */
+    private const val MAX_RECENT_APPS = 32
 }

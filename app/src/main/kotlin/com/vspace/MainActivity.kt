@@ -70,6 +70,14 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { /* ignored — the form fallback works without notifications */ }
 
+    /**
+     * Result-launcher for RECORD_AUDIO. Granted once at first launch so the OS doesn't
+     * re-prompt every time an app launched into the workspace tries to use the mic.
+     */
+    private val requestMicrophonePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* ignored — launched apps will see the system prompt themselves if denied */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -114,6 +122,7 @@ class MainActivity : ComponentActivity() {
         // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
         requestNotificationPermissionIfNeeded()
+        requestMicrophonePermissionIfNeeded()
         renderStatus()
     }
 
@@ -122,6 +131,13 @@ class MainActivity : ComponentActivity() {
         val perm = Manifest.permission.POST_NOTIFICATIONS
         if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
             requestNotificationPermission.launch(perm)
+        }
+    }
+
+    private fun requestMicrophonePermissionIfNeeded() {
+        val perm = Manifest.permission.RECORD_AUDIO
+        if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+            requestMicrophonePermission.launch(perm)
         }
     }
 

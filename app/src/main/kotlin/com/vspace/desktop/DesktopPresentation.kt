@@ -154,14 +154,14 @@ class DesktopPresentation(
         gravity = Gravity.CENTER_VERTICAL
         addView(
             taskbarButton(R.drawable.ic_apps, "App drawer") {
+                WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
                 WorkspaceController.setDrawerOpen(!WorkspaceController.isDrawerOpen)
             },
         )
         addView(buildDivider())
         addView(
-            // Until the workspace MRU list lands (docs/TASKBAR.md), Recent apps just opens
-            // the drawer so the button does something visible.
             taskbarButton(R.drawable.ic_recent, "Recent apps") {
+                WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.RECENT)
                 WorkspaceController.setDrawerOpen(true)
             },
         )
@@ -177,7 +177,8 @@ class DesktopPresentation(
         )
         addView(
             taskbarButton(R.drawable.ic_search, "Search") {
-                // Opens the drawer; focus-on-search comes when DrawerPresentation grows the hook.
+                // Search reaches all installed apps — not just the recent subset.
+                WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
                 WorkspaceController.setDrawerOpen(true)
             },
         )

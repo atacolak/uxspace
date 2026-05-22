@@ -17,6 +17,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+      Granted once at first launch so the OS doesn't re-prompt every time a launched app
+      (e.g. a video-call client running on the workspace) tries to record audio.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
       VSpace lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->

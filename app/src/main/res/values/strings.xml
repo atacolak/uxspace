@@ -33,8 +33,8 @@
     <string name="privilege_notification_title">VSpace pairing</string>
     <string name="privilege_notification_text">Type the 6-digit code from the Wireless Debugging pair dialog. Pull this shade down over the dialog and answer here — VSpace pairs while the dialog is still in front.</string>
 
-    <!-- Waiting scene — paired, but the glasses are not plugged in. -->
-    <string name="waiting_for_glasses">Connect your VITURE glasses to start.</string>
+    <!-- Waiting scene — paired, but no external display is attached. -->
+    <string name="waiting_for_glasses">Connect your VITURE glasses or an external monitor to start.</string>
 
     <!-- Main scene — both ready. -->
     <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>

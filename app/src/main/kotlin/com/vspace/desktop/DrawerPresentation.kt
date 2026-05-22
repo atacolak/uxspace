@@ -42,6 +42,8 @@ class DrawerPresentation(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
     private lateinit var search: EditText
+    private lateinit var allAppsTab: TextView
+    private lateinit var recentTab: TextView
 
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
@@ -56,13 +58,39 @@ class DrawerPresentation(
         WorkspaceController.onDrawerSearchQuery = { query ->
             mainHandler.post { setSearchText(query) }
         }
+        // Two ways the drawer changes mode: this hook (from the taskbar's All apps /
+        // Recent buttons) and the in-drawer tab labels themselves.
+        WorkspaceController.onDrawerModeChanged = { mode ->
+            mainHandler.post { applyMode(mode) }
+        }
+        applyMode(WorkspaceController.drawerMode)
     }
 
     override fun onStop() {
         if (WorkspaceController.onDrawerSearchQuery != null) {
             WorkspaceController.onDrawerSearchQuery = null
         }
+        if (WorkspaceController.onDrawerModeChanged != null) {
+            WorkspaceController.onDrawerModeChanged = null
+        }
         super.onStop()
+    }
+
+    /** Reflect the controller's drawer mode in the tab styling and the adapter's filter. */
+    private fun applyMode(mode: WorkspaceController.DrawerMode) {
+        if (::allAppsTab.isInitialized) styleTab(allAppsTab, mode == WorkspaceController.DrawerMode.ALL)
+        if (::recentTab.isInitialized) styleTab(recentTab, mode == WorkspaceController.DrawerMode.RECENT)
+        adapter.setMode(mode, WorkspaceController.recentApps)
+    }
+
+    private fun styleTab(tab: TextView, active: Boolean) {
+        if (active) {
+            tab.setTextColor(TAB_ACTIVE)
+            tab.typeface = Typeface.DEFAULT_BOLD
+        } else {
+            tab.setTextColor(TAB_INACTIVE)
+            tab.typeface = Typeface.DEFAULT
+        }
     }
 
     /** Mirror externally-typed text into the search box without re-triggering its watcher. */
@@ -75,12 +103,18 @@ class DrawerPresentation(
 
     /** The panel fills the surface — the renderer positions and scrims it in the scene. */
     private fun buildPanel(): View {
+        allAppsTab = tabLabel("All apps") {
+            WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
+        }
+        recentTab = tabLabel("Recent") {
+            WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.RECENT)
+        }
         val tabs = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            addView(tabLabel("Personal", active = true))
+            addView(allAppsTab)
             addView(
-                tabLabel("Work", active = false),
+                recentTab,
                 LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(36) },
             )
         }
@@ -128,16 +162,12 @@ class DrawerPresentation(
         }
     }
 
-    private fun tabLabel(text: String, active: Boolean): TextView = TextView(context).apply {
+    private fun tabLabel(text: String, onClick: () -> Unit): TextView = TextView(context).apply {
         this.text = text
         textSize = 15f
         setPadding(dp(8), dp(6), dp(8), dp(6))
-        if (active) {
-            setTextColor(TAB_ACTIVE)
-            typeface = Typeface.DEFAULT_BOLD
-        } else {
-            setTextColor(TAB_INACTIVE)
-        }
+        setTextColor(TAB_INACTIVE)
+        setOnClickListener { onClick() }
     }
 
     private fun launch(app: InstalledApp) {
@@ -152,11 +182,13 @@ class DrawerPresentation(
         }.start()
     }
 
-    /** Grid adapter — one icon-over-label cell per installed app, with search filtering. */
+    /** Grid adapter — one icon-over-label cell per installed app, with mode + search filtering. */
     private inner class AppGridAdapter : BaseAdapter() {
         private val full = ArrayList<InstalledApp>()
         private val items = ArrayList<InstalledApp>()
         private var query = ""
+        private var mode: WorkspaceController.DrawerMode = WorkspaceController.DrawerMode.ALL
+        private var recentOrder: List<String> = emptyList()
 
         fun submit(apps: List<InstalledApp>) {
             full.clear()
@@ -169,11 +201,24 @@ class DrawerPresentation(
             recompute()
         }
 
+        fun setMode(mode: WorkspaceController.DrawerMode, recentPackages: List<String>) {
+            this.mode = mode
+            this.recentOrder = recentPackages
+            recompute()
+        }
+
         private fun recompute() {
+            val base = when (mode) {
+                WorkspaceController.DrawerMode.ALL -> full
+                WorkspaceController.DrawerMode.RECENT -> {
+                    val byPkg = full.associateBy { it.packageName }
+                    recentOrder.mapNotNull { byPkg[it] }
+                }
+            }
             items.clear()
             items.addAll(
-                if (query.isEmpty()) full
-                else full.filter { it.label.contains(query, ignoreCase = true) },
+                if (query.isEmpty()) base
+                else base.filter { it.label.contains(query, ignoreCase = true) },
             )
             notifyDataSetChanged()
         }
