@@ -82,6 +82,7 @@ class WorkspaceRenderer(
     private var surfaceAspect = 1.78f
 
     @Volatile private var captureRequested = false
+    @Volatile private var pendingScroll = 0f
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
@@ -125,6 +126,11 @@ class WorkspaceRenderer(
     /** Request a PNG snapshot of the next rendered frame. Safe to call from any thread. */
     fun requestCapture() {
         captureRequested = true
+    }
+
+    /** Accumulate a scroll delta (fraction of the touchpad height). Safe from any thread. */
+    fun requestScroll(dyFraction: Float) {
+        pendingScroll += dyFraction
     }
 
     /** Move the cursor by a fraction of the touchpad's width. Safe to call from any thread. */
@@ -229,6 +235,10 @@ class WorkspaceRenderer(
             cursorClickPending = false
             cursorFlashFrames = CURSOR_FLASH_FRAMES
             handleClick()
+        }
+        if (pendingScroll != 0f) {
+            handleScroll(pendingScroll)
+            pendingScroll = 0f
         }
         drawCursor()
 
@@ -335,22 +345,40 @@ class WorkspaceRenderer(
      */
     private fun handleClick() {
         val d = desktop ?: return
-        if (!Matrix.invertM(invViewProjection, 0, viewProjection, 0)) return
-        val near = unproject(cursorX, cursorY, -1f) ?: return
-        val far = unproject(cursorX, cursorY, 1f) ?: return
+        val px = cursorToDesktopPx() ?: return
+        mainHandler.post { d.dispatchTap(px[0], px[1]) }
+    }
+
+    /** Dispatch an accumulated scroll delta onto the desktop under the cursor. */
+    private fun handleScroll(dyFraction: Float) {
+        val d = desktop ?: return
+        val px = cursorToDesktopPx() ?: return
+        val vScroll = dyFraction * SCROLL_SENSITIVITY
+        mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
+    }
+
+    /**
+     * Ray-cast the screen-space cursor onto the desktop plane; returns the matching desktop
+     * pixel as `[px, py]`, or null if the cursor misses the desktop.
+     */
+    private fun cursorToDesktopPx(): FloatArray? {
+        if (!Matrix.invertM(invViewProjection, 0, viewProjection, 0)) return null
+        val near = unproject(cursorX, cursorY, -1f) ?: return null
+        val far = unproject(cursorX, cursorY, 1f) ?: return null
         val dirZ = far[2] - near[2]
-        if (abs(dirZ) < 1e-5f) return
+        if (abs(dirZ) < 1e-5f) return null
         // Intersect the cursor ray with the desktop plane at z = -DESKTOP_DISTANCE.
         val t = (-DESKTOP_DISTANCE - near[2]) / dirZ
-        if (t < 0f) return
+        if (t < 0f) return null
         val hitX = near[0] + t * (far[0] - near[0])
         val hitY = near[1] + t * (far[1] - near[1])
         val hw = desktopHalfWidth
         val hh = desktopHalfHeight
-        if (hitX < -hw || hitX > hw || hitY < -hh || hitY > hh) return
-        val px = (hitX + hw) / (2f * hw) * DESKTOP_WIDTH_PX
-        val py = (hh - hitY) / (2f * hh) * DESKTOP_HEIGHT_PX
-        mainHandler.post { d.dispatchTap(px, py) }
+        if (hitX < -hw || hitX > hw || hitY < -hh || hitY > hh) return null
+        return floatArrayOf(
+            (hitX + hw) / (2f * hw) * DESKTOP_WIDTH_PX,
+            (hh - hitY) / (2f * hh) * DESKTOP_HEIGHT_PX,
+        )
     }
 
     /** Unproject an NDC point to world space via the inverse view-projection. */
@@ -490,6 +518,9 @@ class WorkspaceRenderer(
         const val CURSOR_SCALE = 0.0281f
         const val CURSOR_SENSITIVITY = 2.6f
         const val CURSOR_FLASH_FRAMES = 12
+
+        /** Scroll units (AXIS_VSCROLL) per full touchpad-height of two-finger drag. */
+        const val SCROLL_SENSITIVITY = 12f
 
         const val ARROW_STRIDE_BYTES = 2 * 4
         const val CURSOR_ARROW_VERTEX_COUNT = 3

@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
         }
         binding.trackpad.onMove = { dx, dy -> WorkspaceController.moveCursor(dx, dy) }
         binding.trackpad.onTap = { WorkspaceController.click() }
+        binding.trackpad.onScroll = { dy -> WorkspaceController.scroll(dy) }
         // Keep the panel resumed during a session, so re-showing the workspace after a
         // glasses blip happens from a live window.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

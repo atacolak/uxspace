@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.Surface
 
@@ -95,6 +96,34 @@ class UiScreen(
         root.dispatchTouchEvent(up)
         down.recycle()
         up.recycle()
+    }
+
+    /**
+     * Dispatch a vertical scroll at pixel [px], [py] into the hosted UI — the same
+     * `ACTION_SCROLL` event a mouse wheel produces. Call on the main thread.
+     */
+    fun dispatchScroll(px: Float, py: Float, vScroll: Float) {
+        val root = presentation?.window?.decorView ?: return
+        val now = SystemClock.uptimeMillis()
+        val properties = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_MOUSE
+            },
+        )
+        val coords = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                x = px
+                y = py
+                setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll)
+            },
+        )
+        val event = MotionEvent.obtain(
+            now, now, MotionEvent.ACTION_SCROLL, 1, properties, coords,
+            0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0,
+        )
+        root.dispatchGenericMotionEvent(event)
+        event.recycle()
     }
 
     /** Release the Presentation, VirtualDisplay, and Surface/GL resources. GL thread. */

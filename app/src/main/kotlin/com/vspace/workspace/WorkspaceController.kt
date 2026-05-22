@@ -54,6 +54,11 @@ object WorkspaceController {
         renderer?.moveCursor(dxFraction, dyFraction)
     }
 
+    /** Scroll the screen under the cursor by a fraction of the touchpad's height. */
+    fun scroll(dyFraction: Float) {
+        renderer?.requestScroll(dyFraction)
+    }
+
     /** Register a cursor click in the workspace. */
     fun click() {
         renderer?.cursorClick()
