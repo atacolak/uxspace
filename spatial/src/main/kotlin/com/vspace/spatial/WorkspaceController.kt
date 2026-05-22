@@ -54,6 +54,16 @@ object WorkspaceController {
         return true
     }
 
+    /** Close every launched app window. */
+    fun closeApps() {
+        renderer?.requestCloseApps()
+    }
+
+    /** Hide or restore the launched app windows (minimise / restore). */
+    fun setAppsHidden(hidden: Boolean) {
+        renderer?.setAppsHidden(hidden)
+    }
+
     /** Switch how the screen tracks the head; remembered across workspace restarts. */
     fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
         viewMode = mode

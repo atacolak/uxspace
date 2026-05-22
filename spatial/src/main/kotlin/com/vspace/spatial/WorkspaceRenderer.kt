@@ -18,8 +18,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
 
 /**
  * Renders the workspace as a 3D scene of textured quads: the desktop (a [UiScreen] — the
@@ -82,6 +80,8 @@ class WorkspaceRenderer(
 
     @Volatile private var captureRequested = false
     @Volatile private var pendingScroll = 0f
+    @Volatile private var closeAppsRequested = false
+    @Volatile private var appsHidden = false
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
@@ -130,6 +130,16 @@ class WorkspaceRenderer(
     /** Accumulate a scroll delta (fraction of the touchpad height). Safe from any thread. */
     fun requestScroll(dyFraction: Float) {
         pendingScroll += dyFraction
+    }
+
+    /** Close all launched app windows on the next frame. Safe to call from any thread. */
+    fun requestCloseApps() {
+        closeAppsRequested = true
+    }
+
+    /** Hide or restore launched app windows (minimise). Safe to call from any thread. */
+    fun setAppsHidden(hidden: Boolean) {
+        appsHidden = hidden
     }
 
     /** Move the cursor by a fraction of the touchpad's width. Safe to call from any thread. */
@@ -203,6 +213,11 @@ class WorkspaceRenderer(
 
     override fun onDrawFrame(gl: GL10?) {
         drainPendingApps()
+        if (closeAppsRequested) {
+            closeAppsRequested = false
+            screens.forEach { it.release() }
+            screens.clear()
+        }
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         if (surfaceWidth == 0 || surfaceHeight == 0) return
@@ -223,8 +238,8 @@ class WorkspaceRenderer(
             drawExternalQuad(d.textureId, d.textureMatrix)
         }
 
-        // Launched apps — quads in front of the desktop.
-        if (screens.isNotEmpty()) {
+        // Launched apps — quads in front of the desktop (skipped while minimised).
+        if (!appsHidden && screens.isNotEmpty()) {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
             for (screen in screens) {
                 screen.updateTexture()
@@ -298,17 +313,21 @@ class WorkspaceRenderer(
         }
     }
 
-    /** Arrange the screens on a gentle arc in front of the viewer, each facing inward. */
+    /** Place the single app window in the desktop area above the taskbar. */
     private fun relayout() {
-        val count = screens.size
-        screens.forEachIndexed { index, screen ->
-            val angleDeg = (index - (count - 1) / 2f) * SCREEN_SPREAD_DEGREES
-            val angleRad = Math.toRadians(angleDeg.toDouble())
-            screen.worldX = (SCREEN_DISTANCE * sin(angleRad)).toFloat()
-            screen.worldZ = (-SCREEN_DISTANCE * cos(angleRad)).toFloat()
-            screen.worldYawDeg = -angleDeg
-            screen.worldWidth = SCREEN_FILL_WIDTH
-        }
+        val screen = screens.firstOrNull() ?: return
+        val topY = desktopHalfHeight
+        val bottomY = -desktopHalfHeight + TASKBAR_RESERVE * (2f * desktopHalfHeight)
+        val availW = (2f * desktopHalfWidth) * WINDOW_MARGIN
+        val availH = (topY - bottomY) * WINDOW_MARGIN
+        val aspect = SCREEN_WIDTH_PX.toFloat() / SCREEN_HEIGHT_PX.toFloat()
+        var w = availW
+        if (w / aspect > availH) w = availH * aspect
+        screen.worldX = 0f
+        screen.worldY = (topY + bottomY) / 2f
+        screen.worldZ = -SCREEN_DISTANCE
+        screen.worldYawDeg = 0f
+        screen.worldWidth = w
     }
 
     /** Draw the touchpad cursor — an arrow pointer — as a flat overlay on top of everything. */
@@ -482,7 +501,7 @@ class WorkspaceRenderer(
     /** Model matrix placing the unit quad at the screen's world position, facing, and size. */
     private fun buildModel(out: FloatArray, screen: VirtualScreen) {
         Matrix.setIdentityM(out, 0)
-        Matrix.translateM(out, 0, screen.worldX, 0f, screen.worldZ)
+        Matrix.translateM(out, 0, screen.worldX, screen.worldY, screen.worldZ)
         Matrix.rotateM(out, 0, screen.worldYawDeg, 0f, 1f, 0f)
         Matrix.scaleM(out, 0, screen.worldWidth / 2f, screen.worldHeight / 2f, 1f)
     }
@@ -516,8 +535,12 @@ class WorkspaceRenderer(
         /** A single launched app for now, sized to fill the view. */
         const val MAX_SCREENS = 1
         const val SCREEN_DISTANCE = 4.0f
-        const val SCREEN_SPREAD_DEGREES = 28f
-        const val SCREEN_FILL_WIDTH = 7.2f
+
+        /** Fraction of the desktop height reserved at the bottom for the taskbar. */
+        const val TASKBAR_RESERVE = 0.085f
+
+        /** App windows shrink slightly so they do not touch the desktop edges. */
+        const val WINDOW_MARGIN = 0.98f
 
         /** Cursor scale (NDC), motion per touchpad-width, and click-flash duration. */
         const val CURSOR_SCALE = 0.0281f

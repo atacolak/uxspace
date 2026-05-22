@@ -36,6 +36,7 @@ class VirtualScreen(
 
     /** World placement; [WorkspaceRenderer] turns these into the quad's model matrix. */
     var worldX: Float = 0f
+    var worldY: Float = 0f
     var worldZ: Float = -DEFAULT_DISTANCE
     /** Rotation about the Y axis, in degrees — angles a side screen to face the viewer. */
     var worldYawDeg: Float = 0f

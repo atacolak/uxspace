@@ -54,6 +54,7 @@ class DesktopPresentation(
     private var drawer: View? = null
     private lateinit var clock: TextView
     private lateinit var runningApps: LinearLayout
+    private var minimized = false
 
     /** Refreshes the taskbar clock; re-posts itself while the desktop is shown. */
     private val clockTick = object : Runnable {
@@ -214,33 +215,26 @@ class DesktopPresentation(
             setLineSpacing(0f, 0.95f)
             text = clockText()
         }
-        // A full-width bar: launcher + running apps on the left, the clock on the right.
-        val bar = LinearLayout(context).apply {
+        // Launcher + running apps form a group centred in the bar; the clock sits right.
+        val centerGroup = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(6), dp(20), dp(6))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(26).toFloat()
-                setColor(Color.argb(232, 20, 22, 30))
-                setStroke(dp(1), Color.argb(36, 255, 255, 255))
-            }
             addView(launcher)
             addView(runningApps, LinearLayout.LayoutParams(WRAP, WRAP))
-            // A weighted spacer pushes the clock to the far right.
-            addView(View(context), LinearLayout.LayoutParams(0, dp(1), 1f))
-            addView(clock)
+        }
+        // A full-width bar flush with the bottom edge — no floating gap.
+        val bar = FrameLayout(context).apply {
+            setPadding(dp(22), dp(4), dp(24), dp(4))
+            setBackgroundColor(TASKBAR_BG)
+            addView(centerGroup, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+            addView(
+                clock,
+                FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL),
+            )
         }
         return FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
-            addView(
-                bar,
-                FrameLayout.LayoutParams(MATCH, dp(60)).apply {
-                    gravity = Gravity.BOTTOM
-                    marginStart = dp(20)
-                    marginEnd = dp(20)
-                    bottomMargin = dp(16)
-                },
-            )
+            addView(bar, FrameLayout.LayoutParams(MATCH, dp(58)).apply { gravity = Gravity.BOTTOM })
         }
     }
 
@@ -255,15 +249,43 @@ class DesktopPresentation(
         drawer?.visibility = View.GONE
     }
 
-    /** Show the launched app's icon in the taskbar's running-apps strip. */
+    /** Show the launched app in the taskbar — the icon toggles minimise, the × closes it. */
     private fun showRunningApp(app: InstalledApp) {
         if (!::runningApps.isInitialized) return
         // One screen at a time today, so the strip shows the current app.
         runningApps.removeAllViews()
+        minimized = false
+        val icon = ImageView(context).apply {
+            setImageDrawable(app.icon)
+            setOnClickListener { toggleMinimized(this) }
+        }
+        val close = ImageButton(context).apply {
+            setImageResource(R.drawable.ic_close)
+            background = null
+            setOnClickListener { closeRunningApp() }
+        }
         runningApps.addView(
-            ImageView(context).apply { setImageDrawable(app.icon) },
-            LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(8) },
+            icon,
+            LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },
         )
+        runningApps.addView(
+            close,
+            LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(1) },
+        )
+    }
+
+    /** Tap the running-app icon: minimise the window, or restore it. */
+    private fun toggleMinimized(icon: ImageView) {
+        minimized = !minimized
+        WorkspaceController.setAppsHidden(minimized)
+        icon.alpha = if (minimized) 0.4f else 1f
+    }
+
+    /** Tap the ×: close the window and clear the running-app strip. */
+    private fun closeRunningApp() {
+        WorkspaceController.closeApps()
+        runningApps.removeAllViews()
+        minimized = false
     }
 
     private fun clockText(): String =
@@ -347,6 +369,7 @@ class DesktopPresentation(
         const val TAB_INACTIVE = 0xFF9A9CA3.toInt()
         const val HINT_COLOR = 0xFF8A8C93.toInt()
         const val TASKBAR_TEXT = 0xFFE6E8EE.toInt()
+        const val TASKBAR_BG = 0xF0121620.toInt()
         const val CLOCK_INTERVAL_MS = 20_000L
     }
 }
