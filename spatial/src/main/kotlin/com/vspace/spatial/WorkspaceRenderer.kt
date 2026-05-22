@@ -296,6 +296,9 @@ class WorkspaceRenderer(
         val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
         desktopHalfHeight = (DESKTOP_DISTANCE * Math.tan(halfFov)).toFloat()
         desktopHalfWidth = desktopHalfHeight * surfaceAspect
+        // Keep the desktop surface at the band's aspect, so its wallpaper is centre-cropped
+        // (the wallpaper ImageView is CENTER_CROP) rather than stretched onto the quad.
+        desktop?.resize(surfaceWidth, bandH)
         relayout()
     }
 
@@ -705,13 +708,14 @@ class WorkspaceRenderer(
 
     /** Cursor → desktop pixel `[px, py]`, or null if the cursor misses the desktop. */
     private fun cursorToDesktopPx(): FloatArray? {
+        val d = desktop ?: return null
         val hit = cursorRayHit(-DESKTOP_DISTANCE) ?: return null
         val hw = desktopHalfWidth
         val hh = desktopHalfHeight
         if (hit[0] < -hw || hit[0] > hw || hit[1] < -hh || hit[1] > hh) return null
         return floatArrayOf(
-            (hit[0] + hw) / (2f * hw) * DESKTOP_WIDTH_PX,
-            (hh - hit[1]) / (2f * hh) * DESKTOP_HEIGHT_PX,
+            (hit[0] + hw) / (2f * hw) * d.width,
+            (hh - hit[1]) / (2f * hh) * d.height,
         )
     }
 

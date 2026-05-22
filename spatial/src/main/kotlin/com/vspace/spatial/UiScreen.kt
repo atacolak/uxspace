@@ -29,14 +29,23 @@ import android.view.Surface
 class UiScreen(
     /** GL external-OES texture name the UI's frames are decoded into. */
     val textureId: Int,
-    private val widthPx: Int,
-    private val heightPx: Int,
+    initialWidth: Int,
+    initialHeight: Int,
     private val mainHandler: Handler,
     /** Virtual-display name — kept distinct per screen (desktop, each window's chrome). */
     private val displayName: String,
 ) {
+    /** Current surface size — mutable, since [resize] can change it (see the render band). */
+    @Volatile
+    var width: Int = initialWidth
+        private set
+
+    @Volatile
+    var height: Int = initialHeight
+        private set
+
     val surfaceTexture: SurfaceTexture =
-        SurfaceTexture(textureId).apply { setDefaultBufferSize(widthPx, heightPx) }
+        SurfaceTexture(textureId).apply { setDefaultBufferSize(initialWidth, initialHeight) }
 
     private val surface = Surface(surfaceTexture)
 
@@ -61,7 +70,7 @@ class UiScreen(
             return
         }
         val virtual = displayManager.createVirtualDisplay(
-            displayName, widthPx, heightPx, DENSITY_DPI, surface, FLAGS,
+            displayName, width, height, DENSITY_DPI, surface, FLAGS,
         )
         if (virtual == null) {
             Log.e(TAG, "createVirtualDisplay returned null")
@@ -74,7 +83,20 @@ class UiScreen(
             Log.e(TAG, "could not show the desktop presentation", e)
             null
         }
-        Log.i(TAG, "ui screen ready ${widthPx}x$heightPx display=${virtual.display.displayId}")
+        Log.i(TAG, "ui screen ready ${width}x$height display=${virtual.display.displayId}")
+    }
+
+    /**
+     * Resize the UI surface and its virtual display — the hosted [Presentation] re-lays-out
+     * to the new size. Used to keep the desktop matching the render band's aspect, so its
+     * wallpaper is centre-cropped rather than stretched. Call on the GL thread.
+     */
+    fun resize(newWidth: Int, newHeight: Int) {
+        if (released || (newWidth == width && newHeight == height)) return
+        width = newWidth
+        height = newHeight
+        surfaceTexture.setDefaultBufferSize(newWidth, newHeight)
+        virtualDisplay?.resize(newWidth, newHeight, DENSITY_DPI)
     }
 
     /** Pull the latest UI frame into the GL texture. Call on the GL thread. */
