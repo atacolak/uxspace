@@ -106,7 +106,7 @@ class WorkspaceRenderer(
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
-    /** Fraction of the display the scene renders into, centred — letterboxed on the glasses. */
+    /** Fraction of the display height the scene renders into — full width, centred band. */
     @Volatile private var screenBand = DEFAULT_SCREEN_BAND
     @Volatile private var bandDirty = false
 
@@ -270,25 +270,26 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Render the workspace into [fraction] of the display, centred. The extreme top and
-     * bottom of the glasses' field of view are hard to see, so the scene is rendered into a
-     * smaller centred rectangle (letterboxed). Safe to call from any thread.
+     * Render the workspace into a band [fraction] of the display tall — full width, centred.
+     * The extreme top and bottom of the glasses' field of view are hard to see, so the scene
+     * is letterboxed into a shorter centred band. Safe to call from any thread.
      */
     fun setScreenBand(fraction: Float) {
         screenBand = fraction.coerceIn(MIN_SCREEN_BAND, 1f)
         bandDirty = true
     }
 
-    /** Apply the render band — a centred viewport at the band's scale. GL thread only. */
+    /**
+     * Apply the render band — the full display width, a reduced centred height. The glasses'
+     * top and bottom edges are hard to view; the full width is comfortable. GL thread only.
+     */
     private fun applyBand() {
         bandDirty = false
         if (surfaceWidth == 0 || surfaceHeight == 0) return
-        // Scale both dimensions, so the aspect (and thus the scene) is never distorted.
-        val bandW = (surfaceWidth * screenBand).toInt().coerceAtLeast(1)
         val bandH = (surfaceHeight * screenBand).toInt().coerceAtLeast(1)
-        GLES20.glViewport((surfaceWidth - bandW) / 2, (surfaceHeight - bandH) / 2, bandW, bandH)
+        GLES20.glViewport(0, (surfaceHeight - bandH) / 2, surfaceWidth, bandH)
 
-        surfaceAspect = bandW.toFloat() / bandH.toFloat()
+        surfaceAspect = surfaceWidth.toFloat() / bandH.toFloat()
         Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, surfaceAspect, NEAR_PLANE, FAR_PLANE)
 
         // Size the desktop quad to exactly fill the field of view at its distance.
