@@ -17,6 +17,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // libadb-android and sun-security-android — the embedded ADB client (see docs/PRIVILEGE.md).
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
