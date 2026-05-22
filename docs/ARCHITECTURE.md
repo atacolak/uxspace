@@ -138,8 +138,8 @@ device. The decoupling also sets up the `:tracking`/`:viture` split and Shizuku 
    `VirtualScreen`, `WorkspaceController`, `WorkspaceSurfaceView`, `WorkspacePresentation`
    — into a `:spatial` library. The renderer reaches `DesktopPresentation` and Shizuku
    only through injected `WorkspaceController` hooks, so the graph
-   `:glasses ← :spatial ← :app` is acyclic. (Code still in package `com.vspace.workspace`;
-   a rename to `com.vspace.spatial` is a later cleanup.)
+   `:glasses ← :spatial ← :app` is acyclic. Code is in package `com.vspace.spatial`; the
+   desktop UI (`DesktopPresentation`) in `com.vspace.desktop`.
 4. ⏳ **Extract `:ui`.** Cursor, input mapping, shared view components — once that
    framework exists (M4).
 5. **Bundle Shizuku** into `:privileged` — server in the APK, in-app Wireless-Debugging
