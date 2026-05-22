@@ -177,7 +177,7 @@ class DesktopPresentation(
             setBackgroundColor(DRAWER_SCRIM)
             visibility = View.GONE
             // A tap on the dimmed area outside the panel closes the drawer.
-            setOnClickListener { visibility = View.GONE }
+            setOnClickListener { setDrawerVisible(false) }
             addView(
                 panel,
                 FrameLayout.LayoutParams(MATCH, MATCH).apply {
@@ -245,14 +245,23 @@ class DesktopPresentation(
     }
 
     private fun toggleDrawer() {
-        val d = drawer ?: return
-        d.visibility = if (d.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        setDrawerVisible(drawer?.visibility != View.VISIBLE)
+    }
+
+    /**
+     * Show or hide the app drawer. While it is open the app windows are lifted out of the way
+     * — the drawer is drawn on the desktop plane, behind them, so it would otherwise be
+     * occluded.
+     */
+    private fun setDrawerVisible(visible: Boolean) {
+        drawer?.visibility = if (visible) View.VISIBLE else View.GONE
+        WorkspaceController.setDrawerOpen(visible)
     }
 
     private fun launch(app: InstalledApp) {
         WorkspaceController.launchApp(app.packageName, app.activityName, app.label)
         showRunningApp(app)
-        drawer?.visibility = View.GONE
+        setDrawerVisible(false)
     }
 
     /**

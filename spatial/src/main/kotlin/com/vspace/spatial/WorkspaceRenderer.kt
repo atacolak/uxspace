@@ -98,6 +98,7 @@ class WorkspaceRenderer(
     @Volatile private var captureRequested = false
     @Volatile private var pendingScroll = 0f
     @Volatile private var appsHidden = false
+    @Volatile private var drawerOpen = false
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
@@ -162,6 +163,14 @@ class WorkspaceRenderer(
     /** Hide or restore launched app windows (minimise). Safe to call from any thread. */
     fun setAppsHidden(hidden: Boolean) {
         appsHidden = hidden
+    }
+
+    /**
+     * Lift the app windows out of the way while the app drawer is open. The drawer lives on
+     * the desktop plane behind the windows, so it would otherwise be occluded by them.
+     */
+    fun setDrawerOpen(open: Boolean) {
+        drawerOpen = open
     }
 
     /** Move the cursor by a fraction of the touchpad's width. Safe to call from any thread. */
@@ -264,8 +273,8 @@ class WorkspaceRenderer(
         }
 
         // Launched app windows — the content quad and the title-bar quad above it, in front
-        // of the desktop (skipped while minimised).
-        if (!appsHidden && windows.isNotEmpty()) {
+        // of the desktop (skipped while minimised, or while the app drawer is open).
+        if (!appsHidden && !drawerOpen && windows.isNotEmpty()) {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
             for (window in windows) {
                 val content = window.content
@@ -367,7 +376,9 @@ class WorkspaceRenderer(
                     displayId, request.packageName, request.activityName,
                 )
             }
-            chrome.start(appContext) { ctx, display ->
+            // Use the UI context (not the application context): a Presentation is a window
+            // and must be created from a context that can host one.
+            chrome.start(context) { ctx, display ->
                 WindowChrome(
                     ctx, display, request.label,
                     onMinimize = { WorkspaceController.setAppsHidden(true) },
@@ -491,7 +502,7 @@ class WorkspaceRenderer(
      * the click goes to the desktop's own One UI view tree.
      */
     private fun handleClick() {
-        if (!appsHidden) {
+        if (!appsHidden && !drawerOpen) {
             for (window in windows) {
                 val chromePx = cursorToRectPx(
                     window.chromeX, window.chromeY, window.chromeZ,

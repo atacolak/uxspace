@@ -79,6 +79,11 @@ object WorkspaceController {
         renderer?.setAppsHidden(hidden)
     }
 
+    /** Tell the renderer the app drawer is open, so it lifts above the app windows. */
+    fun setDrawerOpen(open: Boolean) {
+        renderer?.setDrawerOpen(open)
+    }
+
     /** Begin / end a window drag — the touchpad reports a press-and-hold as a drag. */
     fun beginDrag() {
         renderer?.beginDrag()
