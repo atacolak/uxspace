@@ -30,6 +30,12 @@ class TrackpadView @JvmOverloads constructor(
     /** Called on a two-finger drag with the vertical movement, as a fraction of pad height. */
     var onScroll: ((dyFraction: Float) -> Unit)? = null
 
+    /** Called when a press-and-hold turns the touch into a drag — used to grab a window. */
+    var onDragStart: (() -> Unit)? = null
+
+    /** Called when a drag ends. */
+    var onDragEnd: (() -> Unit)? = null
+
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -40,6 +46,17 @@ class TrackpadView @JvmOverloads constructor(
     /** Latched true once a second finger lands; cleared when all fingers lift. */
     private var scrolling = false
     private var lastScrollY = 0f
+
+    /** True once a press-and-hold has turned the current touch into a window drag. */
+    private var dragging = false
+
+    /** Posted on touch-down; fires if the finger holds still long enough to mean a drag. */
+    private val holdRunnable = Runnable {
+        if (!scrolling && !movedFar) {
+            dragging = true
+            onDragStart?.invoke()
+        }
+    }
 
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FF9AA0AC")
@@ -57,11 +74,16 @@ class TrackpadView @JvmOverloads constructor(
                 downTime = event.eventTime
                 movedFar = false
                 scrolling = false
+                dragging = false
+                removeCallbacks(holdRunnable)
+                postDelayed(holdRunnable, HOLD_MS)
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 // A second finger — switch from cursor-move to two-finger scroll.
                 scrolling = true
                 movedFar = true
+                removeCallbacks(holdRunnable)
+                endDragIfActive()
                 lastScrollY = averageY(event)
             }
             MotionEvent.ACTION_MOVE -> {
@@ -78,6 +100,8 @@ class TrackpadView @JvmOverloads constructor(
                         abs(event.y - downY) > TAP_SLOP_PX
                     ) {
                         movedFar = true
+                        // Moving before the hold fires means a cursor move, not a drag.
+                        if (!dragging) removeCallbacks(holdRunnable)
                     }
                     if (width > 0) onMove?.invoke(dx / width, dy / width)
                 }
@@ -87,14 +111,28 @@ class TrackpadView @JvmOverloads constructor(
                 lastScrollY = averageY(event, lifting = event.actionIndex)
             }
             MotionEvent.ACTION_UP -> {
-                if (!scrolling && !movedFar &&
+                removeCallbacks(holdRunnable)
+                if (dragging) {
+                    endDragIfActive()
+                } else if (!scrolling && !movedFar &&
                     event.eventTime - downTime < TAP_TIMEOUT_MS
                 ) {
                     onTap?.invoke()
                 }
             }
+            MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(holdRunnable)
+                endDragIfActive()
+            }
         }
         return true
+    }
+
+    private fun endDragIfActive() {
+        if (dragging) {
+            dragging = false
+            onDragEnd?.invoke()
+        }
     }
 
     /** Mean Y of the active pointers, optionally excluding one that is lifting. */
@@ -112,7 +150,7 @@ class TrackpadView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawText(
-            "Touchpad — drag to move, tap to click, two fingers to scroll",
+            "Touchpad — drag to move · tap to click · hold to grab a window · two fingers scroll",
             width / 2f,
             height / 2f,
             labelPaint,
@@ -122,5 +160,8 @@ class TrackpadView @JvmOverloads constructor(
     private companion object {
         const val TAP_SLOP_PX = 24f
         const val TAP_TIMEOUT_MS = 300L
+
+        /** Hold this long without moving and the touch becomes a window drag. */
+        const val HOLD_MS = 240L
     }
 }

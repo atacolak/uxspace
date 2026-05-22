@@ -37,15 +37,28 @@ class WorkspaceRenderer(
 
     private val appContext: Context = context.applicationContext
 
-    private data class AppRequest(val packageName: String, val activityName: String)
+    private data class AppRequest(
+        val packageName: String,
+        val activityName: String,
+        val label: String,
+    )
 
     private val pendingApps = ConcurrentLinkedQueue<AppRequest>()
-    private val screens = ArrayList<VirtualScreen>()
+    /** Window-control actions posted from the main thread to run on the GL thread. */
+    private val glTasks = ConcurrentLinkedQueue<() -> Unit>()
+    private val windows = ArrayList<AppWindow>()
     private var nextScreenId = 1
 
-    /** Closed screens whose app is being force-stopped, awaiting display release. */
-    private val closingScreens = ArrayList<VirtualScreen>()
+    /** Closed windows whose app is being force-stopped, awaiting display release. */
+    private val closingWindows = ArrayList<AppWindow>()
     private var closeReleaseAtNanos = 0L
+
+    // Window drag — the touchpad reports a press-and-hold as a drag (see TrackpadView).
+    @Volatile private var dragActive = false
+    @Volatile private var dragBeginPending = false
+    private var grabbed: AppWindow? = null
+    private var grabOffsetX = 0f
+    private var grabOffsetY = 0f
 
     /** The desktop — VSpace's own One UI home, hosted on its own virtual display. */
     private var desktop: UiScreen? = null
@@ -84,7 +97,6 @@ class WorkspaceRenderer(
 
     @Volatile private var captureRequested = false
     @Volatile private var pendingScroll = 0f
-    @Volatile private var closeAppsRequested = false
     @Volatile private var appsHidden = false
 
     private var surfaceWidth = 0
@@ -108,9 +120,9 @@ class WorkspaceRenderer(
     private val clipPoint = FloatArray(4)
     private val worldPoint = FloatArray(4)
 
-    /** Queue an app to be placed on a virtual screen. Safe to call from any thread. */
-    fun requestApp(packageName: String, activityName: String) {
-        pendingApps.add(AppRequest(packageName, activityName))
+    /** Queue an app to be opened in a window. Safe to call from any thread. */
+    fun requestApp(packageName: String, activityName: String, label: String) {
+        pendingApps.add(AppRequest(packageName, activityName, label))
     }
 
     /** Feed a head-orientation quaternion for the camera. Safe to call from any thread. */
@@ -136,9 +148,15 @@ class WorkspaceRenderer(
         pendingScroll += dyFraction
     }
 
-    /** Close all launched app windows on the next frame. Safe to call from any thread. */
-    fun requestCloseApps() {
-        closeAppsRequested = true
+    /** Begin a window drag — grabs whatever window the cursor is over. Any thread. */
+    fun beginDrag() {
+        dragBeginPending = true
+        dragActive = true
+    }
+
+    /** End the window drag. Safe to call from any thread. */
+    fun endDrag() {
+        dragActive = false
     }
 
     /** Hide or restore launched app windows (minimise). Safe to call from any thread. */
@@ -161,10 +179,11 @@ class WorkspaceRenderer(
     fun releaseAll() {
         desktop?.release()
         desktop = null
-        screens.forEach { it.release() }
-        screens.clear()
-        closingScreens.forEach { it.release() }
-        closingScreens.clear()
+        windows.forEach { it.release() }
+        windows.clear()
+        closingWindows.forEach { it.release() }
+        closingWindows.clear()
+        grabbed = null
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -195,6 +214,7 @@ class WorkspaceRenderer(
         if (factory != null) {
             val ui = UiScreen(
                 createExternalTexture(), DESKTOP_WIDTH_PX, DESKTOP_HEIGHT_PX, mainHandler,
+                "vspace-desktop",
             )
             desktop = ui
             mainHandler.post { ui.start(context, factory) }
@@ -215,16 +235,14 @@ class WorkspaceRenderer(
         val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
         desktopHalfHeight = (DESKTOP_DISTANCE * Math.tan(halfFov)).toFloat()
         desktopHalfWidth = desktopHalfHeight * surfaceAspect
+        relayout()
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        drainGlTasks()
         drainPendingApps()
-        if (closeAppsRequested) {
-            closeAppsRequested = false
-            screens.forEach { beginCloseScreen(it) }
-            screens.clear()
-        }
-        releaseClosedScreens()
+        handleDrag()
+        releaseClosedWindows()
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         if (surfaceWidth == 0 || surfaceHeight == 0) return
@@ -245,14 +263,26 @@ class WorkspaceRenderer(
             drawExternalQuad(d.textureId, d.textureMatrix)
         }
 
-        // Launched apps — quads in front of the desktop (skipped while minimised).
-        if (!appsHidden && screens.isNotEmpty()) {
+        // Launched app windows — the content quad and the title-bar quad above it, in front
+        // of the desktop (skipped while minimised).
+        if (!appsHidden && windows.isNotEmpty()) {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-            for (screen in screens) {
-                screen.updateTexture()
-                buildModel(modelMatrix, screen)
+            for (window in windows) {
+                val content = window.content
+                content.updateTexture()
+                buildModel(modelMatrix, content)
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-                drawExternalQuad(screen.textureId, screen.textureMatrix)
+                drawExternalQuad(content.textureId, content.textureMatrix)
+
+                val chrome = window.chrome
+                chrome.updateTexture()
+                buildModelRect(
+                    modelMatrix,
+                    window.chromeX, window.chromeY, window.chromeZ,
+                    window.chromeW, window.chromeH,
+                )
+                Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+                drawExternalQuad(chrome.textureId, chrome.textureMatrix)
             }
         }
 
@@ -284,79 +314,141 @@ class WorkspaceRenderer(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
     }
 
-    /** Realise every queued app launch as a new [VirtualScreen]. GL thread only. */
+    /** Run window-control actions queued from the main thread. GL thread only. */
+    private fun drainGlTasks() {
+        var task = glTasks.poll()
+        while (task != null) {
+            task()
+            task = glTasks.poll()
+        }
+    }
+
+    /** Realise every queued app launch as a new [AppWindow]. GL thread only. */
     private fun drainPendingApps() {
         var request = pendingApps.poll()
         while (request != null) {
-            addScreen(request)
+            addWindow(request)
             request = pendingApps.poll()
         }
     }
 
-    private fun addScreen(request: AppRequest) {
-        // A single screen for now; a second launch evicts (and closes) the first.
-        if (screens.size >= MAX_SCREENS) {
-            beginCloseScreen(screens.removeAt(0))
+    private fun addWindow(request: AppRequest) {
+        // A single window for now; a second launch evicts (and closes) the first.
+        if (windows.size >= MAX_SCREENS) {
+            closeWindow(windows.first())
         }
 
-        val screen = VirtualScreen(
-            id = nextScreenId++,
+        val id = nextScreenId++
+        val content = VirtualScreen(
+            id = id,
             textureId = createExternalTexture(),
-            widthPx = SCREEN_WIDTH_PX,
-            heightPx = SCREEN_HEIGHT_PX,
+            widthPx = AppWindow.CONTENT_WIDTH_PX,
+            heightPx = AppWindow.CONTENT_HEIGHT_PX,
             packageName = request.packageName,
         )
-        screens.add(screen)
+        val chrome = UiScreen(
+            createExternalTexture(),
+            AppWindow.CHROME_WIDTH_PX,
+            AppWindow.CHROME_HEIGHT_PX,
+            mainHandler,
+            "vspace-chrome-$id",
+        )
+        val window = AppWindow(content, chrome, request.label)
+        windows.add(window)
         relayout()
 
-        // Create the display on the main thread, then launch the app onto it through the
-        // injected launcher (Shizuku) — a normal app may not place an app on a display.
+        // On the main thread: create the content display and launch the app onto it through
+        // the injected launcher (Shizuku) — a normal app may not place an app on a display —
+        // and bring up the title bar.
         mainHandler.post {
-            val displayId = screen.createDisplay(appContext)
+            val displayId = content.createDisplay(appContext)
             if (displayId != null) {
                 WorkspaceController.appLauncher?.invoke(
                     displayId, request.packageName, request.activityName,
                 )
             }
+            chrome.start(appContext) { ctx, display ->
+                WindowChrome(
+                    ctx, display, request.label,
+                    onMinimize = { WorkspaceController.setAppsHidden(true) },
+                    onMaximize = { glTasks.add { toggleMaximize(window) } },
+                    onClose = { glTasks.add { closeWindow(window) } },
+                )
+            }
         }
+    }
+
+    /** Resolve a pending window grab and, while dragging, move the grabbed window. GL thread. */
+    private fun handleDrag() {
+        if (dragBeginPending) {
+            dragBeginPending = false
+            grabbed = windows.firstOrNull { w ->
+                w.state == AppWindow.State.NORMAL &&
+                    cursorToRectPx(
+                        w.chromeX, w.chromeY, w.chromeZ, w.chromeW, w.chromeH, 1, 1,
+                    ) != null
+            }
+            grabbed?.let { w ->
+                val hit = cursorRayHit(w.chromeZ)
+                if (hit != null) {
+                    grabOffsetX = w.centerX - hit[0]
+                    grabOffsetY = w.centerY - hit[1]
+                }
+            }
+        }
+        if (!dragActive) {
+            grabbed = null
+            return
+        }
+        val w = grabbed ?: return
+        val hit = cursorRayHit(w.chromeZ) ?: return
+        w.centerX = hit[0] + grabOffsetX
+        w.centerY = hit[1] + grabOffsetY
+        w.layout(desktopHalfWidth, desktopHalfHeight)
+    }
+
+    /** Toggle a window between its normal size and filling the desktop area. GL thread. */
+    private fun toggleMaximize(window: AppWindow) {
+        if (window !in windows) return
+        window.state = if (window.state == AppWindow.State.MAXIMIZED) {
+            AppWindow.State.NORMAL
+        } else {
+            AppWindow.State.MAXIMIZED
+        }
+        relayout()
+    }
+
+    /** Force-stop a window's app and queue its surfaces for release. GL thread. */
+    private fun closeWindow(window: AppWindow) {
+        if (!windows.remove(window)) return
+        if (window === grabbed) grabbed = null
+        beginCloseWindow(window)
     }
 
     /**
-     * Begin closing [screen]: force-stop its app now, and queue its virtual display to be
-     * released a short while later. Releasing the display while the app is still alive hands
-     * the orphaned activity back to the system, which relocates it onto the phone's screen —
-     * so the force-stop must land first. GL thread only.
+     * Begin closing [window]: force-stop its app now, and queue its surfaces to be released a
+     * short while later. Releasing the content display while the app is still alive hands the
+     * orphaned activity back to the system, which relocates it onto the phone's screen — so
+     * the force-stop must land first. GL thread only.
      */
-    private fun beginCloseScreen(screen: VirtualScreen) {
-        if (screen.packageName.isNotEmpty()) {
-            WorkspaceController.closeApp?.invoke(screen.packageName)
-        }
-        closingScreens.add(screen)
+    private fun beginCloseWindow(window: AppWindow) {
+        val pkg = window.packageName
+        if (pkg.isNotEmpty()) WorkspaceController.closeApp?.invoke(pkg)
+        mainHandler.post { WorkspaceController.notifyAppClosed(pkg) }
+        closingWindows.add(window)
         closeReleaseAtNanos = System.nanoTime() + CLOSE_RELEASE_DELAY_NANOS
     }
 
-    /** Release the displays of force-stopped apps once the force-stop has had time to land. */
-    private fun releaseClosedScreens() {
-        if (closingScreens.isEmpty() || System.nanoTime() < closeReleaseAtNanos) return
-        closingScreens.forEach { it.release() }
-        closingScreens.clear()
+    /** Release the surfaces of force-stopped windows once the force-stop has had time to land. */
+    private fun releaseClosedWindows() {
+        if (closingWindows.isEmpty() || System.nanoTime() < closeReleaseAtNanos) return
+        closingWindows.forEach { it.release() }
+        closingWindows.clear()
     }
 
-    /** Place the single app window in the desktop area above the taskbar. */
+    /** Re-place every window's content and title-bar quads for the current view size. */
     private fun relayout() {
-        val screen = screens.firstOrNull() ?: return
-        val topY = desktopHalfHeight
-        val bottomY = -desktopHalfHeight + TASKBAR_RESERVE * (2f * desktopHalfHeight)
-        val availW = (2f * desktopHalfWidth) * WINDOW_MARGIN
-        val availH = (topY - bottomY) * WINDOW_MARGIN
-        val aspect = SCREEN_WIDTH_PX.toFloat() / SCREEN_HEIGHT_PX.toFloat()
-        var w = availW
-        if (w / aspect > availH) w = availH * aspect
-        screen.worldX = 0f
-        screen.worldY = (topY + bottomY) / 2f
-        screen.worldZ = -SCREEN_DISTANCE
-        screen.worldYawDeg = 0f
-        screen.worldWidth = w
+        windows.forEach { it.layout(desktopHalfWidth, desktopHalfHeight) }
     }
 
     /** Draw the touchpad cursor — an arrow pointer — as a flat overlay on top of everything. */
@@ -393,17 +485,28 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Resolve a cursor click. App windows sit in front of the desktop, so try them first —
-     * a hit injects a tap into that app's display via Shizuku; otherwise the click goes to
-     * the desktop's own One UI view tree.
+     * Resolve a cursor click. App windows sit in front of the desktop, so try them first:
+     * a hit on the title bar dispatches a tap into the chrome's own view tree (its buttons),
+     * a hit on the app content injects a tap into that app's display via Shizuku; otherwise
+     * the click goes to the desktop's own One UI view tree.
      */
     private fun handleClick() {
         if (!appsHidden) {
-            for (screen in screens) {
-                val px = cursorToScreenPx(screen) ?: continue
-                if (screen.displayId >= 0) {
+            for (window in windows) {
+                val chromePx = cursorToRectPx(
+                    window.chromeX, window.chromeY, window.chromeZ,
+                    window.chromeW, window.chromeH,
+                    AppWindow.CHROME_WIDTH_PX, AppWindow.CHROME_HEIGHT_PX,
+                )
+                if (chromePx != null) {
+                    val chrome = window.chrome
+                    mainHandler.post { chrome.dispatchTap(chromePx[0], chromePx[1]) }
+                    return
+                }
+                val px = cursorToScreenPx(window.content) ?: continue
+                if (window.content.displayId >= 0) {
                     WorkspaceController.appTap?.invoke(
-                        screen.displayId, px[0].toInt(), px[1].toInt(),
+                        window.content.displayId, px[0].toInt(), px[1].toInt(),
                     )
                 }
                 return
@@ -449,17 +552,30 @@ class WorkspaceRenderer(
         )
     }
 
-    /** Cursor → [screen] pixel `[px, py]`, or null if the cursor misses that window. */
-    private fun cursorToScreenPx(screen: VirtualScreen): FloatArray? {
-        val hit = cursorRayHit(screen.worldZ) ?: return null
-        val hw = screen.worldWidth / 2f
-        val hh = screen.worldHeight / 2f
-        val lx = hit[0] - screen.worldX
-        val ly = hit[1] - screen.worldY
+    /** Cursor → app-content pixel `[px, py]`, or null if the cursor misses the window. */
+    private fun cursorToScreenPx(content: VirtualScreen): FloatArray? =
+        cursorToRectPx(
+            content.worldX, content.worldY, content.worldZ,
+            content.worldWidth, content.worldHeight,
+            AppWindow.CONTENT_WIDTH_PX, AppWindow.CONTENT_HEIGHT_PX,
+        )
+
+    /**
+     * Cursor → pixel `[px, py]` within a world-space quad centred at ([x], [y], [z]), of size
+     * [w] × [h] metres and [pxW] × [pxH] pixels; null if the cursor ray misses the quad.
+     */
+    private fun cursorToRectPx(
+        x: Float, y: Float, z: Float, w: Float, h: Float, pxW: Int, pxH: Int,
+    ): FloatArray? {
+        val hit = cursorRayHit(z) ?: return null
+        val hw = w / 2f
+        val hh = h / 2f
+        val lx = hit[0] - x
+        val ly = hit[1] - y
         if (lx < -hw || lx > hw || ly < -hh || ly > hh) return null
         return floatArrayOf(
-            (lx + hw) / (2f * hw) * SCREEN_WIDTH_PX,
-            (hh - ly) / (2f * hh) * SCREEN_HEIGHT_PX,
+            (lx + hw) / (2f * hw) * pxW,
+            (hh - ly) / (2f * hh) * pxH,
         )
     }
 
@@ -556,12 +672,21 @@ class WorkspaceRenderer(
         out[12] = 0f; out[13] = 0f; out[14] = 0f; out[15] = 1f
     }
 
-    /** Model matrix placing the unit quad at the screen's world position, facing, and size. */
+    /** Model matrix placing the unit quad at the screen's world position and size. */
     private fun buildModel(out: FloatArray, screen: VirtualScreen) {
+        buildModelRect(
+            out, screen.worldX, screen.worldY, screen.worldZ,
+            screen.worldWidth, screen.worldHeight,
+        )
+    }
+
+    /** Model matrix placing the unit quad at a world-space rect — centre ([x],[y],[z]), size. */
+    private fun buildModelRect(
+        out: FloatArray, x: Float, y: Float, z: Float, w: Float, h: Float,
+    ) {
         Matrix.setIdentityM(out, 0)
-        Matrix.translateM(out, 0, screen.worldX, screen.worldY, screen.worldZ)
-        Matrix.rotateM(out, 0, screen.worldYawDeg, 0f, 1f, 0f)
-        Matrix.scaleM(out, 0, screen.worldWidth / 2f, screen.worldHeight / 2f, 1f)
+        Matrix.translateM(out, 0, x, y, z)
+        Matrix.scaleM(out, 0, w / 2f, h / 2f, 1f)
     }
 
     private fun createExternalTexture(): Int {
@@ -586,22 +711,11 @@ class WorkspaceRenderer(
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f
 
-        /** Pixel resolution of each launched-app virtual screen (16:9). */
-        const val SCREEN_WIDTH_PX = 1600
-        const val SCREEN_HEIGHT_PX = 900
-
-        /** A single launched app for now, sized to fill the view. */
+        /** A single launched app window for now. */
         const val MAX_SCREENS = 1
-        const val SCREEN_DISTANCE = 4.0f
 
         /** Grace period between force-stopping a closed app and releasing its display. */
         const val CLOSE_RELEASE_DELAY_NANOS = 600_000_000L
-
-        /** Fraction of the desktop height reserved at the bottom for the taskbar. */
-        const val TASKBAR_RESERVE = 0.085f
-
-        /** App windows shrink slightly so they do not touch the desktop edges. */
-        const val WINDOW_MARGIN = 0.98f
 
         /** Cursor scale (NDC), motion per touchpad-width, and click-flash duration. */
         const val CURSOR_SCALE = 0.0281f

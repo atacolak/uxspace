@@ -32,6 +32,8 @@ class UiScreen(
     private val widthPx: Int,
     private val heightPx: Int,
     private val mainHandler: Handler,
+    /** Virtual-display name — kept distinct per screen (desktop, each window's chrome). */
+    private val displayName: String,
 ) {
     val surfaceTexture: SurfaceTexture =
         SurfaceTexture(textureId).apply { setDefaultBufferSize(widthPx, heightPx) }
@@ -59,7 +61,7 @@ class UiScreen(
             return
         }
         val virtual = displayManager.createVirtualDisplay(
-            "vspace-ui", widthPx, heightPx, DENSITY_DPI, surface, FLAGS,
+            displayName, widthPx, heightPx, DENSITY_DPI, surface, FLAGS,
         )
         if (virtual == null) {
             Log.e(TAG, "createVirtualDisplay returned null")

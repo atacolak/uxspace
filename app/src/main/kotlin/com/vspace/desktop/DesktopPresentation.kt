@@ -54,7 +54,9 @@ class DesktopPresentation(
     private var drawer: View? = null
     private lateinit var clock: TextView
     private lateinit var runningApps: LinearLayout
-    private var minimized = false
+
+    /** Package of the app currently shown in the taskbar, or null if none is running. */
+    private var runningPackage: String? = null
 
     /** Refreshes the taskbar clock; re-posts itself while the desktop is shown. */
     private val clockTick = object : Runnable {
@@ -75,6 +77,10 @@ class DesktopPresentation(
         root.addView(buildTaskbar())
         setContentView(root)
         loadApps()
+        // Clear the taskbar entry if its window is closed from the window's own title bar.
+        WorkspaceController.onAppClosed = { packageName ->
+            mainHandler.post { onAppClosed(packageName) }
+        }
     }
 
     override fun onStart() {
@@ -244,48 +250,43 @@ class DesktopPresentation(
     }
 
     private fun launch(app: InstalledApp) {
-        WorkspaceController.launchApp(app.packageName, app.activityName)
+        WorkspaceController.launchApp(app.packageName, app.activityName, app.label)
         showRunningApp(app)
         drawer?.visibility = View.GONE
     }
 
-    /** Show the launched app in the taskbar — the icon toggles minimise, the × closes it. */
+    /**
+     * Show the launched app in the taskbar — its icon toggles minimise / restore. Closing is
+     * done from the window's own title bar, so the taskbar carries no close button.
+     */
     private fun showRunningApp(app: InstalledApp) {
         if (!::runningApps.isInitialized) return
-        // One screen at a time today, so the strip shows the current app.
+        // One window at a time today, so the strip shows the current app.
         runningApps.removeAllViews()
-        minimized = false
+        runningPackage = app.packageName
         val icon = ImageView(context).apply {
             setImageDrawable(app.icon)
             setOnClickListener { toggleMinimized(this) }
-        }
-        val close = ImageButton(context).apply {
-            setImageResource(R.drawable.ic_close)
-            background = null
-            setOnClickListener { closeRunningApp() }
         }
         runningApps.addView(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },
         )
-        runningApps.addView(
-            close,
-            LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginStart = dp(1) },
-        )
     }
 
     /** Tap the running-app icon: minimise the window, or restore it. */
     private fun toggleMinimized(icon: ImageView) {
-        minimized = !minimized
-        WorkspaceController.setAppsHidden(minimized)
-        icon.alpha = if (minimized) 0.4f else 1f
+        val hidden = !WorkspaceController.appsHidden
+        WorkspaceController.setAppsHidden(hidden)
+        icon.alpha = if (hidden) 0.4f else 1f
     }
 
-    /** Tap the ×: close the window and clear the running-app strip. */
-    private fun closeRunningApp() {
-        WorkspaceController.closeApps()
-        runningApps.removeAllViews()
-        minimized = false
+    /** Clear the taskbar entry when its window is closed from the window's title bar. */
+    private fun onAppClosed(packageName: String) {
+        if (packageName == runningPackage && ::runningApps.isInitialized) {
+            runningApps.removeAllViews()
+            runningPackage = null
+        }
     }
 
     private fun clockText(): String =
