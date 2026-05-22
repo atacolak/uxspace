@@ -7,6 +7,7 @@ import android.hardware.usb.UsbManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
@@ -15,8 +16,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import com.vspace.databinding.ActivityMainBinding
 import com.vspace.glasses.GlassesDisplay
-import com.vspace.privileged.ShizukuManager
-import com.vspace.privileged.ShizukuManager.State
+import com.vspace.privileged.PrivilegedService
+import com.vspace.privileged.PrivilegedService.State
 import com.vspace.spatial.WorkspaceController
 import com.vspace.spatial.WorkspacePresentation
 import com.vspace.spatial.WorkspaceRenderer
@@ -26,8 +27,11 @@ import com.vspace.spatial.WorkspaceRenderer
  *
  * It is a toolbar (view mode, capture, screen layout, keyboard) over a touchpad; the system
  * keyboard rises on demand. Apps are launched from the in-glasses app drawer, so the phone
- * shows no app list — the glasses show the workspace, the phone drives it. The Shizuku setup
- * banner sits on top until Shizuku is ready.
+ * shows no app list — the glasses show the workspace, the phone drives it.
+ *
+ * A setup card sits on top until the [PrivilegedService] is `READY`: it explains where the
+ * user is in the wireless-debugging activation flow and offers the next action (open
+ * Developer settings, or enter the 6-digit pairing code).
  */
 class MainActivity : ComponentActivity() {
 
@@ -45,14 +49,14 @@ class MainActivity : ComponentActivity() {
         override fun onDisplayChanged(displayId: Int) = syncGlasses()
     }
 
-    private val shizukuListener: () -> Unit = { runOnUiThread { renderStatus() } }
+    private val privilegeListener: () -> Unit = { runOnUiThread { renderStatus() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.shizukuButton.setOnClickListener { onShizukuAction() }
+        binding.setupButton.setOnClickListener { onSetupAction() }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
         binding.captureButton.setOnClickListener { onCapture() }
         binding.layoutButton.setOnClickListener {
@@ -74,7 +78,7 @@ class MainActivity : ComponentActivity() {
         // Keep the panel resumed during a session, so re-showing the workspace after a
         // glasses blip happens from a live window.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        ShizukuManager.addListener(shizukuListener)
+        PrivilegedService.addListener(privilegeListener)
         // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
     }
@@ -136,7 +140,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        ShizukuManager.refresh()
+        // Returning from Developer settings or the pairing dialog may have changed things —
+        // re-attempt bring-up. Idempotent and no-op once READY.
+        PrivilegedService.ensureRunning()
         syncGlasses()
     }
 
@@ -144,7 +150,7 @@ class MainActivity : ComponentActivity() {
         displayManager().unregisterDisplayListener(displayListener)
         presentation?.dismiss()
         presentation = null
-        ShizukuManager.removeListener(shizukuListener)
+        PrivilegedService.removeListener(privilegeListener)
         super.onDestroy()
     }
 
@@ -174,19 +180,35 @@ class MainActivity : ComponentActivity() {
         renderStatus()
     }
 
-    /** Banner: Shizuku setup until that is done, then the glasses-connection state. */
+    /**
+     * Setup card content depending on where we are in the wireless-debugging flow; once
+     * `READY`, the card collapses to the plain glasses-connection status.
+     */
     private fun renderStatus() {
-        when (ShizukuManager.state) {
-            State.NOT_INSTALLED ->
-                shizukuBanner(R.string.shizuku_not_installed, R.string.shizuku_action_install)
-            State.NOT_RUNNING ->
-                shizukuBanner(R.string.shizuku_not_running, R.string.shizuku_action_open)
-            State.NEEDS_PERMISSION ->
-                shizukuBanner(R.string.shizuku_needs_permission, R.string.shizuku_action_grant)
+        when (PrivilegedService.state) {
+            State.UNSUPPORTED ->
+                setupBanner(R.string.privilege_unsupported, actionLabel = null, codeFieldVisible = false)
+            State.NEEDS_WIRELESS_DEBUGGING ->
+                setupBanner(
+                    R.string.privilege_needs_wireless_debugging,
+                    R.string.privilege_action_open_developer_settings,
+                    codeFieldVisible = false,
+                )
+            State.NEEDS_PAIRING ->
+                setupBanner(
+                    R.string.privilege_needs_pairing,
+                    R.string.privilege_action_pair,
+                    codeFieldVisible = true,
+                )
+            State.DISCOVERING ->
+                setupBanner(R.string.privilege_discovering, actionLabel = null, codeFieldVisible = false)
             State.CONNECTING ->
-                shizukuBanner(R.string.shizuku_connecting, null)
+                setupBanner(R.string.privilege_connecting, actionLabel = null, codeFieldVisible = false)
+            State.STARTING ->
+                setupBanner(R.string.privilege_starting, actionLabel = null, codeFieldVisible = false)
             State.READY -> {
-                binding.shizukuButton.visibility = View.GONE
+                binding.setupButton.visibility = View.GONE
+                binding.pairingCode.visibility = View.GONE
                 binding.statusText.setText(
                     if (presentation?.isShowing == true) {
                         R.string.status_ready
@@ -198,24 +220,58 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun shizukuBanner(status: Int, action: Int?) {
+    private fun setupBanner(status: Int, actionLabel: Int?, codeFieldVisible: Boolean) {
         binding.statusText.setText(status)
-        if (action == null) {
-            binding.shizukuButton.visibility = View.GONE
+        binding.pairingCode.visibility = if (codeFieldVisible) View.VISIBLE else View.GONE
+        if (actionLabel == null) {
+            binding.setupButton.visibility = View.GONE
         } else {
-            binding.shizukuButton.visibility = View.VISIBLE
-            binding.shizukuButton.setText(action)
+            binding.setupButton.visibility = View.VISIBLE
+            binding.setupButton.setText(actionLabel)
         }
     }
 
-    /** Send the user to whatever Shizuku step is currently outstanding. */
-    private fun onShizukuAction() {
-        when (ShizukuManager.state) {
-            State.NOT_INSTALLED -> startActivity(ShizukuManager.downloadIntent())
-            State.NOT_RUNNING ->
-                ShizukuManager.openShizukuIntent(this)?.let { startActivity(it) }
-            State.NEEDS_PERMISSION -> ShizukuManager.requestPermission()
+    /** The setup card's button: action depends on the current state. */
+    private fun onSetupAction() {
+        when (PrivilegedService.state) {
+            State.NEEDS_WIRELESS_DEBUGGING -> openDeveloperSettings()
+            State.NEEDS_PAIRING -> startPairing()
             else -> Unit
         }
+    }
+
+    private fun openDeveloperSettings() {
+        runCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
+    }
+
+    private fun startPairing() {
+        val code = binding.pairingCode.text.toString().trim()
+        if (code.length != PAIRING_CODE_LENGTH) {
+            Toast.makeText(this, R.string.privilege_pairing_hint, Toast.LENGTH_SHORT).show()
+            return
+        }
+        binding.setupButton.isEnabled = false
+        PrivilegedService.activate(code) { ok ->
+            runOnUiThread {
+                binding.setupButton.isEnabled = true
+                if (!ok) {
+                    Toast.makeText(
+                        this,
+                        R.string.privilege_pair_failed,
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    binding.pairingCode.text.clear()
+                }
+            }
+        }
+    }
+
+    private companion object {
+        const val PAIRING_CODE_LENGTH = 6
     }
 }

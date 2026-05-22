@@ -56,11 +56,6 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
 
-    // Shizuku — borrows ADB-shell privileges (no root) to launch apps onto a virtual
-    // display and inject input into it. Being phased out (see docs/PRIVILEGE.md).
-    implementation(libs.shizuku.api)
-    implementation(libs.shizuku.provider)
-
     // Embedded ADB client — VSpace activates its own shell-uid helper over Wireless
     // Debugging, with no separate Shizuku app. See docs/PRIVILEGE.md.
     implementation(libs.libadb.android)

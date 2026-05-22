@@ -38,7 +38,7 @@ class BinderReceiverProvider : ContentProvider() {
             return null
         }
         Log.i(TAG, "received privileged binder from uid $callingUid")
-        ShizukuManager.onPrivilegedBinder(binder)
+        PrivilegedService.onPrivilegedBinder(binder)
         return null
     }
 

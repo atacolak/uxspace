@@ -5,17 +5,23 @@
     <string name="capture_button">Capture workspace</string>
     <string name="keyboard_hint">Type — keys go to the focused app</string>
 
-    <string name="shizuku_not_installed">VSpace uses Shizuku to place apps on the glasses’ virtual screens. The Play Store build is not offered on Android 16 — install the latest APK from Shizuku’s GitHub releases (free, open-source).</string>
-    <string name="shizuku_not_running">Shizuku is installed but not started. Open it and start the service via Wireless debugging — it runs on-device, no PC needed.</string>
-    <string name="shizuku_needs_permission">Shizuku is running. Grant VSpace access to continue.</string>
-    <string name="shizuku_connecting">Connecting to Shizuku…</string>
-    <string name="shizuku_ready">Shizuku connected.</string>
+    <!-- Privileged-helper setup card. VSpace activates its own shell-uid helper over
+         Wireless Debugging — no separate Shizuku app required. See docs/PRIVILEGE.md. -->
+    <string name="privilege_unsupported">Needs Android 11 or newer. VSpace activates its own shell-uid helper through Wireless Debugging, which is an Android 11+ feature.</string>
+    <string name="privilege_needs_wireless_debugging">Enable Wireless Debugging in Developer options, then return — VSpace will reconnect automatically.</string>
+    <string name="privilege_needs_pairing">In Wireless Debugging on this phone, tap “Pair device with a pairing code”, then enter the 6 digits below. VSpace pairs once; the device trusts it thereafter.</string>
+    <string name="privilege_discovering">Looking for the wireless-debugging service…</string>
+    <string name="privilege_connecting">Connecting to the local ADB service…</string>
+    <string name="privilege_starting">Starting the privileged helper…</string>
+    <string name="privilege_pair_failed">Pairing failed — check the code and that the “Pair device” dialog is still open, then try again.</string>
+    <string name="privilege_pair_no_service">Could not find the pairing service — open “Pair device with a pairing code” in Wireless Debugging first.</string>
+
+    <string name="privilege_action_open_developer_settings">Open Developer settings</string>
+    <string name="privilege_action_pair">Pair</string>
+    <string name="privilege_pairing_hint">6-digit pairing code</string>
+
     <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>
     <string name="status_no_glasses">Connect your VITURE glasses to open the workspace.</string>
 
-    <string name="shizuku_action_install">Install Shizuku</string>
-    <string name="shizuku_action_open">Open Shizuku</string>
-    <string name="shizuku_action_grant">Grant VSpace access</string>
-
-    <string name="shizuku_needed">Finish Shizuku setup first — see the banner above.</string>
+    <string name="privilege_needed">Finish wireless-debugging pairing first — see the banner above.</string>
 </resources>
