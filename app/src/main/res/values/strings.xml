@@ -3,6 +3,7 @@
     <string name="workspace_title">VSpace Workspace</string>
     <string name="apps_header">Installed apps</string>
     <string name="capture_button">Capture workspace</string>
+    <string name="keyboard_hint">Type — keys go to the focused app</string>
 
     <string name="shizuku_not_installed">VSpace uses Shizuku to place apps on the glasses’ virtual screens. The Play Store build is not offered on Android 16 — install the latest APK from Shizuku’s GitHub releases (free, open-source).</string>
     <string name="shizuku_not_running">Shizuku is installed but not started. Open it and start the service via Wireless debugging — it runs on-device, no PC needed.</string>

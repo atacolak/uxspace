@@ -23,45 +23,83 @@
         android:layout_marginTop="12dp"
         android:visibility="gone" />
 
+    <!-- Toolbar: view mode, capture, screen layout, keyboard. -->
+    <LinearLayout
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="@color/surface"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <ImageButton
+            android:id="@+id/viewModeButton"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="View mode"
+            android:padding="14dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_pin" />
+
+        <ImageButton
+            android:id="@+id/captureButton"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="Capture workspace"
+            android:padding="14dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_capture" />
+
+        <ImageButton
+            android:id="@+id/layoutButton"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="Screen layout"
+            android:padding="14dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_layout" />
+
+        <ImageButton
+            android:id="@+id/keyboardButton"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:background="?android:attr/selectableItemBackground"
+            android:contentDescription="Keyboard"
+            android:padding="14dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_keyboard" />
+    </LinearLayout>
+
     <com.vspace.input.TrackpadView
         android:id="@+id/trackpad"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_margin="16dp"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginBottom="16dp"
         android:background="@color/surface" />
 
-    <Button
-        android:id="@+id/viewModeButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="16dp" />
-
-    <Button
-        android:id="@+id/captureButton"
+    <!-- Raised by the keyboard toolbar button; the system IME types into it. -->
+    <EditText
+        android:id="@+id/keyboardField"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="16dp"
-        android:layout_marginTop="8dp"
-        android:text="@string/capture_button" />
-
-    <TextView
-        android:id="@+id/appsHeader"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingHorizontal="16dp"
-        android:paddingTop="16dp"
-        android:paddingBottom="8dp"
-        android:text="@string/apps_header"
-        android:textAllCaps="true"
-        android:textColor="@color/text_dim"
-        android:textSize="12sp" />
-
-    <ListView
-        android:id="@+id/appList"
-        android:layout_width="match_parent"
-        android:layout_height="220dp"
-        android:divider="@color/bg"
-        android:dividerHeight="1dp" />
+        android:layout_marginBottom="16dp"
+        android:background="@color/surface"
+        android:hint="@string/keyboard_hint"
+        android:inputType="textNoSuggestions"
+        android:padding="14dp"
+        android:textColor="@color/text"
+        android:textColorHint="@color/text_dim"
+        android:visibility="gone" />
 
 </LinearLayout>

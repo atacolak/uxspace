@@ -10,12 +10,9 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.lifecycle.lifecycleScope
-import com.vspace.apps.AppListAdapter
-import com.vspace.apps.InstalledApp
-import com.vspace.apps.InstalledApps
 import com.vspace.databinding.ActivityMainBinding
 import com.vspace.glasses.GlassesDisplay
 import com.vspace.shizuku.ShizukuManager
@@ -23,16 +20,14 @@ import com.vspace.shizuku.ShizukuManager.State
 import com.vspace.spatial.WorkspaceController
 import com.vspace.spatial.WorkspacePresentation
 import com.vspace.spatial.WorkspaceRenderer
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * The phone-side control panel. It walks the user through Shizuku setup, shows the workspace
- * on the glasses (as a `Presentation`) whenever they are connected, and lists installed apps
- * — tapping one places it on a virtual screen inside the workspace.
+ * The phone-side control panel — VSpace's input device.
  *
- * The phone keeps showing this panel; the glasses show the workspace. Two screens, no DeX.
+ * It is a toolbar (view mode, capture, screen layout, keyboard) over a touchpad; the system
+ * keyboard rises on demand. Apps are launched from the in-glasses app drawer, so the phone
+ * shows no app list — the glasses show the workspace, the phone drives it. The Shizuku setup
+ * banner sits on top until Shizuku is ready.
  */
 class MainActivity : ComponentActivity() {
 
@@ -56,33 +51,31 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
         binding.shizukuButton.setOnClickListener { onShizukuAction() }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
-        renderViewModeButton()
-        binding.captureButton.setOnClickListener {
-            if (WorkspaceController.isRunning) {
-                WorkspaceController.capture()
-            } else {
-                Toast.makeText(this, R.string.status_no_glasses, Toast.LENGTH_SHORT).show()
-            }
+        binding.captureButton.setOnClickListener { onCapture() }
+        binding.layoutButton.setOnClickListener {
+            Toast.makeText(this, "Screen layouts are coming soon", Toast.LENGTH_SHORT).show()
         }
+        binding.keyboardButton.setOnClickListener { toggleKeyboard() }
+        renderViewModeButton()
+
         binding.trackpad.onMove = { dx, dy -> WorkspaceController.moveCursor(dx, dy) }
         binding.trackpad.onTap = { WorkspaceController.click() }
         binding.trackpad.onScroll = { dy -> WorkspaceController.scroll(dy) }
+
         // Keep the panel resumed during a session, so re-showing the workspace after a
         // glasses blip happens from a live window.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        loadApps()
         ShizukuManager.addListener(shizukuListener)
-        // Watch for the glasses the whole time the panel exists — not just while it is
-        // resumed. The display can blip (USB-C), and the workspace must return on its own.
+        // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
     }
 
     /**
      * Delivered when the glasses are connected while VSpace is already running. Receiving the
-     * attach intent also grants USB access to the glasses, so restart the workspace — letting
-     * head tracking open the IMU connection it was previously denied.
+     * attach intent also grants USB access, so restart the workspace.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -104,9 +97,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderViewModeButton() {
-        binding.viewModeButton.text = when (WorkspaceController.currentViewMode) {
-            WorkspaceRenderer.ViewMode.PINNED -> "View: Pinned — tap for Free"
-            WorkspaceRenderer.ViewMode.FREE -> "View: Free — tap for Pinned"
+        binding.viewModeButton.setImageResource(
+            when (WorkspaceController.currentViewMode) {
+                WorkspaceRenderer.ViewMode.PINNED -> R.drawable.ic_pin
+                WorkspaceRenderer.ViewMode.FREE -> R.drawable.ic_pin_off
+            },
+        )
+    }
+
+    private fun onCapture() {
+        if (WorkspaceController.isRunning) {
+            WorkspaceController.capture()
+        } else {
+            Toast.makeText(this, R.string.status_no_glasses, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Show or hide the system keyboard. Keystroke routing into the focused app is M4. */
+    private fun toggleKeyboard() {
+        val imm = getSystemService(InputMethodManager::class.java) ?: return
+        val field = binding.keyboardField
+        if (field.visibility == View.VISIBLE) {
+            imm.hideSoftInputFromWindow(field.windowToken, 0)
+            field.visibility = View.GONE
+        } else {
+            field.visibility = View.VISIBLE
+            field.requestFocus()
+            imm.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
         }
     }
 
@@ -126,18 +143,6 @@ class MainActivity : ComponentActivity() {
 
     private fun displayManager(): DisplayManager =
         getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-
-    private fun loadApps() {
-        lifecycleScope.launch {
-            val apps = withContext(Dispatchers.Default) {
-                InstalledApps.query(this@MainActivity)
-            }
-            binding.appList.adapter = AppListAdapter(this@MainActivity, apps)
-            binding.appList.setOnItemClickListener { parent, _, position, _ ->
-                openInWorkspace(parent.getItemAtPosition(position) as InstalledApp)
-            }
-        }
-    }
 
     /** Show the workspace on the glasses while they are connected; refresh the banner. */
     private fun syncGlasses() {
@@ -204,17 +209,6 @@ class MainActivity : ComponentActivity() {
                 ShizukuManager.openShizukuIntent(this)?.let { startActivity(it) }
             State.NEEDS_PERMISSION -> ShizukuManager.requestPermission()
             else -> Unit
-        }
-    }
-
-    /** Place [app] on a virtual screen in the workspace running on the glasses. */
-    private fun openInWorkspace(app: InstalledApp) {
-        if (ShizukuManager.state != State.READY) {
-            Toast.makeText(this, R.string.shizuku_needed, Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (!WorkspaceController.launchApp(app.packageName, app.activityName)) {
-            Toast.makeText(this, R.string.status_no_glasses, Toast.LENGTH_SHORT).show()
         }
     }
 }
