@@ -2,6 +2,7 @@ package com.vspace
 
 import android.app.Application
 import com.vspace.desktop.DesktopPresentation
+import com.vspace.desktop.DrawerPresentation
 import com.vspace.shizuku.ShizukuManager
 import com.vspace.spatial.WorkspaceController
 
@@ -16,6 +17,9 @@ class VSpaceApp : Application() {
         // Keeps the rendering layer free of the desktop UI and Shizuku.
         WorkspaceController.desktopContent = { context, display ->
             DesktopPresentation(context, display)
+        }
+        WorkspaceController.drawerContent = { context, display ->
+            DrawerPresentation(context, display)
         }
         WorkspaceController.appLauncher = { displayId, packageName, activityName ->
             ShizukuManager.launchApp(displayId, packageName, activityName)

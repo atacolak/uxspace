@@ -24,6 +24,10 @@ object WorkspaceController {
     @Volatile
     var desktopContent: ((Context, Display) -> Presentation)? = null
 
+    /** Builds the app-drawer overlay shown in front of the windows. Set by the app at startup. */
+    @Volatile
+    var drawerContent: ((Context, Display) -> Presentation)? = null
+
     /** Launches an app onto a virtual display. Set by the app at startup. */
     @Volatile
     var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
@@ -43,6 +47,10 @@ object WorkspaceController {
     @Volatile
     var closeApp: ((packageName: String) -> Unit)? = null
 
+    /** Notified (on the main thread) when an app is launched — e.g. for the taskbar. */
+    @Volatile
+    var onAppLaunched: ((packageName: String, label: String) -> Unit)? = null
+
     /** Notified (on the main thread) when a launched app is closed — e.g. for the taskbar. */
     @Volatile
     var onAppClosed: ((packageName: String) -> Unit)? = null
@@ -50,11 +58,17 @@ object WorkspaceController {
     @Volatile
     private var appsHiddenState = false
 
+    @Volatile
+    private var drawerOpenState = false
+
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 
     /** Whether the launched app windows are currently minimised. */
     val appsHidden: Boolean get() = appsHiddenState
+
+    /** Whether the app drawer is currently open. */
+    val isDrawerOpen: Boolean get() = drawerOpenState
 
     /** The current view mode — pinned to the head, or free in the world. */
     val currentViewMode: WorkspaceRenderer.ViewMode get() = viewMode
@@ -62,6 +76,7 @@ object WorkspaceController {
     internal fun register(renderer: WorkspaceRenderer) {
         this.renderer = renderer
         appsHiddenState = false
+        drawerOpenState = false
         renderer.setViewMode(viewMode)
     }
 
@@ -77,6 +92,7 @@ object WorkspaceController {
     fun launchApp(packageName: String, activityName: String, label: String): Boolean {
         val current = renderer ?: return false
         current.requestApp(packageName, activityName, label)
+        onAppLaunched?.invoke(packageName, label)
         return true
     }
 
@@ -86,8 +102,9 @@ object WorkspaceController {
         renderer?.setAppsHidden(hidden)
     }
 
-    /** Tell the renderer the app drawer is open, so it lifts above the app windows. */
+    /** Open or close the app-drawer overlay. */
     fun setDrawerOpen(open: Boolean) {
+        drawerOpenState = open
         renderer?.setDrawerOpen(open)
     }
 

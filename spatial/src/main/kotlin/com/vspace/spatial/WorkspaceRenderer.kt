@@ -63,6 +63,9 @@ class WorkspaceRenderer(
     /** The desktop — VSpace's own One UI home, hosted on its own virtual display. */
     private var desktop: UiScreen? = null
 
+    /** The app-drawer overlay — drawn in front of the windows, behind a scrim, while open. */
+    private var drawer: UiScreen? = null
+
     // Head-orientation quaternion (w, x, y, z); identity means looking straight ahead.
     @Volatile private var headW = 1f
     @Volatile private var headX = 0f
@@ -109,6 +112,7 @@ class WorkspaceRenderer(
 
     private lateinit var screenQuad: FloatBuffer
     private lateinit var cursorArrow: FloatBuffer
+    private lateinit var scrimQuad: FloatBuffer
 
     private val projection = FloatArray(16)
     private val viewMatrix = FloatArray(16)
@@ -198,6 +202,8 @@ class WorkspaceRenderer(
     fun releaseAll() {
         desktop?.release()
         desktop = null
+        drawer?.release()
+        drawer = null
         windows.forEach { it.release() }
         windows.clear()
         closingWindows.forEach { it.release() }
@@ -226,6 +232,7 @@ class WorkspaceRenderer(
 
         screenQuad = directBufferOf(SCREEN_QUAD_VERTICES)
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
+        scrimQuad = directBufferOf(SCRIM_QUAD_VERTICES)
 
         // The desktop: an external texture fed by our own Presentation on a virtual display.
         // The app injects the Presentation factory (see WorkspaceController.desktopContent).
@@ -239,6 +246,16 @@ class WorkspaceRenderer(
             mainHandler.post { ui.start(context, factory) }
         } else {
             Log.e(TAG, "no desktop content registered — desktop will not render")
+        }
+
+        // The app-drawer overlay — its own UI surface, drawn in front of the windows.
+        WorkspaceController.drawerContent?.let { drawerFactory ->
+            val du = UiScreen(
+                createExternalTexture(), DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX, mainHandler,
+                "vspace-drawer",
+            )
+            drawer = du
+            mainHandler.post { du.start(context, drawerFactory) }
         }
     }
 
@@ -285,8 +302,8 @@ class WorkspaceRenderer(
         // Launched app windows — the window frame (chrome), then the app's content quad
         // composited on top of it, inset within the border. Painter's order, so the content
         // covers the frame's centre and the grey shows only as the border + title bar.
-        // Skipped while minimised, or while the app drawer is open.
-        if (!appsHidden && !drawerOpen && windows.isNotEmpty()) {
+        // Skipped while minimised.
+        if (!appsHidden && windows.isNotEmpty()) {
             for (window in windows) {
                 // The window frame (chrome) — drawn only when not maximised; a maximised app
                 // has no border or title bar.
@@ -309,6 +326,12 @@ class WorkspaceRenderer(
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
                 drawExternalQuad(content.textureId, content.textureMatrix)
             }
+        }
+
+        // The app drawer — a dimming scrim over everything, then the drawer panel on top.
+        if (drawerOpen) {
+            drawScrim()
+            drawDrawerPanel()
         }
 
         if (cursorClickPending) {
@@ -539,7 +562,22 @@ class WorkspaceRenderer(
      * the click goes to the desktop's own One UI view tree.
      */
     private fun handleClick() {
-        if (!appsHidden && !drawerOpen) {
+        // While the drawer is open it is modal: a tap on the panel goes to the drawer, a tap
+        // on the scrim outside it closes the drawer.
+        if (drawerOpen) {
+            val px = drawer?.let {
+                val r = drawerWorld()
+                cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
+            }
+            if (px != null) {
+                val d = drawer
+                if (d != null) mainHandler.post { d.dispatchTap(px[0], px[1]) }
+            } else {
+                WorkspaceController.setDrawerOpen(false)
+            }
+            return
+        }
+        if (!appsHidden) {
             for (window in windows) {
                 // The app content sits on top, inside the frame — try it first.
                 val contentPx = cursorToScreenPx(window.content)
@@ -573,12 +611,55 @@ class WorkspaceRenderer(
         mainHandler.post { d.dispatchTap(px[0], px[1]) }
     }
 
-    /** Dispatch an accumulated scroll delta onto the desktop under the cursor. */
+    /** Dispatch an accumulated scroll delta — to the drawer if open, else the desktop. */
     private fun handleScroll(dyFraction: Float) {
+        val vScroll = dyFraction * SCROLL_SENSITIVITY
+        if (drawerOpen) {
+            val d = drawer ?: return
+            val r = drawerWorld()
+            val px = cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
+                ?: return
+            mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
+            return
+        }
         val d = desktop ?: return
         val px = cursorToDesktopPx() ?: return
-        val vScroll = dyFraction * SCROLL_SENSITIVITY
         mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
+    }
+
+    /** World rect (centre x, y, z and size w, h) of the app-drawer panel — centred. */
+    private fun drawerWorld(): FloatArray {
+        val w = 2f * desktopHalfWidth * DRAWER_WIDTH_FRACTION
+        val h = w * DRAWER_HEIGHT_PX / DRAWER_WIDTH_PX
+        return floatArrayOf(0f, 0f, -AppWindow.SCREEN_DISTANCE, w, h)
+    }
+
+    /** Draw the dimming scrim behind the drawer — a flat, blended, full-screen quad. */
+    private fun drawScrim() {
+        GLES20.glUseProgram(cursorProgram)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        scrimQuad.position(0)
+        GLES20.glVertexAttribPointer(
+            cursorAPosition, 2, GLES20.GL_FLOAT, false, ARROW_STRIDE_BYTES, scrimQuad,
+        )
+        GLES20.glEnableVertexAttribArray(cursorAPosition)
+        GLES20.glUniform2f(cursorUCenter, 0f, 0f)
+        GLES20.glUniform2f(cursorUHalfSize, 1f, 1f)
+        GLES20.glUniform4f(cursorUColor, 0f, 0f, 0f, SCRIM_ALPHA)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    /** Draw the app-drawer panel quad, in front of the windows. */
+    private fun drawDrawerPanel() {
+        val d = drawer ?: return
+        d.updateTexture()
+        val r = drawerWorld()
+        GLES20.glUseProgram(screenProgram)
+        buildModelRect(modelMatrix, r[0], r[1], r[2], r[3], r[4])
+        Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+        drawExternalQuad(d.textureId, d.textureMatrix)
     }
 
     /** World (x, y) where the cursor ray meets the plane z = [planeZ]; null if it misses. */
@@ -767,6 +848,16 @@ class WorkspaceRenderer(
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f
 
+        /** Pixel resolution of the app-drawer panel surface. */
+        const val DRAWER_WIDTH_PX = 1400
+        const val DRAWER_HEIGHT_PX = 920
+
+        /** The drawer panel's width, as a fraction of the desktop width. */
+        const val DRAWER_WIDTH_FRACTION = 0.62f
+
+        /** Opacity of the dimming scrim drawn behind the open drawer. */
+        const val SCRIM_ALPHA = 0.55f
+
         /** A single launched app window for now. */
         const val MAX_SCREENS = 1
 
@@ -789,6 +880,14 @@ class WorkspaceRenderer(
             0f, 0f,
             0f, -1f,
             0.7f, -0.7f,
+        )
+
+        /** A full-screen quad (x, y), drawn with the cursor program as the drawer scrim. */
+        val SCRIM_QUAD_VERTICES = floatArrayOf(
+            -1f, -1f,
+            1f, -1f,
+            -1f, 1f,
+            1f, 1f,
         )
 
         const val FOV_Y_DEGREES = 55f
