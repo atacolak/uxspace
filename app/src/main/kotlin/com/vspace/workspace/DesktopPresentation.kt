@@ -27,6 +27,9 @@ import android.widget.TextView
 import com.vspace.R
 import com.vspace.apps.InstalledApp
 import com.vspace.apps.InstalledApps
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * The desktop shown on the workspace's [UiScreen] — VSpace's DeX-style home: a wallpaper,
@@ -48,6 +51,16 @@ class DesktopPresentation(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
     private var drawer: View? = null
+    private lateinit var clock: TextView
+    private lateinit var runningApps: LinearLayout
+
+    /** Refreshes the taskbar clock; re-posts itself while the desktop is shown. */
+    private val clockTick = object : Runnable {
+        override fun run() {
+            if (::clock.isInitialized) clock.text = clockText()
+            mainHandler.postDelayed(this, CLOCK_INTERVAL_MS)
+        }
+    }
 
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
@@ -60,6 +73,17 @@ class DesktopPresentation(
         root.addView(buildTaskbar())
         setContentView(root)
         loadApps()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        mainHandler.removeCallbacks(clockTick)
+        clockTick.run()
+    }
+
+    override fun onStop() {
+        mainHandler.removeCallbacks(clockTick)
+        super.onStop()
     }
 
     private fun buildWallpaper(): View = ImageView(context).apply {
@@ -175,27 +199,45 @@ class DesktopPresentation(
         val launcher = ImageButton(context).apply {
             setImageResource(R.drawable.ic_apps)
             background = null
-            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
             setOnClickListener { toggleDrawer() }
         }
+        runningApps = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        clock = TextView(context).apply {
+            setTextColor(TASKBAR_TEXT)
+            textSize = 12.5f
+            gravity = Gravity.END
+            setLineSpacing(0f, 0.95f)
+            text = clockText()
+        }
+        // A full-width bar: launcher + running apps on the left, the clock on the right.
         val bar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(6), dp(20), dp(6))
             background = GradientDrawable().apply {
-                cornerRadius = dp(30).toFloat()
-                setColor(Color.argb(228, 22, 24, 32))
-                setStroke(dp(1), Color.argb(38, 255, 255, 255))
+                cornerRadius = dp(26).toFloat()
+                setColor(Color.argb(232, 20, 22, 30))
+                setStroke(dp(1), Color.argb(36, 255, 255, 255))
             }
             addView(launcher)
+            addView(runningApps, LinearLayout.LayoutParams(WRAP, WRAP))
+            // A weighted spacer pushes the clock to the far right.
+            addView(View(context), LinearLayout.LayoutParams(0, dp(1), 1f))
+            addView(clock)
         }
         return FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
             addView(
                 bar,
-                FrameLayout.LayoutParams(WRAP, dp(60)).apply {
-                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    bottomMargin = dp(14)
+                FrameLayout.LayoutParams(MATCH, dp(60)).apply {
+                    gravity = Gravity.BOTTOM
+                    marginStart = dp(20)
+                    marginEnd = dp(20)
+                    bottomMargin = dp(16)
                 },
             )
         }
@@ -208,8 +250,23 @@ class DesktopPresentation(
 
     private fun launch(app: InstalledApp) {
         WorkspaceController.launchApp(app.packageName, app.activityName)
+        showRunningApp(app)
         drawer?.visibility = View.GONE
     }
+
+    /** Show the launched app's icon in the taskbar's running-apps strip. */
+    private fun showRunningApp(app: InstalledApp) {
+        if (!::runningApps.isInitialized) return
+        // One screen at a time today, so the strip shows the current app.
+        runningApps.removeAllViews()
+        runningApps.addView(
+            ImageView(context).apply { setImageDrawable(app.icon) },
+            LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginStart = dp(8) },
+        )
+    }
+
+    private fun clockText(): String =
+        SimpleDateFormat("h:mm a\nEEE, MMM d", Locale.getDefault()).format(Date())
 
     private fun loadApps() {
         Thread {
@@ -288,5 +345,7 @@ class DesktopPresentation(
         const val TAB_ACTIVE = 0xFF1A1B1F.toInt()
         const val TAB_INACTIVE = 0xFF9A9CA3.toInt()
         const val HINT_COLOR = 0xFF8A8C93.toInt()
+        const val TASKBAR_TEXT = 0xFFE6E8EE.toInt()
+        const val CLOCK_INTERVAL_MS = 20_000L
     }
 }
