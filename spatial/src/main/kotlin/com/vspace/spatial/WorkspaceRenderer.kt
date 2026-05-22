@@ -8,6 +8,7 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
 import android.util.Log
+import android.view.KeyEvent
 import android.widget.Toast
 import java.io.File
 import java.io.FileOutputStream
@@ -381,7 +382,12 @@ class WorkspaceRenderer(
             // and must be created from a context that can host one.
             chrome.start(context) { ctx, display ->
                 WindowChrome(
-                    ctx, display, request.label,
+                    ctx, display,
+                    onBack = {
+                        WorkspaceController.appKey?.invoke(
+                            window.content.displayId, KeyEvent.KEYCODE_BACK,
+                        )
+                    },
                     onMinimize = { WorkspaceController.setAppsHidden(true) },
                     onMaximize = { glTasks.add { toggleMaximize(window) } },
                     onClose = { glTasks.add { closeWindow(window) } },

@@ -23,6 +23,9 @@ class VSpaceApp : Application() {
         WorkspaceController.appTap = { displayId, x, y ->
             ShizukuManager.tap(displayId, x, y)
         }
+        WorkspaceController.appKey = { displayId, keyCode ->
+            ShizukuManager.key(displayId, keyCode)
+        }
         WorkspaceController.closeApp = { packageName ->
             ShizukuManager.forceStop(packageName)
         }

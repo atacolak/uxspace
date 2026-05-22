@@ -8,11 +8,11 @@ package com.vspace.spatial
  */
 object VSpaceTheme {
 
-    /** Window frame: the border around an app and its title bar. A light grey, à la Windows. */
-    const val windowFrame: Int = 0xFFDDDDDD.toInt()
+    /** Window border: the light-grey frame around an app, à la a desktop OS window. */
+    const val windowBorder: Int = 0xFFEAEAEA.toInt()
 
-    /** A slightly darker grey for the frame's edges and the title-bar divider. */
-    const val windowFrameEdge: Int = 0xFFB6B6B6.toInt()
+    /** Window title bar background — its own entry; currently the same grey as the border. */
+    const val windowTitleBar: Int = 0xFFEAEAEA.toInt()
 
     /** Text and button glyphs drawn on the (light) window frame. */
     const val windowFrameText: Int = 0xFF2B2B2B.toInt()

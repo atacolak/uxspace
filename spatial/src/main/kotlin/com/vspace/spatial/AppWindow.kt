@@ -95,9 +95,9 @@ class AppWindow(
         const val CONTENT_WIDTH_PX = 1600
         const val CONTENT_HEIGHT_PX = 900
 
-        /** Window-frame metrics, in chrome-surface pixels: the border, and the title bar. */
-        const val BORDER_PX = 16
-        const val TITLE_BAR_PX = 76
+        /** Window-frame metrics, in chrome-surface pixels: a thin border, and the title bar. */
+        const val BORDER_PX = 3
+        const val TITLE_BAR_PX = 80
 
         /** Pixel resolution of the whole window frame — the chrome surface wraps the content. */
         const val FRAME_WIDTH_PX = CONTENT_WIDTH_PX + 2 * BORDER_PX
