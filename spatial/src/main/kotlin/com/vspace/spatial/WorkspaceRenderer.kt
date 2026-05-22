@@ -106,7 +106,7 @@ class WorkspaceRenderer(
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
-    /** Fraction of the display height the scene renders into — full width, centred band. */
+    /** Height of the centred 16:9 render area, as a fraction of the display height. */
     @Volatile private var screenBand = DEFAULT_SCREEN_BAND
     @Volatile private var bandDirty = false
 
@@ -270,9 +270,10 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Render the workspace into a band [fraction] of the display tall — full width, centred.
-     * The extreme top and bottom of the glasses' field of view are hard to see, so the scene
-     * is letterboxed into a shorter centred band. Safe to call from any thread.
+     * Render the workspace into a centred 16:9 screen sized to [fraction] of the display
+     * height. The glasses cover a ~52° field of view; using the whole panel — especially an
+     * ultra-wide shape — is tiring, so the scene is a normal 16:9 screen, smaller and
+     * centred. Safe to call from any thread.
      */
     fun setScreenBand(fraction: Float) {
         screenBand = fraction.coerceIn(MIN_SCREEN_BAND, 1f)
@@ -280,25 +281,30 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Apply the render band — the full display width, a reduced centred height. The glasses'
-     * top and bottom edges are hard to view; the full width is comfortable. GL thread only.
+     * Apply the render band — a centred 16:9 viewport sized to the band fraction. 16:9 is the
+     * comfortable screen shape and matches the desktop and app surfaces. GL thread only.
      */
     private fun applyBand() {
         bandDirty = false
         if (surfaceWidth == 0 || surfaceHeight == 0) return
-        val bandH = (surfaceHeight * screenBand).toInt().coerceAtLeast(1)
-        GLES20.glViewport(0, (surfaceHeight - bandH) / 2, surfaceWidth, bandH)
+        // Largest 16:9 rectangle that is `screenBand` of the display height and fits its width.
+        var areaH = (surfaceHeight * screenBand).toInt()
+        var areaW = areaH * 16 / 9
+        if (areaW > surfaceWidth) {
+            areaW = surfaceWidth
+            areaH = areaW * 9 / 16
+        }
+        areaW = areaW.coerceAtLeast(1)
+        areaH = areaH.coerceAtLeast(1)
+        GLES20.glViewport((surfaceWidth - areaW) / 2, (surfaceHeight - areaH) / 2, areaW, areaH)
 
-        surfaceAspect = surfaceWidth.toFloat() / bandH.toFloat()
+        surfaceAspect = areaW.toFloat() / areaH.toFloat()
         Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, surfaceAspect, NEAR_PLANE, FAR_PLANE)
 
         // Size the desktop quad to exactly fill the field of view at its distance.
         val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
         desktopHalfHeight = (DESKTOP_DISTANCE * Math.tan(halfFov)).toFloat()
         desktopHalfWidth = desktopHalfHeight * surfaceAspect
-        // Keep the desktop surface at the band's aspect, so its wallpaper is centre-cropped
-        // (the wallpaper ImageView is CENTER_CROP) rather than stretched onto the quad.
-        desktop?.resize(surfaceWidth, bandH)
         relayout()
     }
 

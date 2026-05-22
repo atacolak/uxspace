@@ -29,23 +29,15 @@ import android.view.Surface
 class UiScreen(
     /** GL external-OES texture name the UI's frames are decoded into. */
     val textureId: Int,
-    initialWidth: Int,
-    initialHeight: Int,
+    /** Surface pixel size — exposed so callers can map cursor hits to its pixels. */
+    val width: Int,
+    val height: Int,
     private val mainHandler: Handler,
     /** Virtual-display name — kept distinct per screen (desktop, each window's chrome). */
     private val displayName: String,
 ) {
-    /** Current surface size — mutable, since [resize] can change it (see the render band). */
-    @Volatile
-    var width: Int = initialWidth
-        private set
-
-    @Volatile
-    var height: Int = initialHeight
-        private set
-
     val surfaceTexture: SurfaceTexture =
-        SurfaceTexture(textureId).apply { setDefaultBufferSize(initialWidth, initialHeight) }
+        SurfaceTexture(textureId).apply { setDefaultBufferSize(width, height) }
 
     private val surface = Surface(surfaceTexture)
 
@@ -84,19 +76,6 @@ class UiScreen(
             null
         }
         Log.i(TAG, "ui screen ready ${width}x$height display=${virtual.display.displayId}")
-    }
-
-    /**
-     * Resize the UI surface and its virtual display — the hosted [Presentation] re-lays-out
-     * to the new size. Used to keep the desktop matching the render band's aspect, so its
-     * wallpaper is centre-cropped rather than stretched. Call on the GL thread.
-     */
-    fun resize(newWidth: Int, newHeight: Int) {
-        if (released || (newWidth == width && newHeight == height)) return
-        width = newWidth
-        height = newHeight
-        surfaceTexture.setDefaultBufferSize(newWidth, newHeight)
-        virtualDisplay?.resize(newWidth, newHeight, DENSITY_DPI)
     }
 
     /** Pull the latest UI frame into the GL texture. Call on the GL thread. */
