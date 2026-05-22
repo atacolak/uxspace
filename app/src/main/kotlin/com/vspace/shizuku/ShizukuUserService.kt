@@ -60,6 +60,12 @@ class ShizukuUserService : IShizukuService.Stub() {
         run("input", "-d", displayId.toString(), "text", value)
     }
 
+    override fun forceStop(packageName: String) {
+        // Closes the app's windows and kills its process — so releasing the virtual display
+        // it ran on has no live activity left to relocate onto the phone's screen.
+        run("am", "force-stop", packageName)
+    }
+
     /** Run a shell command, log anything it prints, and report a clean exit. */
     private fun run(vararg command: String): Boolean {
         return try {

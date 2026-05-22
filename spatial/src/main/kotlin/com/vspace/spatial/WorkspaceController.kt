@@ -32,6 +32,10 @@ object WorkspaceController {
     @Volatile
     var appTap: ((displayId: Int, x: Int, y: Int) -> Unit)? = null
 
+    /** Force-stops a launched app when its window closes. Set by the app at startup. */
+    @Volatile
+    var closeApp: ((packageName: String) -> Unit)? = null
+
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 

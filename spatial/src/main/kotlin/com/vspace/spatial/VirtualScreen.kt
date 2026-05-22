@@ -25,6 +25,8 @@ class VirtualScreen(
     val textureId: Int,
     private val widthPx: Int,
     private val heightPx: Int,
+    /** Package of the app launched onto this screen — force-stopped when it is closed. */
+    val packageName: String,
 ) {
     val surfaceTexture: SurfaceTexture =
         SurfaceTexture(textureId).apply { setDefaultBufferSize(widthPx, heightPx) }

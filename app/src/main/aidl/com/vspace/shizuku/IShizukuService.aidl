@@ -22,4 +22,7 @@ interface IShizukuService {
 
     /** Type text into the focused field on the given display. */
     void text(int displayId, String value) = 6;
+
+    /** Force-stop a package — closes its activities and kills its process. */
+    void forceStop(String packageName) = 7;
 }

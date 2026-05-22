@@ -43,6 +43,10 @@ class WorkspaceRenderer(
     private val screens = ArrayList<VirtualScreen>()
     private var nextScreenId = 1
 
+    /** Closed screens whose app is being force-stopped, awaiting display release. */
+    private val closingScreens = ArrayList<VirtualScreen>()
+    private var closeReleaseAtNanos = 0L
+
     /** The desktop — VSpace's own One UI home, hosted on its own virtual display. */
     private var desktop: UiScreen? = null
 
@@ -159,6 +163,8 @@ class WorkspaceRenderer(
         desktop = null
         screens.forEach { it.release() }
         screens.clear()
+        closingScreens.forEach { it.release() }
+        closingScreens.clear()
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -215,9 +221,10 @@ class WorkspaceRenderer(
         drainPendingApps()
         if (closeAppsRequested) {
             closeAppsRequested = false
-            screens.forEach { it.release() }
+            screens.forEach { beginCloseScreen(it) }
             screens.clear()
         }
+        releaseClosedScreens()
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         if (surfaceWidth == 0 || surfaceHeight == 0) return
@@ -287,9 +294,9 @@ class WorkspaceRenderer(
     }
 
     private fun addScreen(request: AppRequest) {
-        // A single screen for now; a second launch evicts the first.
+        // A single screen for now; a second launch evicts (and closes) the first.
         if (screens.size >= MAX_SCREENS) {
-            screens.removeAt(0).release()
+            beginCloseScreen(screens.removeAt(0))
         }
 
         val screen = VirtualScreen(
@@ -297,6 +304,7 @@ class WorkspaceRenderer(
             textureId = createExternalTexture(),
             widthPx = SCREEN_WIDTH_PX,
             heightPx = SCREEN_HEIGHT_PX,
+            packageName = request.packageName,
         )
         screens.add(screen)
         relayout()
@@ -311,6 +319,27 @@ class WorkspaceRenderer(
                 )
             }
         }
+    }
+
+    /**
+     * Begin closing [screen]: force-stop its app now, and queue its virtual display to be
+     * released a short while later. Releasing the display while the app is still alive hands
+     * the orphaned activity back to the system, which relocates it onto the phone's screen —
+     * so the force-stop must land first. GL thread only.
+     */
+    private fun beginCloseScreen(screen: VirtualScreen) {
+        if (screen.packageName.isNotEmpty()) {
+            WorkspaceController.closeApp?.invoke(screen.packageName)
+        }
+        closingScreens.add(screen)
+        closeReleaseAtNanos = System.nanoTime() + CLOSE_RELEASE_DELAY_NANOS
+    }
+
+    /** Release the displays of force-stopped apps once the force-stop has had time to land. */
+    private fun releaseClosedScreens() {
+        if (closingScreens.isEmpty() || System.nanoTime() < closeReleaseAtNanos) return
+        closingScreens.forEach { it.release() }
+        closingScreens.clear()
     }
 
     /** Place the single app window in the desktop area above the taskbar. */
@@ -564,6 +593,9 @@ class WorkspaceRenderer(
         /** A single launched app for now, sized to fill the view. */
         const val MAX_SCREENS = 1
         const val SCREEN_DISTANCE = 4.0f
+
+        /** Grace period between force-stopping a closed app and releasing its display. */
+        const val CLOSE_RELEASE_DELAY_NANOS = 600_000_000L
 
         /** Fraction of the desktop height reserved at the bottom for the taskbar. */
         const val TASKBAR_RESERVE = 0.085f

@@ -148,6 +148,10 @@ object ShizukuManager {
     fun text(displayId: Int, value: String) =
         onWorker { service?.text(displayId, value) }
 
+    /** Force-stop [packageName] — used to close an app launched into the workspace. */
+    fun forceStop(packageName: String) =
+        onWorker { service?.forceStop(packageName) }
+
     // endregion
 
     private fun onWorker(block: () -> Unit) {
