@@ -3,6 +3,7 @@ package com.vspace.privileged
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.util.Log
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -22,8 +23,9 @@ import java.util.concurrent.TimeUnit
 object AdbDiscovery {
 
     private const val TAG = "VSpace/Privileged"
-    private const val PAIRING_SERVICE = "_adb-tls-pairing._tcp."
-    private const val CONNECT_SERVICE = "_adb-tls-connect._tcp."
+    // NsdManager wants service types without a trailing dot — "_x._tcp", never "_x._tcp.".
+    private const val PAIRING_SERVICE = "_adb-tls-pairing._tcp"
+    private const val CONNECT_SERVICE = "_adb-tls-connect._tcp"
 
     data class Endpoint(val host: String, val port: Int)
 
@@ -79,6 +81,12 @@ object AdbDiscovery {
             }
         }
 
+        // Without a held multicast lock, Wi-Fi drivers filter multicast traffic — including
+        // the mDNS replies the discovery depends on. The lock is released in `finally`.
+        val multicastLock = context.getSystemService(WifiManager::class.java)
+            ?.createMulticastLock(TAG)
+            ?.apply { setReferenceCounted(false); acquire() }
+
         return try {
             nsd.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
             results.poll(timeoutMs, TimeUnit.MILLISECONDS)
@@ -87,6 +95,7 @@ object AdbDiscovery {
             null
         } finally {
             runCatching { nsd.stopServiceDiscovery(discoveryListener) }
+            runCatching { multicastLock?.release() }
         }
     }
 }

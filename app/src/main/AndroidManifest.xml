@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
+      Wi-Fi multicast filtering normally drops the mDNS replies AdbDiscovery needs to find
+      Android's wireless-debugging services (_adb-tls-pairing._tcp / _adb-tls-connect._tcp).
+      Held briefly during each discovery; see AdbDiscovery.discover.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!--
       VSpace lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->
