@@ -18,6 +18,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
+import androidx.annotation.DrawableRes
 import com.vspace.R
 import com.vspace.spatial.VSpaceTheme
 import com.vspace.spatial.WorkspaceController
@@ -112,19 +114,79 @@ class DesktopPresentation(
         "VSpace · build $time"
     }.getOrDefault("VSpace")
 
+    /**
+     * The three-cluster DeX-style bar (see docs/TASKBAR.md). Left and right clusters are
+     * pinned to their edges; the running-app strip in the middle is centred between them by
+     * weighted spacers.
+     */
     private fun buildTaskbar(): View {
-        val launcher = ImageButton(context).apply {
-            setImageResource(R.drawable.ic_apps)
-            background = null
-            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
-            setOnClickListener {
-                WorkspaceController.setDrawerOpen(!WorkspaceController.isDrawerOpen)
-            }
-        }
         runningApps = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(buildLeftCluster(), LinearLayout.LayoutParams(WRAP, MATCH))
+            addView(View(context), LinearLayout.LayoutParams(0, MATCH, 1f))
+            addView(runningApps, LinearLayout.LayoutParams(WRAP, MATCH))
+            addView(View(context), LinearLayout.LayoutParams(0, MATCH, 1f))
+            addView(buildRightCluster(), LinearLayout.LayoutParams(WRAP, MATCH))
+        }
+        val bar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setBackgroundColor(VSpaceTheme.taskbar)
+            addView(row, LinearLayout.LayoutParams(MATCH, MATCH))
+        }
+        return FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
+            addView(bar, FrameLayout.LayoutParams(MATCH, dp(58)).apply { gravity = Gravity.BOTTOM })
+        }
+    }
+
+    /**
+     * Left cluster — DeX-style launch shelf: drawer, divider, then Recent apps, Show
+     * desktop, Optometry, Search. See docs/TASKBAR.md for what each does.
+     */
+    private fun buildLeftCluster(): View = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(
+            taskbarButton(R.drawable.ic_apps, "App drawer") {
+                WorkspaceController.setDrawerOpen(!WorkspaceController.isDrawerOpen)
+            },
+        )
+        addView(buildDivider())
+        addView(
+            taskbarButton(R.drawable.ic_history, "Recent apps") {
+                Toast.makeText(context, "Recent apps — coming soon", Toast.LENGTH_SHORT).show()
+            },
+        )
+        addView(
+            taskbarButton(R.drawable.ic_show_desktop, "Show desktop") {
+                WorkspaceController.toggleShowDesktop()
+            },
+        )
+        addView(
+            taskbarButton(R.drawable.ic_eye, "Optometry chart") {
+                Toast.makeText(context, "Optometry chart — coming soon", Toast.LENGTH_SHORT).show()
+            },
+        )
+        addView(
+            taskbarButton(R.drawable.ic_search, "Search") {
+                // Opens the drawer; focus-on-search comes when DrawerPresentation grows the hook.
+                WorkspaceController.setDrawerOpen(true)
+            },
+        )
+    }
+
+    /**
+     * Right cluster — DeX-style status / configuration tray. For now: just the clock.
+     * Battery, Wi-Fi, signal, volume, and the quick-settings panel come in follow-up
+     * commits (see the build order in docs/TASKBAR.md).
+     */
+    private fun buildRightCluster(): View {
         clock = TextView(context).apply {
             setTextColor(VSpaceTheme.taskbarText)
             textSize = 12.5f
@@ -132,27 +194,37 @@ class DesktopPresentation(
             setLineSpacing(0f, 0.95f)
             text = clockText()
         }
-        // Launcher + running apps form a group centred in the bar; the clock sits right.
-        val centerGroup = LinearLayout(context).apply {
+        return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(launcher)
-            addView(runningApps, LinearLayout.LayoutParams(WRAP, WRAP))
+            addView(clock, LinearLayout.LayoutParams(WRAP, WRAP))
         }
-        // A full-width bar flush with the bottom edge — no floating gap.
-        val bar = FrameLayout(context).apply {
-            setPadding(dp(22), dp(4), dp(24), dp(4))
-            setBackgroundColor(VSpaceTheme.taskbar)
-            addView(centerGroup, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
-            addView(
-                clock,
-                FrameLayout.LayoutParams(WRAP, WRAP, Gravity.END or Gravity.CENTER_VERTICAL),
-            )
+    }
+
+    private fun taskbarButton(
+        @DrawableRes icon: Int,
+        description: String,
+        onClick: () -> Unit,
+    ): ImageButton = ImageButton(context).apply {
+        setImageResource(icon)
+        background = null
+        contentDescription = description
+        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+            marginStart = dp(2)
+            marginEnd = dp(2)
         }
-        return FrameLayout(context).apply {
-            layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
-            addView(bar, FrameLayout.LayoutParams(MATCH, dp(58)).apply { gravity = Gravity.BOTTOM })
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setOnClickListener { onClick() }
+    }
+
+    /** 1dp vertical line between the drawer button and the rest of the left cluster. */
+    private fun buildDivider(): View = View(context).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(1), dp(32)).apply {
+            marginStart = dp(6)
+            marginEnd = dp(6)
         }
+        setBackgroundColor(DIVIDER_COLOR)
     }
 
     /**
@@ -212,5 +284,8 @@ class DesktopPresentation(
 
         const val VOID_COLOR = 0xFF0E1018.toInt()
         const val CLOCK_INTERVAL_MS = 20_000L
+
+        /** Translucent white for the left-cluster divider — a quarter-strength rule line. */
+        const val DIVIDER_COLOR = 0x40FFFFFF
     }
 }

@@ -509,6 +509,17 @@ class WorkspaceRenderer(
         relayout()
     }
 
+    /**
+     * Show-desktop toggle: if any window is visible, minimise them all; if all are already
+     * minimised, restore them all. Any thread.
+     */
+    fun toggleShowDesktop() {
+        glTasks.add {
+            val anyVisible = windows.any { !it.minimized }
+            for (w in windows) w.minimized = anyVisible
+        }
+    }
+
     /** Move [window] to the front of the draw and hit-test order. GL thread only. */
     private fun raise(window: AppWindow) {
         if (windows.lastOrNull() === window) return

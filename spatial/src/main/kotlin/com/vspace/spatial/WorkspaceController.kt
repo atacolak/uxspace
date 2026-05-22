@@ -120,6 +120,14 @@ object WorkspaceController {
         renderer?.setDrawerOpen(open)
     }
 
+    /**
+     * Show-desktop toggle for the taskbar button: if any window is visible, minimise
+     * everything; if everything is already minimised, restore them all.
+     */
+    fun toggleShowDesktop() {
+        renderer?.toggleShowDesktop()
+    }
+
     /** Bring an app's window to the front, restoring it if minimised — a taskbar-icon tap. */
     fun focusApp(packageName: String) {
         renderer?.focusApp(packageName)

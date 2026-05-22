@@ -32,7 +32,7 @@ pinned to their edges.
 ## Left cluster
 
 In order: **app-drawer button**, a thin **divider**, then **Recent apps**, **Show
-desktop**, **Search**.
+desktop**, **Optometry**, **Search**.
 
 | Item | Action |
 |---|---|
@@ -40,9 +40,11 @@ desktop**, **Search**.
 | Divider | A 1dp-wide view at `VSpaceTheme` divider colour, with vertical margins, separating the launcher from the buttons. |
 | Recent apps | A panel of apps recently opened **in the workspace** — Android's system recents API is not available to apps, so "recent" means VSpace's own launch history. Needs a small most-recently-used list in `WorkspaceController` (`launchApp` pushes onto it). The panel reuses the drawer's overlay surface or is a small popup. |
 | Show desktop | Minimises every open window; a second tap restores them. Each `AppWindow` already has a `minimized` flag — add `WorkspaceController.toggleShowDesktop()` that sets/clears it on all windows. |
+| Optometry | Opens the [optometry pseudo-app](OPTOMETRY.md) — a Snellen-style chart overlay for dialling in the VITURE focus wheels. |
 | Search | Opens the drawer with its search field focused — `DrawerPresentation` already has the field; add a way to open the drawer *and* request focus on it. |
 
-New vector drawables needed: recent apps, show desktop, search, and the divider.
+New vector drawables needed: recent apps, show desktop, optometry (e.g. a stylised eye),
+search, and the divider.
 
 ---
 
@@ -54,43 +56,85 @@ later refinement: highlight the icon of the front-most (focused) window.
 
 ---
 
-## Status tray (right)
+## Status tray (right) — full DeX-style
 
-Right-to-left as the user sees it: **Clock**, **Battery level**, **Signal strength**,
-**Wifi**, **Message indicator**, **Volume**. All of these read the **host phone's** state
-— the desktop runs in the app's own process, so the normal system services work.
+DeX's right edge isn't a passive readout; it's a clickable surface that opens a quick
+settings / notifications panel — wifi toggle, bluetooth, mobile data, volume slider,
+brightness slider, the notification list. VSpace mirrors that.
+
+### Always-visible row
+
+Right-to-left as the user sees it: **Clock + date**, **Battery %**, **Signal**, **Wi-Fi**,
+**Message indicator**, **Volume**. Compact icons; the whole row is one big click target
+that opens the panel.
 
 | Item | Source | Notes |
 |---|---|---|
-| Clock | `SimpleDateFormat`, re-ticked (exists) | Configurable — default is the time on top (AM/PM) with the date underneath. Format options (12/24h, show/hide date) belong in [SETTINGS.md](SETTINGS.md). |
-| Battery | `ACTION_BATTERY_CHANGED` sticky broadcast / `BatteryManager` | Icon + percentage; charging glyph when plugged in. No permission. |
-| Signal strength | `TelephonyManager` + `TelephonyCallback.SignalStrengthsListener` (API 31+) | Bars from `SignalStrength.getLevel()` (0–4). Reading the level needs no permission. Hide on Wi-Fi-only devices. |
-| Wifi | `ConnectivityManager` network callback + `WifiManager` RSSI → `calculateSignalLevel` | Connected / disconnected, plus signal bars. `ACCESS_WIFI_STATE` is a normal (auto-granted) permission. |
-| Message indicator | `NotificationListenerService` | There is no general "unread count" API. Show a dot when notifications are present. **Requires the user to grant notification access** in system settings — surface this as an opt-in, like the Shizuku setup banner. |
-| Volume | `AudioManager` | A speaker icon; a tap opens a small volume slider that calls `setStreamVolume` / `adjustStreamVolume` on `STREAM_MUSIC`. No permission. |
+| Clock + date | `SimpleDateFormat`, re-ticked (exists) | Default: time AM/PM on top, date underneath. 12/24h + date toggles in [SETTINGS.md](SETTINGS.md). |
+| Battery | `ACTION_BATTERY_CHANGED` sticky broadcast / `BatteryManager` | Icon + %, charging glyph when plugged in. No permission. |
+| Signal | `TelephonyManager` + `TelephonyCallback.SignalStrengthsListener` (API 31+) | Bars 0–4. Hide on Wi-Fi-only devices. |
+| Wi-Fi | `ConnectivityManager` network callback + `WifiManager` RSSI → `calculateSignalLevel` | Connected / disconnected + bars. `ACCESS_WIFI_STATE`. |
+| Message indicator | `NotificationListenerService` | Dot when there are notifications. Needs notification-access opt-in. |
+| Volume | `AudioManager.STREAM_MUSIC` | Speaker icon — opens the panel rather than a separate slider. |
+
+### Quick settings panel (DeX-style)
+
+A pop-up panel anchored to the right of the bar — appears on click of the status row,
+dismissed by tapping outside or by a `×`. Layout, top to bottom:
+
+- **Time + date** (large), shortcut to a `Settings` gear (opens phone Settings).
+- **Brightness slider** — writes `Settings.System.SCREEN_BRIGHTNESS`. Needs
+  `WRITE_SETTINGS`, or — easier and uniform with the rest of this list — through the
+  privileged helper as `settings put system screen_brightness N`.
+- **Volume slider** — `AudioManager.setStreamVolume(STREAM_MUSIC, ...)`. No permission.
+- **Quick toggles row** — Wi-Fi, Bluetooth, Mobile data, Aeroplane, Auto-rotate, Torch.
+  Implemented through the privileged helper (`cmd wifi enabled`, `svc bluetooth enable`,
+  `svc data enable`, etc.) so VSpace doesn't need each toggle's own permission. State is
+  read normally (no permission needed for read).
+- **Notifications list** — scrollable. `NotificationListenerService` mirrors current
+  notifications; tap dispatches the notification's content intent; long-press = dismiss.
 
 ### Wiring
 
-Add a `SystemStatus` helper in `:app` that registers the broadcast receivers and
-telephony / connectivity callbacks once, holds the latest values, and exposes a change
-listener. `DesktopPresentation` binds the tray views to it and updates them when it
-fires — the same shape as the existing `clockTick` and the
-`WorkspaceController.onAppLaunched` / `onAppClosed` hooks. Receivers are registered in
-`onStart` / `onCreate` and unregistered in `onStop` so nothing leaks when the glasses
-disconnect.
+A new `SystemStatus` helper in `:app` owns the read side: registers
+`ACTION_BATTERY_CHANGED` receiver, `TelephonyCallback` for signal,
+`ConnectivityManager` callback for Wi-Fi, `AudioManager` listener for volume,
+`NotificationListenerService` for notifications. Exposes flow-style change listeners.
+
+A `QuickSettingsPanel` view (built in `DesktopPresentation` as a child Window /
+floating `View` over the workspace) binds the tray + panel views to `SystemStatus` and
+calls into either Android APIs (volume, brightness via WRITE_SETTINGS) or the
+[privileged helper](PRIVILEGE.md) (wifi/bluetooth/mobile data toggles, brightness as
+fallback) for the write side.
+
+The panel is rendered as a normal Android `View` inside `DesktopPresentation`'s view
+tree (same `Theme.DeviceDefault` styling as the taskbar), shown/hidden via
+`View.VISIBLE` — no extra `UiScreen` or virtual display needed.
 
 ---
 
 ## Build order
 
-1. Restructure `buildTaskbar()` into the three-zone layout (no new behaviour yet).
-2. Left cluster: divider, Show desktop (`toggleShowDesktop`), Search (open drawer +
-   focus), Recent apps (workspace MRU list + panel).
-3. `SystemStatus` helper; status tray items, easiest first — clock (done), battery,
-   volume, wifi, signal.
-4. Message indicator last — it needs the notification-access opt-in flow.
+1. Restructure `buildTaskbar()` into the three-zone layout, all buttons present (most as
+   placeholders that just toast). No status reads yet.
+2. Left cluster wiring: divider, **Show desktop** (`toggleShowDesktop`), **Search** (open
+   drawer + focus), **Optometry** (open the chart overlay), **Recent apps** (workspace
+   MRU list + panel).
+3. `SystemStatus` helper for the read side; bind the always-visible row — clock (done),
+   battery, volume, Wi-Fi, signal.
+4. Quick-settings panel scaffold: click the right cluster to open/close. Inside: time,
+   brightness slider, volume slider.
+5. Quick toggles: Wi-Fi, Bluetooth, Mobile data, Aeroplane, Torch — through the
+   privileged helper.
+6. Notifications: notification-access opt-in flow, then the list view in the panel.
+7. Message indicator wired from the notification listener.
 
-**Touch points.** `DesktopPresentation` (three-zone layout, tray views); new
-`SystemStatus` helper in `:app`; `WorkspaceController` (`toggleShowDesktop`, workspace
-MRU list, open-drawer-with-search); new vector drawables; notification-access opt-in for
-the message indicator.
+Each step is a separate commit.
+
+**Touch points.** `DesktopPresentation` (three-zone layout, tray row, quick-settings
+panel view); new `SystemStatus` helper; new `QuickSettingsPanel` view + a small layout
+include; `WorkspaceController` (`toggleShowDesktop`, `setOptometryOpen`, workspace MRU
+list, open-drawer-with-search); a `IPrivilegedService.runShell(cmd: String)` method for
+the toggles; new vector drawables (divider, recent, show-desktop, optometry, search,
+battery, signal, wifi, volume, brightness, message, settings); notification-access
+opt-in.
