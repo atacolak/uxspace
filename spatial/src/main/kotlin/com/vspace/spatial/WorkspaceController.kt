@@ -79,6 +79,21 @@ object WorkspaceController {
     @Volatile
     var onAppClosed: ((packageName: String) -> Unit)? = null
 
+    /**
+     * Routes typed text from the phone control panel into the drawer's search field. The
+     * panel's keyboard is the only IME path in the workspace; the drawer lives on a
+     * secondary display and can't receive a system IME directly. Wired by the drawer when
+     * it is shown; called by `MainActivity`'s keyboardField text watcher while the drawer
+     * is open.
+     */
+    @Volatile
+    var onDrawerSearchQuery: ((query: String) -> Unit)? = null
+
+    /** Forward [query] into the drawer's search box. No-op if the drawer isn't listening. */
+    fun setDrawerSearchQuery(query: String) {
+        onDrawerSearchQuery?.invoke(query)
+    }
+
     @Volatile
     private var drawerOpenState = false
 

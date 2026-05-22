@@ -159,8 +159,10 @@ class DesktopPresentation(
         )
         addView(buildDivider())
         addView(
-            taskbarButton(R.drawable.ic_history, "Recent apps") {
-                Toast.makeText(context, "Recent apps — coming soon", Toast.LENGTH_SHORT).show()
+            // Until the workspace MRU list lands (docs/TASKBAR.md), Recent apps just opens
+            // the drawer so the button does something visible.
+            taskbarButton(R.drawable.ic_recent, "Recent apps") {
+                WorkspaceController.setDrawerOpen(true)
             },
         )
         addView(

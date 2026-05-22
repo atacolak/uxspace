@@ -11,6 +11,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
@@ -91,6 +93,19 @@ class MainActivity : ComponentActivity() {
         binding.trackpad.onScroll = { dy -> WorkspaceController.scroll(dy) }
         binding.trackpad.onDragStart = { WorkspaceController.beginDrag() }
         binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
+
+        // Forward IME keystrokes into the workspace drawer's search field while the drawer
+        // is open — the drawer lives on the secondary display and can't host an IME, so the
+        // phone-side keyboard field is the only practical text-input path.
+        binding.keyboardField.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                if (WorkspaceController.isDrawerOpen) {
+                    WorkspaceController.setDrawerSearchQuery(s?.toString().orEmpty())
+                }
+            }
+        })
 
         // Keep the panel resumed during a session, so re-showing the workspace after a
         // glasses blip happens from a live window.

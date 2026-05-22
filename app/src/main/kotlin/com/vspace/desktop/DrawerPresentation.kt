@@ -41,6 +41,7 @@ class DrawerPresentation(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
+    private lateinit var search: EditText
 
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
@@ -49,6 +50,27 @@ class DrawerPresentation(
         super.onCreate(savedInstanceState)
         setContentView(buildPanel())
         loadApps()
+        // The phone control panel forwards keyboard text in here — typing on the phone's
+        // IME-backed field filters the app grid, since the drawer's own EditText can't
+        // receive a system IME on a secondary display.
+        WorkspaceController.onDrawerSearchQuery = { query ->
+            mainHandler.post { setSearchText(query) }
+        }
+    }
+
+    override fun onStop() {
+        if (WorkspaceController.onDrawerSearchQuery != null) {
+            WorkspaceController.onDrawerSearchQuery = null
+        }
+        super.onStop()
+    }
+
+    /** Mirror externally-typed text into the search box without re-triggering its watcher. */
+    private fun setSearchText(query: String) {
+        if (!::search.isInitialized) return
+        if (search.text.toString() == query) return
+        search.setText(query)
+        search.setSelection(query.length)
     }
 
     /** The panel fills the surface — the renderer positions and scrims it in the scene. */
@@ -74,7 +96,7 @@ class DrawerPresentation(
             }
         }
 
-        val search = EditText(context).apply {
+        search = EditText(context).apply {
             hint = "Search"
             setHintTextColor(HINT_COLOR)
             setTextColor(TAB_ACTIVE)
