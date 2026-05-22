@@ -243,12 +243,12 @@ class MainActivity : ComponentActivity() {
             State.NEEDS_WIRELESS_DEBUGGING -> populateWizard(
                 R.string.privilege_title_wireless_debugging,
                 R.string.privilege_msg_wireless_debugging,
-                actionLabel = R.string.privilege_action_open_developer_settings,
+                actionLabel = R.string.privilege_action_open_wireless_debugging,
             )
             State.NEEDS_PAIRING -> populateWizard(
                 R.string.privilege_title_pair,
                 R.string.privilege_msg_pair,
-                actionLabel = R.string.privilege_action_open_developer_settings,
+                actionLabel = R.string.privilege_action_open_wireless_debugging,
             )
             State.DISCOVERING -> populateWizard(
                 R.string.privilege_title_working,
@@ -296,21 +296,53 @@ class MainActivity : ComponentActivity() {
     private fun onSetupAction() {
         when (PrivilegedService.state) {
             State.NEEDS_DEVELOPER_OPTIONS -> openAboutPhone()
-            State.NEEDS_WIRELESS_DEBUGGING, State.NEEDS_PAIRING -> openDeveloperSettings()
+            State.NEEDS_WIRELESS_DEBUGGING, State.NEEDS_PAIRING -> openWirelessDebugging()
             else -> Unit
         }
     }
 
     private fun openAboutPhone() {
-        runCatching { startActivity(Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)) }
-            .onFailure { runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) } }
+        startFirstAvailable(
+            Intent(Settings.ACTION_DEVICE_INFO_SETTINGS),
+            Intent(Settings.ACTION_SETTINGS),
+        )
     }
 
-    private fun openDeveloperSettings() {
-        runCatching {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
-        }.onFailure {
-            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+    /**
+     * Open Developer Options and scroll to / highlight the Wireless Debugging row. The
+     * `:settings:fragment_args_key` extra is the documented way to deep-link to a specific
+     * preference inside a Settings page; on Samsung One UI it both scrolls there and
+     * briefly highlights the row. Falls back to plain Developer Options, then to the top
+     * of Settings.
+     */
+    private fun openWirelessDebugging() {
+        val targeted = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+            putExtra(SETTINGS_FRAGMENT_ARG_KEY, WIRELESS_DEBUGGING_PREF_KEY)
+            putExtra(
+                SETTINGS_SHOW_FRAGMENT_ARGS,
+                Bundle().apply { putString(SETTINGS_FRAGMENT_ARG_KEY, WIRELESS_DEBUGGING_PREF_KEY) },
+            )
         }
+        startFirstAvailable(
+            targeted,
+            Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS),
+            Intent(Settings.ACTION_SETTINGS),
+        )
+    }
+
+    /** Try each intent in order; stop at the first one that launches. */
+    private fun startFirstAvailable(vararg intents: Intent) {
+        for (intent in intents) {
+            if (runCatching { startActivity(intent) }.isSuccess) return
+        }
+    }
+
+    private companion object {
+        /** Settings preference key for the Wireless Debugging row in Developer Options. */
+        const val WIRELESS_DEBUGGING_PREF_KEY = "toggle_adb_wireless"
+
+        /** Settings deep-link extras — preserved across most OEM Settings forks. */
+        const val SETTINGS_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
+        const val SETTINGS_SHOW_FRAGMENT_ARGS = ":settings:show_fragment_args"
     }
 }

@@ -23,7 +23,7 @@
     <string name="privilege_pair_failed">Pairing failed — check the code and that the “Pair device” dialog is still open, then try again.</string>
 
     <string name="privilege_action_open_about">Open About phone</string>
-    <string name="privilege_action_open_developer_settings">Open Developer settings</string>
+    <string name="privilege_action_open_wireless_debugging">Open Wireless Debugging</string>
     <string name="privilege_action_pair">Pair</string>
     <string name="privilege_pairing_hint">6-digit pairing code</string>
 
