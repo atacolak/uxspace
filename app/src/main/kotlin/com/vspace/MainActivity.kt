@@ -234,43 +234,36 @@ class MainActivity : ComponentActivity() {
                 R.string.privilege_title_unsupported,
                 R.string.privilege_msg_unsupported,
                 actionLabel = null,
-                codeFieldVisible = false,
             )
             State.NEEDS_DEVELOPER_OPTIONS -> populateWizard(
                 R.string.privilege_title_dev_options,
                 R.string.privilege_msg_dev_options,
                 actionLabel = R.string.privilege_action_open_about,
-                codeFieldVisible = false,
             )
             State.NEEDS_WIRELESS_DEBUGGING -> populateWizard(
                 R.string.privilege_title_wireless_debugging,
                 R.string.privilege_msg_wireless_debugging,
                 actionLabel = R.string.privilege_action_open_developer_settings,
-                codeFieldVisible = false,
             )
             State.NEEDS_PAIRING -> populateWizard(
                 R.string.privilege_title_pair,
                 R.string.privilege_msg_pair,
-                actionLabel = R.string.privilege_action_pair,
-                codeFieldVisible = true,
+                actionLabel = R.string.privilege_action_open_developer_settings,
             )
             State.DISCOVERING -> populateWizard(
                 R.string.privilege_title_working,
                 R.string.privilege_msg_discovering,
                 actionLabel = null,
-                codeFieldVisible = false,
             )
             State.CONNECTING -> populateWizard(
                 R.string.privilege_title_working,
                 R.string.privilege_msg_connecting,
                 actionLabel = null,
-                codeFieldVisible = false,
             )
             State.STARTING -> populateWizard(
                 R.string.privilege_title_working,
                 R.string.privilege_msg_starting,
                 actionLabel = null,
-                codeFieldVisible = false,
             )
             State.READY -> Unit // showWizard would not have been called
         }
@@ -283,17 +276,9 @@ class MainActivity : ComponentActivity() {
             if (!showWizard && !showWaiting) View.VISIBLE else View.GONE
     }
 
-    private fun populateWizard(
-        title: Int,
-        message: Int,
-        actionLabel: Int?,
-        codeFieldVisible: Boolean,
-    ) {
+    private fun populateWizard(title: Int, message: Int, actionLabel: Int?) {
         binding.wizardTitle.setText(title)
         binding.wizardMessage.setText(message)
-        val pairingVisibility = if (codeFieldVisible) View.VISIBLE else View.GONE
-        binding.pairingCode.visibility = pairingVisibility
-        binding.pairingPort.visibility = pairingVisibility
         if (actionLabel == null) {
             binding.setupButton.visibility = View.GONE
         } else {
@@ -303,12 +288,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** The wizard button: action depends on the current state. */
+    /**
+     * The wizard button: each step sends the user to wherever the next action lives in
+     * Android Settings. Actual pairing is done via the notification posted while the
+     * NEEDS_PAIRING state is active — see [PairingNotifier].
+     */
     private fun onSetupAction() {
         when (PrivilegedService.state) {
             State.NEEDS_DEVELOPER_OPTIONS -> openAboutPhone()
-            State.NEEDS_WIRELESS_DEBUGGING -> openDeveloperSettings()
-            State.NEEDS_PAIRING -> startPairing()
+            State.NEEDS_WIRELESS_DEBUGGING, State.NEEDS_PAIRING -> openDeveloperSettings()
             else -> Unit
         }
     }
@@ -324,34 +312,5 @@ class MainActivity : ComponentActivity() {
         }.onFailure {
             runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
         }
-    }
-
-    private fun startPairing() {
-        val code = binding.pairingCode.text.toString().trim()
-        val port = binding.pairingPort.text.toString().trim().toIntOrNull()
-        if (code.length != PAIRING_CODE_LENGTH || port == null || port !in 1..65535) {
-            Toast.makeText(this, R.string.privilege_pair_invalid, Toast.LENGTH_SHORT).show()
-            return
-        }
-        binding.setupButton.isEnabled = false
-        PrivilegedService.activate(code, pairingPort = port) { ok ->
-            runOnUiThread {
-                if (!ok) {
-                    binding.setupButton.isEnabled = true
-                    Toast.makeText(
-                        this,
-                        R.string.privilege_pair_failed,
-                        Toast.LENGTH_LONG,
-                    ).show()
-                } else {
-                    binding.pairingCode.text.clear()
-                    binding.pairingPort.text.clear()
-                }
-            }
-        }
-    }
-
-    private companion object {
-        const val PAIRING_CODE_LENGTH = 6
     }
 }

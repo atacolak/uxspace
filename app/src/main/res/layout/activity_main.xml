@@ -58,34 +58,6 @@
                 android:textColor="@color/text_dim"
                 android:textSize="14sp" />
 
-            <EditText
-                android:id="@+id/pairingCode"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
-                android:background="@color/surface"
-                android:hint="@string/privilege_pairing_hint"
-                android:inputType="number"
-                android:maxLength="6"
-                android:padding="14dp"
-                android:textColor="@color/text"
-                android:textColorHint="@color/text_dim"
-                android:visibility="gone" />
-
-            <EditText
-                android:id="@+id/pairingPort"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:background="@color/surface"
-                android:hint="@string/privilege_pairing_port_hint"
-                android:inputType="number"
-                android:maxLength="5"
-                android:padding="14dp"
-                android:textColor="@color/text"
-                android:textColorHint="@color/text_dim"
-                android:visibility="gone" />
-
             <Button
                 android:id="@+id/setupButton"
                 android:layout_width="match_parent"

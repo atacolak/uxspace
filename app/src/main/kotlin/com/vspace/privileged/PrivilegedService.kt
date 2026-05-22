@@ -205,30 +205,25 @@ object PrivilegedService {
     }
 
     /**
-     * One-time pairing with the 6-digit [pairingCode]. [pairingPort] is the port shown in
-     * Wireless Debugging's "Pair device with a pairing code" dialog; pass `null` to discover
-     * it via mDNS (works only when the dialog is in the foreground — the
-     * notification-shade path).
-     *
-     * Two ways VSpace reaches this: the wizard form supplies an explicit port (manual
-     * fallback for when the notification path is unavailable); the notification's
-     * `RemoteInput` path discovers the port via mDNS because the pairing dialog stays in
-     * the foreground behind the notification shade. [done] runs on the worker thread.
+     * Pair using the 6-digit [pairingCode] from Wireless Debugging's "Pair device with a
+     * pairing code" dialog. The pairing port is discovered via mDNS — this only works
+     * while the dialog is still in the foreground, which is why VSpace reads the code
+     * from a notification's `RemoteInput` (the shade overlays the dialog instead of
+     * backgrounding it). [done] runs on the worker thread.
      */
-    fun activate(pairingCode: String, pairingPort: Int?, done: (Boolean) -> Unit) {
+    fun activate(pairingCode: String, done: (Boolean) -> Unit) {
         worker.execute {
             val ctx = appContext ?: run { done(false); return@execute }
             try {
-                val port = pairingPort
-                    ?: AdbDiscovery.discoverPairing(ctx, DISCOVERY_TIMEOUT_MS)?.port
-                if (port == null) {
-                    Log.w(TAG, "pair: no port supplied and mDNS did not find the service")
+                val endpoint = AdbDiscovery.discoverPairing(ctx, DISCOVERY_TIMEOUT_MS)
+                if (endpoint == null) {
+                    Log.w(TAG, "pair: mDNS did not find the service — is the dialog still up?")
                     markPaired(ctx, false)
                     done(false); return@execute
                 }
                 val adb = AdbConnectionManager.getInstance(ctx)
-                val paired = adb.pair(PAIRING_HOST, port, pairingCode)
-                Log.i(TAG, "ADB pair $PAIRING_HOST:$port ok=$paired")
+                val paired = adb.pair(endpoint.host, endpoint.port, pairingCode)
+                Log.i(TAG, "ADB pair ${endpoint.host}:${endpoint.port} ok=$paired")
                 markPaired(ctx, paired)
                 if (!paired) { done(false); return@execute }
                 done(true)
@@ -340,10 +335,4 @@ object PrivilegedService {
 
     /** Path of the marker file created on a successful [activate] (relative to filesDir). */
     private const val PAIRED_MARKER = "adb/paired.flag"
-
-    /**
-     * Host used for the pairing connection. The pairing service binds to all interfaces; the
-     * device's own loopback is the most reliable target.
-     */
-    private const val PAIRING_HOST = "127.0.0.1"
 }

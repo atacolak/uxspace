@@ -23,7 +23,7 @@ class PairingInputReceiver : BroadcastReceiver() {
         val code = raw.filter(Char::isDigit).take(6)
         Log.i(TAG, "pairing code from notification (len=${code.length})")
         if (code.length != 6) return
-        PrivilegedService.activate(code, pairingPort = null) { ok ->
+        PrivilegedService.activate(code) { ok ->
             Log.i(TAG, "pair from notification ok=$ok")
             if (ok) PairingNotifier.cancel(context)
         }
