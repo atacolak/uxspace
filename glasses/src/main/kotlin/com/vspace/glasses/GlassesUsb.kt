@@ -109,5 +109,12 @@ class GlassesUsb(
 
         fun isVitureDevice(device: UsbDevice): Boolean =
             device.vendorId == VITURE_VID && device.productId in VITURE_PIDS
+
+        /** Whether VITURE glasses are currently attached over USB. */
+        fun isConnected(context: Context): Boolean {
+            val usb = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+                ?: return false
+            return usb.deviceList.values.any(::isVitureDevice)
+        }
     }
 }

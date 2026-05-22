@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Bundle
 import android.view.Display
 import android.view.WindowManager
+import com.vspace.glasses.GlassesUsb
 import com.vspace.glasses.HeadTracking
 
 /**
@@ -29,6 +30,9 @@ class WorkspacePresentation(
         surfaceView = view
         setContentView(view)
         WorkspaceController.register(view.workspaceRenderer)
+        // On the VITURE glasses the field-of-view edges are hard to see, so render into a
+        // centred band; a plain external display can use its whole height.
+        WorkspaceController.setScreenBand(if (GlassesUsb.isConnected(context)) 0.83f else 1.0f)
         // Drive the camera from the glasses' head pose, so the screens stay world-fixed.
         val renderer = view.workspaceRenderer
         headTracking = HeadTracking(context) { w, x, y, z ->

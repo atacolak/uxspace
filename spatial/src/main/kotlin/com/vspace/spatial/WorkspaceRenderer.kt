@@ -106,6 +106,10 @@ class WorkspaceRenderer(
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
+    /** Fraction of the display the scene renders into, centred — letterboxed on the glasses. */
+    @Volatile private var screenBand = DEFAULT_SCREEN_BAND
+    @Volatile private var bandDirty = false
+
     /** Desktop quad half-extents (metres), sized in [onSurfaceChanged] to fill the view. */
     private var desktopHalfWidth = 3.7f
     private var desktopHalfHeight = 2.1f
@@ -262,9 +266,29 @@ class WorkspaceRenderer(
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         surfaceWidth = width
         surfaceHeight = height
-        GLES20.glViewport(0, 0, width, height)
+        applyBand()
+    }
 
-        surfaceAspect = width.toFloat() / height.toFloat()
+    /**
+     * Render the workspace into [fraction] of the display, centred. The extreme top and
+     * bottom of the glasses' field of view are hard to see, so the scene is rendered into a
+     * smaller centred rectangle (letterboxed). Safe to call from any thread.
+     */
+    fun setScreenBand(fraction: Float) {
+        screenBand = fraction.coerceIn(MIN_SCREEN_BAND, 1f)
+        bandDirty = true
+    }
+
+    /** Apply the render band — a centred viewport at the band's scale. GL thread only. */
+    private fun applyBand() {
+        bandDirty = false
+        if (surfaceWidth == 0 || surfaceHeight == 0) return
+        // Scale both dimensions, so the aspect (and thus the scene) is never distorted.
+        val bandW = (surfaceWidth * screenBand).toInt().coerceAtLeast(1)
+        val bandH = (surfaceHeight * screenBand).toInt().coerceAtLeast(1)
+        GLES20.glViewport((surfaceWidth - bandW) / 2, (surfaceHeight - bandH) / 2, bandW, bandH)
+
+        surfaceAspect = bandW.toFloat() / bandH.toFloat()
         Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, surfaceAspect, NEAR_PLANE, FAR_PLANE)
 
         // Size the desktop quad to exactly fill the field of view at its distance.
@@ -275,6 +299,7 @@ class WorkspaceRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        if (bandDirty) applyBand()
         drainGlTasks()
         drainPendingApps()
         handleDrag()
@@ -857,6 +882,12 @@ class WorkspaceRenderer(
 
         /** Opacity of the dimming scrim drawn behind the open drawer. */
         const val SCRIM_ALPHA = 0.55f
+
+        /** Default render band — the glasses' top/bottom edges are uncomfortable to view. */
+        const val DEFAULT_SCREEN_BAND = 0.83f
+
+        /** The render band cannot shrink below this fraction of the display. */
+        const val MIN_SCREEN_BAND = 0.5f
 
         /** A single launched app window for now. */
         const val MAX_SCREENS = 1

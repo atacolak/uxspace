@@ -58,6 +58,10 @@ class MainActivity : ComponentActivity() {
         binding.layoutButton.setOnClickListener {
             Toast.makeText(this, "Screen layouts are coming soon", Toast.LENGTH_SHORT).show()
         }
+        binding.screenHeightButton.setOnClickListener {
+            val percent = (WorkspaceController.cycleScreenBand() * 100).toInt()
+            Toast.makeText(this, "Screen size $percent%", Toast.LENGTH_SHORT).show()
+        }
         binding.keyboardButton.setOnClickListener { toggleKeyboard() }
         renderViewModeButton()
 

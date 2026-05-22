@@ -3,6 +3,7 @@ package com.vspace.spatial
 import android.app.Presentation
 import android.content.Context
 import android.view.Display
+import kotlin.math.abs
 
 /**
  * Process-wide handle to the workspace running inside the glasses' `Presentation`, so the
@@ -19,6 +20,13 @@ object WorkspaceController {
 
     @Volatile
     private var viewMode = WorkspaceRenderer.ViewMode.PINNED
+
+    /** How much of the glasses display the scene fills, centred (1.0 = full). */
+    @Volatile
+    private var screenBandState = 0.83f
+
+    /** Screen-size presets the toolbar button cycles through: comfortable, full, compact. */
+    private val screenBandPresets = floatArrayOf(0.83f, 1.0f, 0.70f)
 
     /** Builds the desktop UI shown on the workspace's UiScreen. Set by the app at startup. */
     @Volatile
@@ -78,6 +86,7 @@ object WorkspaceController {
         appsHiddenState = false
         drawerOpenState = false
         renderer.setViewMode(viewMode)
+        renderer.setScreenBand(screenBandState)
     }
 
     internal fun unregister(renderer: WorkspaceRenderer) {
@@ -131,6 +140,20 @@ object WorkspaceController {
     fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
         viewMode = mode
         renderer?.setViewMode(mode)
+    }
+
+    /** Set the render band — the fraction of the display the scene fills, centred. */
+    fun setScreenBand(fraction: Float) {
+        screenBandState = fraction
+        renderer?.setScreenBand(fraction)
+    }
+
+    /** Cycle to the next screen-size preset; returns the new fraction (0..1). */
+    fun cycleScreenBand(): Float {
+        val index = screenBandPresets.indexOfFirst { abs(it - screenBandState) < 0.01f }
+        val next = screenBandPresets[(index + 1).mod(screenBandPresets.size)]
+        setScreenBand(next)
+        return next
     }
 
     /** Save a PNG snapshot of the current workspace frame to the device's storage. */
