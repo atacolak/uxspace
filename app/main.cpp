@@ -26,6 +26,8 @@
 #include <uxspace/spatial/Surface3D.h>
 #include <uxspace/spatial/Scene.h>
 #include <uxspace/spatial/GlassesOutput.h>
+#include <uxspace/spatial/ScreenLayout.h>
+#include <uxspace/spatial/layouts/Single.h>
 #include <uxspace/tracking/HeadPose.h>
 #include <uxspace/tracking/ViewMode.h>
 #include <uxspace/viture/VitureTracker.h>
@@ -128,6 +130,7 @@ sp::GlassesOutput    g_glasses;
 DevPreview           g_devPreview;
 uxspace::viture::VitureTracker g_tracker;
 uxspace::tracking::ViewMode    g_viewMode = uxspace::tracking::ViewMode::PINNED;
+uxspace::spatial::layouts::Single g_layout;     // W3 will swap this for layout cycling
 constexpr int                  kHotkeyRecenter = 2;
 int                  g_screenBandIndex = 2;            // index into kScreenBandPresets (default = 0.90)
 
@@ -156,9 +159,9 @@ HHOOK            g_keyboardHook = nullptr;
 // the same DDA texture. Z is staggered by focus-history index so the
 // most recently focused window sits closest to the camera. Painter's
 // algorithm: we push back-to-front so no depth buffer is needed.
-constexpr float kBackZ          = 2.0f;
-constexpr float kBackWorldW     = 2.4f;
-constexpr float kBackWorldH     = 1.35f;
+// Back-plane Z/size now come from the active ScreenLayout (g_layout).
+// kDepthStep is a render concern (W1.5 per-window depth stagger), keep
+// it local.
 constexpr float kDepthStep      = 0.015f;  // 1.5 cm per W1.5 default
 constexpr int   kFocusHistoryCap = 32;
 constexpr int   kHotkeyTogglePseudo3D = 1;
@@ -462,9 +465,14 @@ std::vector<EnumeratedWindow> EnumerateUxSpaceWindows() {
 void UpdateScene() {
     g_scene.surfaces.clear();
 
+    // Slot-0 placement from the active ScreenLayout strategy. For W2 the
+    // layout is always Single; W3 swaps in ArcOfThree / Stack and this
+    // loop iterates monitorCount() back planes (one per virtual monitor).
+    const sp::ScreenPlacement back0 = g_layout.placement(0);
+
     sp::Surface3D backPlane;
-    backPlane.position = { 0.0f, 0.0f, kBackZ };
-    backPlane.size     = { kBackWorldW, kBackWorldH };
+    backPlane.position = back0.position;
+    backPlane.size     = back0.size;
     backPlane.uvRect   = ComputeZoomUVRect();
     backPlane.texture  = g_vscreen.srv();
     g_scene.surfaces.push_back(backPlane);
@@ -503,12 +511,15 @@ void UpdateScene() {
 
         const float cx  = (left + right ) * 0.5f;
         const float cy  = (top  + bottom) * 0.5f;
+        // Per-window quads inherit the active layout's slot-0 dimensions
+        // so they line up with the back plane (this also keeps the
+        // pseudo-3D feature future-compatible with non-Single layouts).
         sp::Surface3D q;
-        q.position = { (cx  - 0.5f) * kBackWorldW,
-                       (0.5f - cy ) * kBackWorldH,
-                       kBackZ - kDepthStep * float(N - idx) };
-        q.size     = { (right - left) * kBackWorldW,
-                       (bottom - top) * kBackWorldH };
+        q.position = { back0.position.x + (cx  - 0.5f) * back0.size.x,
+                       back0.position.y + (0.5f - cy ) * back0.size.y,
+                       back0.position.z - kDepthStep * float(N - idx) };
+        q.size     = { (right - left) * back0.size.x,
+                       (bottom - top) * back0.size.y };
         q.uvRect   = { left, top, right, bottom };
         q.texture  = g_vscreen.srv();
         g_scene.surfaces.push_back(q);
