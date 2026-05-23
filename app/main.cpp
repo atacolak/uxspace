@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-2000";
+constexpr const char kAppBuildStamp[] = "v20260523-2100";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -430,16 +430,31 @@ struct IpcResult {
     char                     pongPayload[128] = {};  // driver build stamp (Pong only)
 };
 
+const char* IpcMessageName(uxspace::ipc::MessageType t);
+const char* IpcErrorName(uxspace::ipc::ErrorCode c);
+
 IpcResult IpcRequest(uxspace::ipc::MessageType type,
                      const void* payload, std::uint32_t payloadBytes) {
     using namespace uxspace::ipc;
     static std::atomic<std::uint32_t> s_requestId{ 0 };
 
     IpcResult r;
+    const std::uint32_t reqId = s_requestId.fetch_add(1) + 1;
+
     HANDLE pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE,
                               0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) {
         r.win32Error = GetLastError();
+        // CRITICAL: IpcResult defaults replyType=Nack, nackCode=Internal,
+        // nackMessage="" — so an early return looks identical to a
+        // driver-sent Nack/Internal with empty message. Until v2100 we
+        // had no way to distinguish "the driver actually NACK'd us" from
+        // "the IPC pipe blew up before we even read a header". Log every
+        // early-return stage explicitly so the next failure is
+        // immediately attributable.
+        uxspace::log::warn("ipc: req#%u type=%s CreateFile failed err=%lu (defaulting to Nack/Internal)",
+                           reqId, IpcMessageName(type),
+                           static_cast<unsigned long>(r.win32Error));
         return r;
     }
     DWORD pipeMode = PIPE_READMODE_MESSAGE;
@@ -449,12 +464,16 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
     req.protocol_version = kProtocolVersion;
     req.type             = type;
     req.payload_bytes    = payloadBytes;
-    req.request_id       = s_requestId.fetch_add(1) + 1;
+    req.request_id       = reqId;
 
     DWORD wrote = 0;
     if (!WriteFile(pipe, &req, sizeof(req), &wrote, nullptr) ||
         wrote != sizeof(req)) {
         r.win32Error = GetLastError();
+        uxspace::log::warn("ipc: req#%u type=%s WriteFile(header) failed wrote=%lu err=%lu",
+                           reqId, IpcMessageName(type),
+                           static_cast<unsigned long>(wrote),
+                           static_cast<unsigned long>(r.win32Error));
         CloseHandle(pipe);
         return r;
     }
@@ -462,6 +481,10 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
         if (!WriteFile(pipe, payload, payloadBytes, &wrote, nullptr) ||
             wrote != payloadBytes) {
             r.win32Error = GetLastError();
+            uxspace::log::warn("ipc: req#%u type=%s WriteFile(payload %u) failed wrote=%lu err=%lu",
+                               reqId, IpcMessageName(type), payloadBytes,
+                               static_cast<unsigned long>(wrote),
+                               static_cast<unsigned long>(r.win32Error));
             CloseHandle(pipe);
             return r;
         }
@@ -472,6 +495,10 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
     if (!ReadFile(pipe, &rsp, sizeof(rsp), &read, nullptr) ||
         read != sizeof(rsp)) {
         r.win32Error = GetLastError();
+        uxspace::log::warn("ipc: req#%u type=%s ReadFile(rsp header) failed read=%lu err=%lu",
+                           reqId, IpcMessageName(type),
+                           static_cast<unsigned long>(read),
+                           static_cast<unsigned long>(r.win32Error));
         CloseHandle(pipe);
         return r;
     }
