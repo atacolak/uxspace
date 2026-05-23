@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-2200";
+constexpr const char kAppBuildStamp[] = "v20260523-2300";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -440,6 +440,8 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
 
     IpcResult r;
     const std::uint32_t reqId = s_requestId.fetch_add(1) + 1;
+    uxspace::log::info("ipc: req#%u type=%s payload=%u start",
+                       reqId, IpcMessageName(type), payloadBytes);
 
     HANDLE pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE,
                               0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -459,6 +461,7 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
     }
     DWORD pipeMode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(pipe, &pipeMode, nullptr, nullptr);
+    uxspace::log::info("ipc: req#%u pipe opened, mode set to MESSAGE", reqId);
 
     Header req{};
     req.protocol_version = kProtocolVersion;
@@ -477,6 +480,7 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
         CloseHandle(pipe);
         return r;
     }
+    uxspace::log::info("ipc: req#%u WriteFile(header) wrote=%lu OK", reqId, wrote);
     if (payloadBytes > 0) {
         if (!WriteFile(pipe, payload, payloadBytes, &wrote, nullptr) ||
             wrote != payloadBytes) {
@@ -488,7 +492,10 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
             CloseHandle(pipe);
             return r;
         }
+        uxspace::log::info("ipc: req#%u WriteFile(payload %u) wrote=%lu OK",
+                           reqId, payloadBytes, wrote);
     }
+    uxspace::log::info("ipc: req#%u waiting for response header...", reqId);
 
     Header rsp{};
     DWORD read = 0;
@@ -503,6 +510,8 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
         return r;
     }
     r.replyType = rsp.type;
+    uxspace::log::info("ipc: req#%u response header: type=%s payload_bytes=%u",
+                       reqId, IpcMessageName(rsp.type), rsp.payload_bytes);
 
     if (rsp.type == MessageType::Nack) {
         // v1900's "ipc: NackPayload read=..." never fired even though
@@ -560,12 +569,17 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
 
     CloseHandle(pipe);
     r.ok = (rsp.type != MessageType::Nack);
+    uxspace::log::info("ipc: req#%u done ok=%d type=%s",
+                       reqId, r.ok ? 1 : 0, IpcMessageName(r.replyType));
     return r;
 }
 
 IpcResult IpcPing() { return IpcRequest(uxspace::ipc::MessageType::Ping, nullptr, 0); }
 
 IpcResult IpcSetMonitorCount(std::uint8_t count) {
+    uxspace::log::info("ipc: IpcSetMonitorCount entry count=%u (payload=%u bytes)",
+                       (unsigned) count,
+                       (unsigned) sizeof(uxspace::ipc::SetMonitorCountPayload));
     uxspace::ipc::SetMonitorCountPayload payload{};
     payload.count = count;
     return IpcRequest(uxspace::ipc::MessageType::SetMonitorCount,
@@ -1496,11 +1510,14 @@ void DrawDevUI(HWND devWnd) {
         ImGui::SameLine();
         char label[16]; snprintf(label, sizeof(label), "%u##mcount", n);
         if (ImGui::SmallButton(label)) {
+            uxspace::log::info("ui: monitor-count button pressed n=%u (currently advertised max=%u)",
+                               (unsigned) n, (unsigned) uxspace::ipc::kMaxMonitors);
             const IpcResult r = IpcSetMonitorCount(n);
             if (r.replyType == uxspace::ipc::MessageType::Nack) {
-                uxspace::log::warn("ipc: SetMonitorCount(%u) -> Nack/%s: %s", n,
+                uxspace::log::warn("ipc: SetMonitorCount(%u) -> Nack/%s: %s (win32err=%lu)", n,
                                    IpcErrorName(r.nackCode),
-                                   r.nackMessage);
+                                   r.nackMessage,
+                                   static_cast<unsigned long>(r.win32Error));
             } else {
                 uxspace::log::info("ipc: SetMonitorCount(%u) -> %s.", n,
                                    IpcMessageName(r.replyType));
@@ -1629,6 +1646,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                            st.wHour, st.wMinute, st.wSecond);
         uxspace::log::info("UxSpace app build = %s.", kAppBuildStamp);
         uxspace::log::info("Log file: %ls", logPath);
+        uxspace::log::info("Driver log (separate, written by WUDFHost): C:\\Windows\\Temp\\UxSpace-driver.log");
     }
 
     // Restore persisted settings (screen band per-mode, view mode,

@@ -21,6 +21,7 @@ Environment:
 // #include "Driver.tmh"
 
 #include <uxspace/ipc.h>
+#include <uxspace/log.h>
 #include <sddl.h>
 
 using namespace std;
@@ -206,6 +207,14 @@ private:
 void PipeServer::Start()
 {
     if (m_thread.Get() != nullptr) return;
+
+    // Driver-side log file (parallel to %TEMP%\UxSpace-app.log on the
+    // user side). C:\Windows\Temp resolves to the service-principal TEMP
+    // when WUDFHost runs, so the path is universally writable. Init is
+    // idempotent — re-Start after Stop reuses the same handle.
+    uxspace::log::init(L"C:\\Windows\\Temp\\UxSpace-driver.log");
+    uxspace::log::info("driver: PipeServer::Start build=v20260523-2300");
+
     m_terminate.Attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     m_thread.Attach(CreateThread(nullptr, 0, &PipeServer::ThreadProc, this, 0, nullptr));
 }
@@ -348,13 +357,28 @@ void PipeServer::HandleClient(HANDLE pipe)
         return ReadExact(pipe, scratch, bytes);
     };
 
+    uxspace::log::info("driver: HandleClient connected");
+
     for (;;)
     {
         Header reqHdr{};
-        if (!ReadExact(pipe, &reqHdr, sizeof(reqHdr))) return;
+        if (!ReadExact(pipe, &reqHdr, sizeof(reqHdr))) {
+            uxspace::log::info("driver: HandleClient ReadExact(header) failed err=%lu (client closed)",
+                               GetLastError());
+            return;
+        }
+        uxspace::log::info("driver: req#%u recv type=%u payload_bytes=%u proto=%u",
+                           reqHdr.request_id,
+                           static_cast<unsigned>(reqHdr.type),
+                           reqHdr.payload_bytes,
+                           reqHdr.protocol_version);
 
         if (reqHdr.protocol_version != kProtocolVersion)
         {
+            uxspace::log::warn("driver: req#%u protocol mismatch (got %u, want %u) -> Nack/VersionMismatch",
+                               reqHdr.request_id,
+                               reqHdr.protocol_version,
+                               kProtocolVersion);
             if (!drain(reqHdr.payload_bytes)) return;
             if (!sendNack(ErrorCode::VersionMismatch, reqHdr.request_id)) return;
             continue;
@@ -364,6 +388,7 @@ void PipeServer::HandleClient(HANDLE pipe)
         {
         case MessageType::Ping:
         {
+            uxspace::log::info("driver: req#%u Ping", reqHdr.request_id);
             if (!drain(reqHdr.payload_bytes)) return;
             // Pong carries the driver's build tag as a bare ASCII
             // payload (no NUL on the wire — app caps at payload_bytes).
@@ -371,7 +396,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-2200";
+            static const char kBuildStamp[] = "v20260523-2300";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -381,8 +406,14 @@ void PipeServer::HandleClient(HANDLE pipe)
 
         case MessageType::SetMonitorCount:
         {
+            uxspace::log::info("driver: req#%u SetMonitorCount path entered (payload_bytes=%u, expect=%u)",
+                               reqHdr.request_id,
+                               reqHdr.payload_bytes,
+                               (unsigned) sizeof(SetMonitorCountPayload));
             if (reqHdr.payload_bytes != sizeof(SetMonitorCountPayload))
             {
+                uxspace::log::warn("driver: req#%u SetMonitorCount payload size mismatch -> Nack/Internal",
+                                   reqHdr.request_id);
                 char diag[124] = {};
                 std::size_t pos = 0;
                 DiagAppendStr(diag, sizeof(diag), pos, "SetMonitorCount payload expected ");
@@ -394,9 +425,19 @@ void PipeServer::HandleClient(HANDLE pipe)
                 break;
             }
             SetMonitorCountPayload payload{};
-            if (!ReadExact(pipe, &payload, sizeof(payload))) return;
+            if (!ReadExact(pipe, &payload, sizeof(payload))) {
+                uxspace::log::warn("driver: req#%u SetMonitorCount ReadExact(payload) failed err=%lu",
+                                   reqHdr.request_id, GetLastError());
+                return;
+            }
+            uxspace::log::info("driver: req#%u SetMonitorCount payload.count=%u",
+                               reqHdr.request_id, (unsigned) payload.count);
             if (payload.count > kMaxMonitors)
             {
+                uxspace::log::warn("driver: req#%u count=%u > max=%u -> Nack/TooManyMonitors",
+                                   reqHdr.request_id,
+                                   (unsigned) payload.count,
+                                   (unsigned) kMaxMonitors);
                 char diag[124] = {};
                 std::size_t pos = 0;
                 DiagAppendStr(diag, sizeof(diag), pos, "count=");
@@ -406,21 +447,19 @@ void PipeServer::HandleClient(HANDLE pipe)
                 if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
-            // RESPONSE BEFORE WORK: v2100's client-side stage logging
-            // confirmed that every SetMonitorCount removal request
-            // returned ERROR_BROKEN_PIPE (109) to the client's ReadFile
-            // for the response header. The driver was processing the
-            // removal for ~2-3 seconds, during which the IddCx framework
-            // apparently recycled our pipe-server context (the next
-            // request succeeds, so it's a thread/context restart, not a
-            // full driver crash). By sending Ack BEFORE invoking
-            // SetMonitorCount + FlushFileBuffers, the client always
-            // sees a response. Actual completion is observable client-
-            // side via WM_DISPLAYCHANGE; we no longer report the
-            // IddCxMonitorDeparture NTSTATUS over the wire because the
-            // wire dies before we can write it anyway.
-            if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
+            // RESPONSE BEFORE WORK — see v2200 commit. IddCxMonitorDeparture
+            // tears down the pipe-server context mid-call; sending the Ack
+            // first means the client always gets confirmation.
+            uxspace::log::info("driver: req#%u sending Ack BEFORE SetMonitorCount work",
+                               reqHdr.request_id);
+            if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) {
+                uxspace::log::warn("driver: req#%u sendHeader(Ack) FAILED err=%lu",
+                                   reqHdr.request_id, GetLastError());
+                return;
+            }
             FlushFileBuffers(pipe);
+            uxspace::log::info("driver: req#%u Ack flushed; invoking SetMonitorCount(%u)",
+                               reqHdr.request_id, (unsigned) payload.count);
 
             char diag[124] = {};
             std::uint8_t before = 0, after = 0;
@@ -430,8 +469,13 @@ void PipeServer::HandleClient(HANDLE pipe)
                 ownerOk = true;
                 m_owner->SetMonitorCount(payload.count, &before, &after, &rmStatus, diag, sizeof(diag));
             }
-            // Status discarded — Ack already sent, can't surface failure.
-            (void) before; (void) after; (void) rmStatus; (void) ownerOk;
+            uxspace::log::info("driver: req#%u SetMonitorCount returned ownerOk=%d before=%u after=%u rmStatus=0x%08X diag='%s'",
+                               reqHdr.request_id,
+                               ownerOk ? 1 : 0,
+                               (unsigned) before,
+                               (unsigned) after,
+                               (unsigned) rmStatus,
+                               diag[0] ? diag : "(none)");
             break;
         }
 
@@ -952,6 +996,8 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
                                             char*         outDiag,
                                             std::size_t   outDiagBytes)
 {
+    uxspace::log::info("driver: IndirectDeviceContext::SetMonitorCount target=%u (clamped to <=%u)",
+                       (unsigned) targetCount, (unsigned) kUxSpaceMaxMonitors);
     if (targetCount > kUxSpaceMaxMonitors) targetCount = kUxSpaceMaxMonitors;
     NTSTATUS firstFailure = STATUS_SUCCESS;
     if (outDiag && outDiagBytes > 0) outDiag[0] = '\0';
@@ -970,6 +1016,12 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
         }
     }
     if (outBefore) *outBefore = currentCount;
+    uxspace::log::info("driver:   current=%u target=%u -> %zu to remove, %d to add",
+                       (unsigned) currentCount,
+                       (unsigned) targetCount,
+                       toRemove.size(),
+                       (int) targetCount - (int) currentCount > 0
+                           ? (int) targetCount - (int) currentCount : 0);
 
     // Detach excess monitors outside the lock so we don't hold it
     // across IddCx framework calls. Capture the first NTSTATUS failure
@@ -977,7 +1029,10 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
     // "Internal".
     for (IDDCX_MONITOR mon : toRemove)
     {
+        uxspace::log::info("driver:   IddCxMonitorDeparture begin mon=%p", mon);
         NTSTATUS s = IddCxMonitorDeparture(mon);
+        uxspace::log::info("driver:   IddCxMonitorDeparture end   mon=%p hr=0x%08X",
+                           mon, (unsigned) s);
         if (!NT_SUCCESS(s) && NT_SUCCESS(firstFailure)) {
             firstFailure = s;
             if (outDiag && outDiagBytes > 0) {
@@ -988,19 +1043,26 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
             }
         }
         WdfObjectDelete(mon);
+        uxspace::log::info("driver:   WdfObjectDelete done mon=%p", mon);
     }
 
     // Grow up to targetCount.
     for (std::uint8_t i = currentCount; i < targetCount; ++i)
     {
+        uxspace::log::info("driver:   FinishInit connectorIndex=%u (i=%u)",
+                           nextConnectorIndex, (unsigned) i);
         FinishInit(nextConnectorIndex++);
     }
 
+    std::uint8_t finalCount = 0;
     {
         std::lock_guard<std::mutex> lk(m_MonitorsMutex);
-        if (outAfter) *outAfter = static_cast<std::uint8_t>(m_Monitors.size());
+        finalCount = static_cast<std::uint8_t>(m_Monitors.size());
+        if (outAfter) *outAfter = finalCount;
     }
     if (outStatus) *outStatus = firstFailure;
+    uxspace::log::info("driver: SetMonitorCount done finalCount=%u firstFailure=0x%08X",
+                       (unsigned) finalCount, (unsigned) firstFailure);
 }
 
 IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :
