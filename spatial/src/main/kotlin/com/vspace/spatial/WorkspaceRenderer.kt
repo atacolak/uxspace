@@ -708,13 +708,22 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Dispatch an accumulated scroll delta to whatever the cursor is currently over:
-     * first the topmost non-minimised app window's content (injected through the
+     * Dispatch an accumulated scroll delta. The drawer overlay is modal — when it's open,
+     * scroll goes to its panel (or nowhere on the scrim), never to the windows behind it.
+     * Otherwise: topmost non-minimised app window's content first (injected through the
      * privileged helper as a touch-swipe, since shell `input` doesn't expose a wheel
-     * scroll), then the drawer overlay if open, then the desktop.
+     * scroll), then the desktop.
      */
     private fun handleScroll(dyFraction: Float) {
         val vScroll = dyFraction * SCROLL_SENSITIVITY
+        if (drawerOpen) {
+            val d = drawer ?: return
+            val r = drawerWorld()
+            val px = cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
+                ?: return
+            mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
+            return
+        }
         for (window in windows.asReversed()) {
             if (window.minimized) continue
             val contentPx = cursorToScreenPx(window.content) ?: continue
@@ -724,14 +733,6 @@ class WorkspaceRenderer(
                     displayId, contentPx[0].toInt(), contentPx[1].toInt(), vScroll,
                 )
             }
-            return
-        }
-        if (drawerOpen) {
-            val d = drawer ?: return
-            val r = drawerWorld()
-            val px = cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
-                ?: return
-            mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
             return
         }
         val d = desktop ?: return
@@ -747,6 +748,8 @@ class WorkspaceRenderer(
      */
     private fun handlePinch(scale: Float) {
         if (scale == 1f) return
+        // Drawer is modal — pinch over it doesn't reach the windows behind.
+        if (drawerOpen) return
         for (window in windows.asReversed()) {
             if (window.minimized) continue
             val contentPx = cursorToScreenPx(window.content) ?: continue

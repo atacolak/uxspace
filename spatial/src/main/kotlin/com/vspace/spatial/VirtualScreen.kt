@@ -69,7 +69,7 @@ class VirtualScreen(
             "vspace-screen-$id",
             widthPx,
             heightPx,
-            context.resources.displayMetrics.densityDpi,
+            APP_DISPLAY_DPI,
             surface,
         )
         if (createdId == null) {
@@ -109,5 +109,14 @@ class VirtualScreen(
         /** Default distance from the viewer, and width, of a screen in metres. */
         const val DEFAULT_DISTANCE = 4.0f
         const val DEFAULT_WIDTH = 1.4f
+
+        /**
+         * Density Android tells the launched app its display is at. The phone's native
+         * density (~420 dpi on a Fold) makes apps think they're on a tiny phone screen and
+         * scale their UI up — text and buttons become huge inside a 1600x900 window. A
+         * desktop-class 160 dpi (mdpi, 1x) leaves apps thinking they have plenty of dp room
+         * and they render at their compact "tablet / Chromebook" layouts.
+         */
+        const val APP_DISPLAY_DPI = 160
     }
 }

@@ -52,6 +52,14 @@ the toolbar or a row under the status banner. It holds:
 - the display-mode selector (radio list),
 - **taskbar visibility** — always-show (default) vs auto-hide (see
   [TASKBAR.md](TASKBAR.md)),
+- **scroll speed** — a slider that scales the two-finger flick → auto-scroll
+  velocity in [`TrackpadView`](../app/src/main/kotlin/com/vspace/input/TrackpadView.kt).
+  Stored on `WorkspaceSettings`; read by `TrackpadView.maybeStartAutoScroll`
+  and multiplied into `autoScrollFractionPerMs` before clamping. A second
+  slider for the per-app scroll-pixel translation
+  ([`PrivilegedService.SCROLL_PIXELS_PER_UNIT`](../app/src/main/kotlin/com/vspace/privileged/PrivilegedService.kt))
+  lets the user tune how aggressively each unit of touchpad scroll
+  translates into a swipe inside the app.
 - room to grow — screen-size default, theme colours ([[VSpaceTheme]]), etc.
 
 It is plain phone UI (no glasses needed), so it can be a normal `Activity` or a

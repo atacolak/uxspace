@@ -55,6 +55,51 @@ class TrackpadView @JvmOverloads constructor(
     private var lastScrollY = 0f
     private var lastSpread = 0f
 
+    /**
+     * Two-finger flick → continuous scroll. A second finger lands, the user moves to
+     * indicate direction and speed, lifts, and the scroll runs at that velocity until the
+     * next two-finger touch stops it. The first POINTER_DOWN of each two-finger gesture
+     * either cancels an active auto-scroll (acting as a stop) or starts a new gesture; the
+     * matching UP either kicks the captured velocity into auto-scroll or — if this was the
+     * stop gesture — does nothing.
+     */
+    private var autoScrollActive = false
+    private var autoScrollFractionPerMs = 0f
+    private var twoFingerDownTime = 0L
+    private var twoFingerDownY = 0f
+    private var twoFingerLastY = 0f
+    private var twoFingerLastTime = 0L
+    private var twoFingerStartedDuringAutoScroll = false
+
+    private val autoScrollTick = object : Runnable {
+        override fun run() {
+            if (!autoScrollActive) return
+            onScroll?.invoke(autoScrollFractionPerMs * AUTO_SCROLL_TICK_MS)
+            postDelayed(this, AUTO_SCROLL_TICK_MS.toLong())
+        }
+    }
+
+    private fun cancelAutoScroll() {
+        if (!autoScrollActive) return
+        autoScrollActive = false
+        removeCallbacks(autoScrollTick)
+    }
+
+    private fun maybeStartAutoScroll() {
+        val dt = twoFingerLastTime - twoFingerDownTime
+        val dy = twoFingerLastY - twoFingerDownY
+        if (dt <= 0 || abs(dy) < MIN_FLICK_PX || height <= 0) return
+        val fractionPerMs = (dy / dt) / height
+        autoScrollFractionPerMs = fractionPerMs.coerceIn(-MAX_AUTO_SCROLL_PER_MS, MAX_AUTO_SCROLL_PER_MS)
+        autoScrollActive = true
+        post(autoScrollTick)
+    }
+
+    override fun onDetachedFromWindow() {
+        cancelAutoScroll()
+        super.onDetachedFromWindow()
+    }
+
     /** True once a press-and-hold has turned the current touch into a window drag. */
     private var dragging = false
 
@@ -87,31 +132,39 @@ class TrackpadView @JvmOverloads constructor(
                 postDelayed(holdRunnable, HOLD_MS)
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // A second finger — switch from cursor-move to two-finger scroll / zoom.
+                // A second finger — switch from cursor-move to two-finger gestures. If
+                // auto-scroll is running, this touch *stops* it (and the matching UP will
+                // not start a new one).
                 scrolling = true
                 movedFar = true
                 removeCallbacks(holdRunnable)
                 endDragIfActive()
-                lastScrollY = averageY(event)
+                twoFingerStartedDuringAutoScroll = autoScrollActive
+                cancelAutoScroll()
+                twoFingerDownTime = event.eventTime
+                twoFingerDownY = averageY(event)
+                twoFingerLastY = twoFingerDownY
+                twoFingerLastTime = twoFingerDownTime
+                lastScrollY = twoFingerDownY
                 lastSpread = pointerSpread(event)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (scrolling) {
                     val y = averageY(event)
                     val spread = pointerSpread(event)
-                    val dy = y - lastScrollY
                     val dSpread = spread - lastSpread
-                    // Dominant-motion: whichever axis changed more this frame wins. The
-                    // PINCH_BIAS makes pinch a bit "stickier" to avoid flickering between
-                    // modes when both fingers slide together.
+                    val dy = y - lastScrollY
+                    // Pinch is interactive — emit each frame. Vertical motion is only used
+                    // to capture the flick velocity for auto-scroll; the actual scrolling
+                    // starts when the user lifts.
                     if (
                         spread > MIN_PINCH_SPREAD_PX && lastSpread > MIN_PINCH_SPREAD_PX &&
                         abs(dSpread) > abs(dy) * PINCH_BIAS
                     ) {
                         onZoom?.invoke(spread / lastSpread)
-                    } else if (height > 0) {
-                        onScroll?.invoke(dy / height)
                     }
+                    twoFingerLastY = y
+                    twoFingerLastTime = event.eventTime
                     lastScrollY = y
                     lastSpread = spread
                 } else {
@@ -130,9 +183,14 @@ class TrackpadView @JvmOverloads constructor(
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> {
+                // Going from 2 fingers back down to 1 — finalize the two-finger gesture.
+                if (scrolling && !twoFingerStartedDuringAutoScroll) {
+                    maybeStartAutoScroll()
+                }
                 // Re-average over the fingers that remain, so the next move does not jump.
                 lastScrollY = averageY(event, lifting = event.actionIndex)
                 lastSpread = pointerSpread(event, lifting = event.actionIndex)
+                scrolling = false
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(holdRunnable)
@@ -143,10 +201,12 @@ class TrackpadView @JvmOverloads constructor(
                 ) {
                     onTap?.invoke()
                 }
+                scrolling = false
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(holdRunnable)
                 endDragIfActive()
+                scrolling = false
             }
         }
         return true
@@ -203,5 +263,14 @@ class TrackpadView @JvmOverloads constructor(
 
         /** Spread-change must outpace centroid-change by this factor to register as a pinch. */
         const val PINCH_BIAS = 1.2f
+
+        /** Auto-scroll tick interval — 60 Hz, matches typical display refresh. */
+        const val AUTO_SCROLL_TICK_MS = 16
+
+        /** Below this total vertical travel during the gesture, no auto-scroll starts. */
+        const val MIN_FLICK_PX = 20
+
+        /** Pad-fractions per millisecond, capped so a super-fast flick stays sane. */
+        const val MAX_AUTO_SCROLL_PER_MS = 0.01f
     }
 }
