@@ -107,12 +107,20 @@ monitor boundaries.
 
 ## W2 — Head tracking, 6DOF
 
-- `:viture` wraps the SDK. A dedicated thread polls pose and double-buffers
-  into an atomic `HeadPose`.
+- `:viture` wraps the SDK. Carina (Luma Ultra) uses the pull-based
+  `xr_device_provider_get_gl_pose_carina`; the OpenGL→D3D handedness
+  flip (z-negate + quaternion `(qw,qx,qy,qz) → (qw,-qx,-qy,qz)`) is
+  applied in `latestPose()`. The Gen1/Pro IMU-callback path
+  (`xr_device_provider_register_imu_pose_callback` + atomic
+  double-buffer) is a follow-up — not blocking, the Carina path is what
+  the user owns.
 - `Camera.FREE` consumes the inverse pose; `Camera.PINNED` ignores it.
-- Recenter hotkey stores the inverse-pose origin.
-- If `xr_device_provider_is_product_support_native_dof()` returns 0, FREE
-  collapses to rotation only and the UI hides translation-dependent controls.
+- `Win+Shift+X` toggles PINNED ↔ FREE globally; `Win+Shift+R` recenters
+  via `xr_device_provider_reset_origin_carina`.
+- `tracker.supportsTranslation()` (= `xr_device_provider_is_product_support_native_dof`)
+  is surfaced in the UxSpace pane as `3DOF` / `6DOF`. When it's 0
+  (3DOF), the SDK never emits a translation so `Camera.FREE` collapses
+  to rotation-only naturally.
 
 Done when: in FREE mode, the quad is world-locked as the head moves; recenter
 re-anchors it directly forward.
