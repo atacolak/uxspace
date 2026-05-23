@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-1800";
+constexpr const char kAppBuildStamp[] = "v20260523-1900";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -148,6 +148,30 @@ uxspace::viture::VitureTracker g_tracker;
 uxspace::tracking::ViewMode    g_viewMode = uxspace::tracking::ViewMode::PINNED;
 uxspace::spatial::layouts::Single g_layout;     // W3 will swap this for layout cycling
 constexpr int                  kHotkeyRecenter = 2;
+
+// PINNED-mode screen-band presets. In PINNED, Win+Shift+Z cycles
+// through this fixed set; in FREE the slider stays continuous over
+// kScreenBandMin..kScreenBandMax with step kScreenBandStep.
+//
+// Two pieces of remembered state make Pin / Unpin reversible:
+//   g_pinnedPresetIndex — last PINNED preset the user landed on;
+//                         restored when entering PINNED.
+//   g_freeScreenBand    — band value active in FREE at the moment of
+//                         Pin; restored when entering FREE.
+// Persisted to HKCU via Save/LoadSettings so the choices survive an
+// app restart.
+constexpr float kPinnedPresets[]  = { 0.80f, 0.85f, 0.90f, 0.95f, 1.00f };
+constexpr int   kPinnedPresetCount = static_cast<int>(std::size(kPinnedPresets));
+int   g_pinnedPresetIndex = 2;     // 0.90 by default
+float g_freeScreenBand    = 0.90f; // remembered FREE band
+
+// User configuration persisted under HKCU\Software\UxSpace\App.
+// REG_DWORD throughout — floats are stored as int(band * 100) so the
+// .reg file (and regedit display) reads naturally as e.g. 90 -> 0.90.
+// Definitions of LoadSettings / SaveSettings live further down so they
+// can see g_pseudo3D + the IpcResult cache; the names are forward-
+// declared near CycleScreenBand for early callers.
+constexpr wchar_t kSettingsKey[] = L"Software\\UxSpace\\App";
 
 // App-side anchor: stores the head pose at the moment of Win+Shift+C.
 // All subsequent poses are reported as pose * inverse(anchor) so the
@@ -309,6 +333,84 @@ int              g_lastLayeredCount = 0;
 
 std::vector<sp::GlassesOutput::DetectedMonitor> g_lastSeenMonitors;
 
+// --- Settings persistence (HKCU\Software\UxSpace\App) ---------------------
+
+DWORD BandToDword(float band) {
+    return static_cast<DWORD>(std::lround(std::clamp(band,
+                                                     sp::kScreenBandMin,
+                                                     sp::kScreenBandMax) * 100.0f));
+}
+float BandFromDword(DWORD d) {
+    return std::clamp(static_cast<float>(d) / 100.0f,
+                      sp::kScreenBandMin, sp::kScreenBandMax);
+}
+
+bool RegReadDword(HKEY key, const wchar_t* name, DWORD* out) {
+    DWORD type = 0, sz = sizeof(DWORD), v = 0;
+    const LSTATUS s = RegQueryValueExW(key, name, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(&v), &sz);
+    if (s == ERROR_SUCCESS && type == REG_DWORD && sz == sizeof(DWORD)) {
+        *out = v;
+        return true;
+    }
+    return false;
+}
+void RegWriteDword(HKEY key, const wchar_t* name, DWORD v) {
+    RegSetValueExW(key, name, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&v), sizeof(v));
+}
+
+void LoadSettings() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        uxspace::log::info("settings: HKCU\\%ls not present yet (first run, defaults applied).",
+                           kSettingsKey);
+        return;
+    }
+    DWORD d;
+    if (RegReadDword(key, L"PinnedPresetIndex", &d)) {
+        g_pinnedPresetIndex = std::clamp(static_cast<int>(d), 0, kPinnedPresetCount - 1);
+    }
+    if (RegReadDword(key, L"FreeScreenBandX100", &d)) {
+        g_freeScreenBand = BandFromDword(d);
+    }
+    if (RegReadDword(key, L"ViewMode", &d)) {
+        g_viewMode = (d != 0) ? uxspace::tracking::ViewMode::FREE
+                              : uxspace::tracking::ViewMode::PINNED;
+    }
+    if (RegReadDword(key, L"Pseudo3D", &d)) {
+        g_pseudo3D = (d != 0);
+    }
+    // Seed the live screen band from whichever mode we're starting in
+    // so the user sees their last choice immediately.
+    g_scene.screenBand = (g_viewMode == uxspace::tracking::ViewMode::PINNED)
+                       ? kPinnedPresets[g_pinnedPresetIndex]
+                       : g_freeScreenBand;
+    g_screenBandTarget = g_scene.screenBand;
+    RegCloseKey(key);
+    uxspace::log::info("settings: loaded pinIdx=%d (%.2f) freeBand=%.2f viewMode=%s pseudo3D=%d",
+                       g_pinnedPresetIndex, kPinnedPresets[g_pinnedPresetIndex],
+                       g_freeScreenBand,
+                       g_viewMode == uxspace::tracking::ViewMode::FREE ? "FREE" : "PINNED",
+                       g_pseudo3D ? 1 : 0);
+}
+
+void SaveSettings() {
+    HKEY key = nullptr;
+    DWORD disp = 0;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, &disp) != ERROR_SUCCESS) {
+        uxspace::log::warn("settings: RegCreateKeyExW failed; settings not persisted.");
+        return;
+    }
+    RegWriteDword(key, L"PinnedPresetIndex",  static_cast<DWORD>(g_pinnedPresetIndex));
+    RegWriteDword(key, L"FreeScreenBandX100", BandToDword(g_freeScreenBand));
+    RegWriteDword(key, L"ViewMode",
+                  g_viewMode == uxspace::tracking::ViewMode::FREE ? 1u : 0u);
+    RegWriteDword(key, L"Pseudo3D",           g_pseudo3D ? 1u : 0u);
+    RegCloseKey(key);
+}
+
 // --- Driver IPC client (W3) -------------------------------------------
 //
 // One-shot RPC over the :shared named-pipe protocol. Each call opens
@@ -377,13 +479,36 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
 
     if (rsp.payload_bytes == sizeof(NackPayload) && rsp.type == MessageType::Nack) {
         NackPayload np{};
-        ReadFile(pipe, &np, sizeof(np), &read, nullptr);
+        const BOOL  ok = ReadFile(pipe, &np, sizeof(np), &read, nullptr);
+        const DWORD err = ok ? 0 : GetLastError();
         r.nackCode = np.code;
         // Defensive copy + NUL-terminate so we can pass to %s without
         // worrying about driver-side termination.
         std::memcpy(r.nackMessage, np.message,
                     std::min(sizeof(r.nackMessage) - 1, sizeof(np.message)));
         r.nackMessage[sizeof(r.nackMessage) - 1] = '\0';
+        // Diagnostic: log how many bytes ReadFile actually delivered and
+        // the first 16 bytes of np.message as hex. v1500..v1800 all
+        // shipped with empty Nack diags even after every driver fix; if
+        // ReadFile is returning < 128 here we know the message bytes
+        // never reached the pipe and the problem is server-side; if it
+        // returns 128 and the bytes are all zero, the bytes were written
+        // but blanked somewhere downstream.
+        char hex[64] = {};
+        std::size_t hp = 0;
+        for (int i = 0; i < 16 && hp + 3 < sizeof(hex); ++i) {
+            const unsigned char b = static_cast<unsigned char>(np.message[i]);
+            const char* dig = "0123456789ABCDEF";
+            hex[hp++] = dig[b >> 4];
+            hex[hp++] = dig[b & 0xF];
+            hex[hp++] = ' ';
+        }
+        hex[hp] = '\0';
+        uxspace::log::info("ipc: NackPayload read=%lu ok=%d err=%lu hex16=%s",
+                           static_cast<unsigned long>(read),
+                           ok ? 1 : 0,
+                           static_cast<unsigned long>(err),
+                           hex);
     } else if (rsp.type == MessageType::Pong && rsp.payload_bytes > 0
                && rsp.payload_bytes < sizeof(r.pongPayload)) {
         // Pong payload is the driver's __DATE__ __TIME__ build stamp,
@@ -611,13 +736,51 @@ void AdjustZoom(float delta) {
                        before, g_zoomLevel, g_zoomFocusUV.x, g_zoomFocusUV.y);
 }
 
+// Snap g_pinnedPresetIndex to the preset closest to a given band value.
+// Used when the user transitions FREE -> PINNED at a band that isn't in
+// the preset list, so the next Win+Shift+Z press feels predictable
+// (it advances from a known starting point rather than wherever fmod
+// arithmetic happened to leave us).
+int NearestPinnedPresetIndex(float band) {
+    int best = 0;
+    float bestDiff = std::fabs(kPinnedPresets[0] - band);
+    for (int i = 1; i < kPinnedPresetCount; ++i) {
+        const float d = std::fabs(kPinnedPresets[i] - band);
+        if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return best;
+}
+
+void ApplyViewModeTransition(uxspace::tracking::ViewMode from,
+                             uxspace::tracking::ViewMode to) {
+    using uxspace::tracking::ViewMode;
+    if (from == to) return;
+    if (from == ViewMode::FREE && to == ViewMode::PINNED) {
+        // Pin: remember the FREE band, restore the last PINNED preset.
+        g_freeScreenBand   = g_scene.screenBand;
+        g_pinnedPresetIndex = std::clamp(g_pinnedPresetIndex, 0, kPinnedPresetCount - 1);
+        g_scene.screenBand = kPinnedPresets[g_pinnedPresetIndex];
+    } else {
+        // Unpin: stash whichever preset we were on (snap if drifted),
+        // restore the FREE band the user had before Pin.
+        g_pinnedPresetIndex = NearestPinnedPresetIndex(g_scene.screenBand);
+        g_scene.screenBand  = std::clamp(g_freeScreenBand,
+                                         sp::kScreenBandMin, sp::kScreenBandMax);
+    }
+    g_screenBandTarget = g_scene.screenBand;
+}
+
 void ToggleViewMode() {
     using uxspace::tracking::ViewMode;
-    g_viewMode = (g_viewMode == ViewMode::FREE) ? ViewMode::PINNED : ViewMode::FREE;
-    uxspace::log::info("view mode: %s%s",
+    const ViewMode prev = g_viewMode;
+    g_viewMode = (prev == ViewMode::FREE) ? ViewMode::PINNED : ViewMode::FREE;
+    ApplyViewModeTransition(prev, g_viewMode);
+    uxspace::log::info("view mode: %s%s  band=%.2f",
                        g_viewMode == ViewMode::FREE ? "FREE" : "PINNED",
                        g_viewMode == ViewMode::FREE && !g_tracker.isConnected()
-                           ? " (no tracker — still rendering PINNED)" : "");
+                           ? " (no tracker — still rendering PINNED)" : "",
+                       g_scene.screenBand);
+    SaveSettings();
 }
 
 void RecenterTracker() {
@@ -854,7 +1017,12 @@ void TryOpenGlasses() {
             uxspace::log::info("glasses: deferred tracker.start() returned %s; connected=%d.",
                                ok ? "true" : "false",
                                g_tracker.isConnected() ? 1 : 0);
-            if (ok) g_viewMode = uxspace::tracking::ViewMode::FREE;
+            if (ok && g_viewMode != uxspace::tracking::ViewMode::FREE) {
+                const auto prev = g_viewMode;
+                g_viewMode = uxspace::tracking::ViewMode::FREE;
+                ApplyViewModeTransition(prev, g_viewMode);
+                SaveSettings();
+            }
         }
     } else {
         uxspace::log::warn("glasses: TryOpenGlasses — match found but open() returned false.");
@@ -897,6 +1065,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_pseudo3D = !g_pseudo3D;
             uxspace::log::info("hotkey: Win+Shift+D pseudo-3D -> %s.",
                                g_pseudo3D ? "ON" : "off");
+            SaveSettings();
         }
         return 0;
     case WM_DESTROY:
@@ -957,16 +1126,24 @@ void RenderLegendOverlay(ID3D11RenderTargetView* rtv,
     }
 }
 
+void SaveSettings();
+
 void CycleScreenBand() {
-    // Step by kScreenBandStep (0.10), wrap from max back to min.
-    float v = g_scene.screenBand + sp::kScreenBandStep;
-    // Compare with a small epsilon so the float arithmetic doesn't
-    // accumulate drift across many presses.
-    if (v > sp::kScreenBandMax + 0.001f) v = sp::kScreenBandMin;
-    // Snap to nearest 0.10 multiple to keep values clean (0.7, 0.8, ...).
-    v = std::round(v * 10.0f) / 10.0f;
-    g_scene.screenBand   = std::clamp(v, sp::kScreenBandMin, sp::kScreenBandMax);
-    g_screenBandTarget   = g_scene.screenBand;
+    using uxspace::tracking::ViewMode;
+    if (g_viewMode == ViewMode::PINNED) {
+        // PINNED: cycle through the discrete preset list with wrap.
+        g_pinnedPresetIndex = (g_pinnedPresetIndex + 1) % kPinnedPresetCount;
+        g_scene.screenBand  = kPinnedPresets[g_pinnedPresetIndex];
+    } else {
+        // FREE: continuous +kScreenBandStep with wrap to min on overflow.
+        float v = g_scene.screenBand + sp::kScreenBandStep;
+        if (v > sp::kScreenBandMax + 0.001f) v = sp::kScreenBandMin;
+        v = std::round(v * 10.0f) / 10.0f;
+        g_scene.screenBand = std::clamp(v, sp::kScreenBandMin, sp::kScreenBandMax);
+        g_freeScreenBand   = g_scene.screenBand;  // track FREE-mode choice
+    }
+    g_screenBandTarget = g_scene.screenBand;
+    SaveSettings();
 }
 
 // --- Dev UI: Hotkeys panel ---------------------------------------------
@@ -1154,6 +1331,14 @@ void DrawDevUI(HWND devWnd) {
                            &g_screenBandTarget,
                            sp::kScreenBandMin, sp::kScreenBandMax, "%.2f")) {
         g_scene.screenBand = g_screenBandTarget;
+        // Mirror the current mode's persisted slot so the next mode
+        // toggle / restart picks up the slider drag.
+        if (g_viewMode == uxspace::tracking::ViewMode::FREE) {
+            g_freeScreenBand = g_scene.screenBand;
+        } else {
+            g_pinnedPresetIndex = NearestPinnedPresetIndex(g_scene.screenBand);
+        }
+        SaveSettings();
     }
     ImGui::Separator();
 
@@ -1292,6 +1477,7 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SameLine();
     if (ImGui::Button(g_pseudo3D ? "Disable###p3d" : "Enable###p3d")) {
         g_pseudo3D = !g_pseudo3D;
+        SaveSettings();
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Win+Shift+D toggles globally");
@@ -1407,6 +1593,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         uxspace::log::info("UxSpace app build = %s.", kAppBuildStamp);
         uxspace::log::info("Log file: %ls", logPath);
     }
+
+    // Restore persisted settings (screen band per-mode, view mode,
+    // pseudo-3D toggle). Must run before TryOpenGlasses / tracker.start
+    // because both pre-set g_viewMode = FREE on success, and we want
+    // the saved preference to win unless the auto-start actually
+    // transitions us.
+    LoadSettings();
 
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.style         = CS_HREDRAW | CS_VREDRAW;
@@ -1540,7 +1733,12 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             // Default to FREE on first successful connect so the wearer
             // gets head tracking out of the box; explicit Win+Shift+X
             // toggles back to PINNED.
-            if (ok) g_viewMode = uxspace::tracking::ViewMode::FREE;
+            if (ok && g_viewMode != uxspace::tracking::ViewMode::FREE) {
+                const auto prev = g_viewMode;
+                g_viewMode = uxspace::tracking::ViewMode::FREE;
+                ApplyViewModeTransition(prev, g_viewMode);
+                SaveSettings();
+            }
             g_pendingTrackerStart = false;
         }
 
@@ -1651,6 +1849,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    SaveSettings();
     uxspace::log::info("UxSpace exit.");
     uxspace::log::shutdown();
     return 0;

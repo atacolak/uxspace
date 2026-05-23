@@ -371,7 +371,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1800";
+            static const char kBuildStamp[] = "v20260523-1900";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
