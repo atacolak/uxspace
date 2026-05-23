@@ -313,17 +313,29 @@ void PipeServer::HandleClient(HANDLE pipe)
         if (!sendHeader(MessageType::Nack, sizeof(NackPayload), requestId)) return false;
         NackPayload np{};
         np.code = code;
+
+        // Unconditional "[N] " sentinel so the IPC client can prove this
+        // lambda actually wrote into np.message. If the user's log shows
+        // a Nack message starting with "[N] " then the manual copy below
+        // ran; if it's empty the failure is somewhere else entirely
+        // (e.g. WriteAll dropping bytes silently in the UMDF runtime, a
+        // different code path sending Nack we haven't tracked down, or
+        // the wire being read with a stale NackPayload layout).
+        const std::size_t cap = sizeof(np.message) - 1;
+        std::size_t pos = 0;
+        for (const char* s = "[N] "; *s && pos < cap; ++s) np.message[pos++] = *s;
+
         if (msg) {
             // strncpy_s is the same CRT family as _snprintf_s; the UMDF
             // runtime drops it silently on this machine (verified
             // empirically — v1300 left np.message zeroed even though the
             // source buffer was filled). Byte-by-byte copy bypasses the
             // CRT entirely and is bounds-safe by construction.
-            std::size_t i = 0;
-            const std::size_t cap = sizeof(np.message) - 1;
-            while (i < cap && msg[i] != '\0') { np.message[i] = msg[i]; ++i; }
-            np.message[i] = '\0';
+            for (std::size_t j = 0; msg[j] != '\0' && pos < cap; ++j) {
+                np.message[pos++] = msg[j];
+            }
         }
+        np.message[pos] = '\0';
         return WriteAll(pipe, &np, sizeof(np));
     };
     auto sendNack = [&](ErrorCode code, std::uint32_t requestId) -> bool {
@@ -359,7 +371,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1700";
+            static const char kBuildStamp[] = "v20260523-1800";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -397,23 +409,40 @@ void PipeServer::HandleClient(HANDLE pipe)
             char diag[124] = {};
             std::uint8_t before = 0, after = 0;
             NTSTATUS rmStatus = STATUS_SUCCESS;
+            bool ownerOk = false;
             if (m_owner) {
+                ownerOk = true;
                 m_owner->SetMonitorCount(payload.count, &before, &after, &rmStatus, diag, sizeof(diag));
             }
             if (!NT_SUCCESS(rmStatus))
             {
-                if (diag[0] == '\0') {
-                    std::size_t pos = 0;
-                    DiagAppendStr(diag, sizeof(diag), pos, "SetMonitorCount(");
-                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) payload.count);
-                    DiagAppendStr(diag, sizeof(diag), pos, "): before=");
-                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) before);
-                    DiagAppendStr(diag, sizeof(diag), pos, " after=");
-                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) after);
-                    DiagAppendStr(diag, sizeof(diag), pos, " rmStatus=");
-                    DiagAppendHex32(diag, sizeof(diag), pos, (unsigned) rmStatus);
+                // v1500's "Nack/Internal:" (empty diag) wouldn't tell us
+                // whether the synthetic fallback ran, whether DiagAppend
+                // wrote anything, or whether sendNackMsg's copy survived.
+                // So we now unconditionally build a fresh synthesised
+                // message into a separate buffer with a build-tag prefix
+                // ("v18 ..."), then layer the upstream IddCx-specific
+                // string after it when present. If the user sees "v18 "
+                // in the log the synthetic path ran; if they see nothing,
+                // the issue is downstream of this code (sendNackMsg copy
+                // or wire transfer).
+                char synth[124] = {};
+                std::size_t pos = 0;
+                DiagAppendStr(synth, sizeof(synth), pos, "v18 SetMonitorCount(");
+                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) payload.count);
+                DiagAppendStr(synth, sizeof(synth), pos, ") b=");
+                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) before);
+                DiagAppendStr(synth, sizeof(synth), pos, " a=");
+                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) after);
+                DiagAppendStr(synth, sizeof(synth), pos, " rm=");
+                DiagAppendHex32(synth, sizeof(synth), pos, (unsigned) rmStatus);
+                DiagAppendStr(synth, sizeof(synth), pos, " owner=");
+                DiagAppendUInt(synth, sizeof(synth), pos, ownerOk ? 1u : 0u);
+                if (diag[0] != '\0') {
+                    DiagAppendStr(synth, sizeof(synth), pos, " | ");
+                    DiagAppendStr(synth, sizeof(synth), pos, diag);
                 }
-                if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
+                if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, synth)) return;
                 break;
             }
             if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
