@@ -37,6 +37,7 @@ set_target_properties(uxspace_app PROPERTIES
 
 target_link_libraries(uxspace_app PRIVATE
     uxspace::shared
+    uxspace::spatial
     imgui
     d3d11
     dxgi

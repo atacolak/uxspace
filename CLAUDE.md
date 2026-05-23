@@ -36,7 +36,7 @@ When you add a build system, follow this split exactly. Don't put `:driver` unde
 - **Driver builds need full VS 2022 IDE, not just Build Tools.** The `WindowsUserModeDriver10.0` platform toolset is registered by a VSIX that the WDK MSI only auto-installs into Community/Pro/Enterprise IDE instances — it skips Build Tools. If you see `MSB8020: The build tools for WindowsUserModeDriver10.0 cannot be found`, install VS Community 2022 with the `Microsoft.VisualStudio.Workload.NativeDesktop` workload, then re-run the WDK MSI so it picks up the new IDE. The Marketplace WDK VSIX cannot be downloaded directly (returns 403 to non-browser clients).
 - **Install order matters:** install VS Community *first*, then the WDK. If you install in the reverse order, re-run the WDK installer afterwards.
 - **EWDK is the supported alternative** for headless/CI builds (avoids the IDE dependency entirely). Not used in interactive dev on this machine.
-- Viture SDK lives at `..\Viture\SDK\Windows` (sibling to `Windows\`). It will be vendored under `viture/sdk/` once we touch `:viture`. Both paths are in `.gitignore`.
+- Viture SDK lives at `..\..\Viture\SDK\Windows` (under the `UxSpace\` umbrella, sibling to `Android\` and `Windows\`). It will be vendored under `viture/sdk/` once we touch `:viture`. Both paths are in `.gitignore`.
 
 ## Fork lineage
 

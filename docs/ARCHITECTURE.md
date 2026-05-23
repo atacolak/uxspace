@@ -137,6 +137,30 @@ A `ScreenLayout` maps logical screen slots to `Surface3D` transforms and tells
 Adding a Viture SpaceWalker-style preset is a new strategy file plus an entry
 in the ImGui picker.
 
+## Per-window pseudo-3D layering (intra-screen composition)
+
+`ScreenLayout` arranges multiple virtual monitors in 3D; this is the
+complementary concern of how the framebuffer of a *single* virtual monitor is
+composed in depth. (Unnumbered to keep §10/§11 cross-references in CLAUDE.md
+stable.)
+
+`Surface3D` carries a `uvRect` (originally added for the cursor-zoom feature in
+*Beyond W5*) that selects a sub-rectangle of its bound texture. The app
+exploits this to render one DDA capture as a back plane plus N per-window
+quads at staggered Z, where each quad's `uvRect` covers exactly that window's
+pixels in the captured framebuffer.
+
+Win32 window enumeration and focus-history tracking live in `:app`
+(`EnumWindows`, `MonitorFromWindow`, `SetWinEventHook EVENT_SYSTEM_FOREGROUND`);
+the results map directly to `Surface3D` position / size / uvRect. `:spatial`
+does not know about Win32 windows — the module graph is unchanged.
+
+Limits of the approximation (back-plane edge ghosting at side angles,
+occluder-pixel bleed inside partially-occluded windows) are documented in
+[ROADMAP.md](../docs/ROADMAP.md) under W1.5. Real fixes would need a
+desktop-only render or per-window alpha masking and are deferred past the
+W1.5 MVP.
+
 ## 10. Vendor-agnostic — same rule as Android VSpace §10
 
 `:tracking` defines `HeadTracker` with `start()`, `stop()`, `recenter()`, and
