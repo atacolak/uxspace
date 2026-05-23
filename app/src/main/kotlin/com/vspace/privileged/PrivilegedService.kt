@@ -304,6 +304,24 @@ object PrivilegedService {
     fun swipe(displayId: Int, fromX: Int, fromY: Int, toX: Int, toY: Int, durationMs: Int) =
         onWorker { service?.swipe(displayId, fromX, fromY, toX, toY, durationMs) }
 
+    /**
+     * Quick vertical swipe to simulate a scroll. `vScroll` matches mouse-wheel convention
+     * (positive → scroll up); the swipe goes in the opposite direction on the screen.
+     */
+    fun scrollOnDisplay(displayId: Int, x: Int, y: Int, vScroll: Float) {
+        val pixels = (vScroll * SCROLL_PIXELS_PER_UNIT).toInt().coerceIn(-MAX_SCROLL_PX, MAX_SCROLL_PX)
+        if (pixels == 0) return
+        // Wheel-up (positive) = scroll content up = swipe finger down → toY > fromY.
+        onWorker { service?.swipe(displayId, x, y, x, y + pixels, SCROLL_SWIPE_MS) }
+    }
+
+    /** Two-finger pinch — delegated straight to the helper. */
+    fun pinchOnDisplay(
+        displayId: Int, x: Int, y: Int, fromSpan: Int, toSpan: Int, durationMs: Int,
+    ) = onWorker {
+        service?.pinchOnDisplay(displayId, x, y, fromSpan, toSpan, durationMs)
+    }
+
     fun key(displayId: Int, keyCode: Int) = onWorker { service?.key(displayId, keyCode) }
 
     fun text(displayId: Int, value: String) = onWorker { service?.text(displayId, value) }
@@ -337,4 +355,13 @@ object PrivilegedService {
 
     /** Path of the marker file created on a successful [activate] (relative to filesDir). */
     private const val PAIRED_MARKER = "adb/paired.flag"
+
+    /** Pixels swiped per touchpad scroll unit (a fraction of the trackpad height). */
+    private const val SCROLL_PIXELS_PER_UNIT = 1200f
+
+    /** Caps the swipe distance so a fast flick can't generate a degenerate event. */
+    private const val MAX_SCROLL_PX = 2000
+
+    /** Touch-swipe duration for one scroll burst — short, so it reads as a flick. */
+    private const val SCROLL_SWIPE_MS = 80
 }

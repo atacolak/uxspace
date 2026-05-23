@@ -10,7 +10,10 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.Surface
 import kotlin.system.exitProcess
 
@@ -179,6 +182,120 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
     }
 
     /**
+     * Two-finger pinch on [displayId], centred at (centerX, centerY), pointer spread
+     * going from [fromSpan] to [toSpan] over [durationMs]. Builds a MotionEvent sequence
+     * (DOWN, POINTER_DOWN, MOVEs, POINTER_UP, UP) and submits it through `InputManager`
+     * directly — `input` only does a single pointer.
+     *
+     * Reflective access to `InputManager.getInstance()` and `injectInputEvent(...)` —
+     * both are hidden but accessible from the shell uid this process runs as
+     * (shell has `INJECT_EVENTS`).
+     */
+    override fun pinchOnDisplay(
+        displayId: Int,
+        centerX: Int,
+        centerY: Int,
+        fromSpan: Int,
+        toSpan: Int,
+        durationMs: Int,
+    ) {
+        try {
+            val injector = obtainInjector() ?: run {
+                Log.e(TAG, "pinch: InputManager unavailable")
+                return
+            }
+            val steps = (durationMs / PINCH_STEP_MS).coerceAtLeast(3)
+            val downAt = SystemClock.uptimeMillis()
+            // The two pointers move horizontally apart from / together to the centre.
+            fun pointAtStep(step: Int): Pair<FloatArray, FloatArray> {
+                val t = step.toFloat() / steps
+                val span = fromSpan + (toSpan - fromSpan) * t
+                val half = span / 2f
+                return floatArrayOf(centerX - half, centerY.toFloat()) to
+                    floatArrayOf(centerX + half, centerY.toFloat())
+            }
+            val (start0, start1) = pointAtStep(0)
+            injectMotionEvent(injector, displayId, downAt, downAt, MotionEvent.ACTION_DOWN,
+                start0, null)
+            injectMotionEvent(
+                injector, displayId, downAt, downAt,
+                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                start0, start1,
+            )
+            for (step in 1..steps) {
+                val (p0, p1) = pointAtStep(step)
+                val t = downAt + step.toLong() * PINCH_STEP_MS
+                injectMotionEvent(injector, displayId, downAt, t, MotionEvent.ACTION_MOVE, p0, p1)
+            }
+            val (end0, end1) = pointAtStep(steps)
+            val finalT = downAt + steps.toLong() * PINCH_STEP_MS
+            injectMotionEvent(
+                injector, displayId, downAt, finalT,
+                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                end0, end1,
+            )
+            injectMotionEvent(injector, displayId, downAt, finalT, MotionEvent.ACTION_UP, end0, null)
+        } catch (t: Throwable) {
+            Log.e(TAG, "pinch failed", t)
+        }
+    }
+
+    /** Build and submit one frame of the pinch — one or two pointers. */
+    private fun injectMotionEvent(
+        injector: Any,
+        displayId: Int,
+        downAt: Long,
+        eventAt: Long,
+        action: Int,
+        p0: FloatArray,
+        p1: FloatArray?,
+    ) {
+        val count = if (p1 == null) 1 else 2
+        val props = Array(count) { idx ->
+            MotionEvent.PointerProperties().apply {
+                id = idx
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+        }
+        val coords = Array(count) { idx ->
+            val src = if (idx == 0) p0 else p1!!
+            MotionEvent.PointerCoords().apply {
+                x = src[0]
+                y = src[1]
+                pressure = 1f
+                size = 1f
+            }
+        }
+        val event = MotionEvent.obtain(
+            downAt, eventAt, action, count, props, coords,
+            0, 0, 1f, 1f, 0, 0,
+            InputDevice.SOURCE_TOUCHSCREEN, 0,
+        )
+        event.source = InputDevice.SOURCE_TOUCHSCREEN
+        // MotionEvent has setDisplayId since API 30 (hidden in some versions).
+        runCatching {
+            event.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType)
+                .invoke(event, displayId)
+        }
+        val injectMethod = injector.javaClass.getMethod(
+            "injectInputEvent",
+            android.view.InputEvent::class.java,
+            Int::class.javaPrimitiveType,
+        )
+        // 0 = INJECT_INPUT_EVENT_MODE_ASYNC.
+        injectMethod.invoke(injector, event, 0)
+        event.recycle()
+    }
+
+    /** `InputManager.getInstance()` or, on newer Android, an equivalent service-hosted singleton. */
+    private fun obtainInjector(): Any? {
+        return runCatching {
+            val cls = Class.forName("android.hardware.input.InputManager")
+            cls.getMethod("getInstance").invoke(null)
+        }.onFailure { Log.w(TAG, "InputManager.getInstance() failed: ${it.message}") }.getOrNull()
+    }
+
+    /**
      * Whether [displayId] currently has an activity on it. Used after a Back press to tell
      * whether Back closed the app (so VSpace can close the now-empty window). Errs on the
      * side of `true` if the dump cannot be read or parsed, so a live app is never closed.
@@ -237,6 +354,9 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
         // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK
         private const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
+
+        /** Frame spacing for the pinch interpolation in [pinchOnDisplay]. */
+        private const val PINCH_STEP_MS = 16
 
         /** Package owning the shell uid — the virtual display is created under it. */
         private const val SHELL_PACKAGE = "com.android.shell"

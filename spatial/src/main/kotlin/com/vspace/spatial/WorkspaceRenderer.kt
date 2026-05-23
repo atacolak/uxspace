@@ -99,6 +99,9 @@ class WorkspaceRenderer(
 
     /** Last time the touchpad sent any cursor-affecting input; drives the idle hide. */
     @Volatile private var lastInputAtMs: Long = android.os.SystemClock.uptimeMillis()
+
+    /** Accumulated pinch scale (1.0 = identity); applied once per frame. */
+    @Volatile private var pendingPinch = 1f
     private var surfaceAspect = 1.78f
 
     @Volatile private var captureRequested = false
@@ -157,6 +160,12 @@ class WorkspaceRenderer(
     /** Accumulate a scroll delta (fraction of the touchpad height). Safe from any thread. */
     fun requestScroll(dyFraction: Float) {
         pendingScroll += dyFraction
+        noteInput()
+    }
+
+    /** Accumulate a pinch scale factor (1.0 = identity). Safe from any thread. */
+    fun requestPinch(scaleFactor: Float) {
+        pendingPinch *= scaleFactor
         noteInput()
     }
 
@@ -384,6 +393,10 @@ class WorkspaceRenderer(
         if (pendingScroll != 0f) {
             handleScroll(pendingScroll)
             pendingScroll = 0f
+        }
+        if (pendingPinch != 1f) {
+            handlePinch(pendingPinch)
+            pendingPinch = 1f
         }
         drawCursor()
 
@@ -694,9 +707,25 @@ class WorkspaceRenderer(
         mainHandler.post { d.dispatchTap(px[0], px[1]) }
     }
 
-    /** Dispatch an accumulated scroll delta — to the drawer if open, else the desktop. */
+    /**
+     * Dispatch an accumulated scroll delta to whatever the cursor is currently over:
+     * first the topmost non-minimised app window's content (injected through the
+     * privileged helper as a touch-swipe, since shell `input` doesn't expose a wheel
+     * scroll), then the drawer overlay if open, then the desktop.
+     */
     private fun handleScroll(dyFraction: Float) {
         val vScroll = dyFraction * SCROLL_SENSITIVITY
+        for (window in windows.asReversed()) {
+            if (window.minimized) continue
+            val contentPx = cursorToScreenPx(window.content) ?: continue
+            val displayId = window.content.displayId
+            if (displayId >= 0) {
+                WorkspaceController.appScroll?.invoke(
+                    displayId, contentPx[0].toInt(), contentPx[1].toInt(), vScroll,
+                )
+            }
+            return
+        }
         if (drawerOpen) {
             val d = drawer ?: return
             val r = drawerWorld()
@@ -708,6 +737,31 @@ class WorkspaceRenderer(
         val d = desktop ?: return
         val px = cursorToDesktopPx() ?: return
         mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
+    }
+
+    /**
+     * Dispatch an accumulated pinch into the topmost app window under the cursor. Each
+     * call sends one discrete two-finger pinch through the privileged helper; held
+     * pinches show up as a sequence of small zooms, which Photos / Maps / browsers
+     * handle gracefully.
+     */
+    private fun handlePinch(scale: Float) {
+        if (scale == 1f) return
+        for (window in windows.asReversed()) {
+            if (window.minimized) continue
+            val contentPx = cursorToScreenPx(window.content) ?: continue
+            val displayId = window.content.displayId
+            if (displayId >= 0) {
+                val toSpan = (PINCH_BASE_SPAN_PX * scale)
+                    .toInt()
+                    .coerceIn(PINCH_MIN_SPAN_PX, PINCH_MAX_SPAN_PX)
+                WorkspaceController.appPinch?.invoke(
+                    displayId, contentPx[0].toInt(), contentPx[1].toInt(),
+                    PINCH_BASE_SPAN_PX, toSpan, PINCH_DURATION_MS,
+                )
+            }
+            return
+        }
     }
 
     /** World rect (centre x, y, z and size w, h) of the app-drawer panel — centred. */
@@ -961,6 +1015,16 @@ class WorkspaceRenderer(
 
         /** How long with no touchpad input before the cursor is hidden. */
         const val CURSOR_IDLE_TIMEOUT_MS = 5_000L
+
+        /** Starting pinch span (pixels between two fingers) per dispatched pinch. */
+        const val PINCH_BASE_SPAN_PX = 400
+
+        /** Clamps for the per-pinch ending span so a frame can't generate a degenerate gesture. */
+        const val PINCH_MIN_SPAN_PX = 40
+        const val PINCH_MAX_SPAN_PX = 1600
+
+        /** Duration of one dispatched pinch — short so a held pinch chains smoothly. */
+        const val PINCH_DURATION_MS = 80
 
         /** Scroll units (AXIS_VSCROLL) per full touchpad-height of two-finger drag. */
         const val SCROLL_SENSITIVITY = 12f

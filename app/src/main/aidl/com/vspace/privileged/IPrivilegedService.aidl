@@ -45,4 +45,12 @@ interface IPrivilegedService {
 
     /** Release a virtual display previously created via createVirtualDisplay. */
     void releaseVirtualDisplay(int displayId) = 10;
+
+    /**
+     * Inject a two-finger pinch on the given display, centred at (centerX, centerY), with
+     * the pointer spread going from fromSpan to toSpan over durationMs. The shell uid has
+     * INJECT_EVENTS, so the helper can build a multi-pointer MotionEvent and submit it
+     * through InputManager directly — `input` shell-outs only do one pointer at a time.
+     */
+    void pinchOnDisplay(int displayId, int centerX, int centerY, int fromSpan, int toSpan, int durationMs) = 11;
 }

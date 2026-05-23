@@ -8,6 +8,7 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
  * A relative-motion touchpad. One finger dragging reports cursor deltas as a fraction of the
@@ -30,6 +31,12 @@ class TrackpadView @JvmOverloads constructor(
     /** Called on a two-finger drag with the vertical movement, as a fraction of pad height. */
     var onScroll: ((dyFraction: Float) -> Unit)? = null
 
+    /**
+     * Called on a two-finger pinch with the ratio of current to previous finger spread —
+     * 1.0 means no zoom, > 1 spreads apart (zoom in), < 1 pinches together (zoom out).
+     */
+    var onZoom: ((scaleFactor: Float) -> Unit)? = null
+
     /** Called when a press-and-hold turns the touch into a drag — used to grab a window. */
     var onDragStart: (() -> Unit)? = null
 
@@ -46,6 +53,7 @@ class TrackpadView @JvmOverloads constructor(
     /** Latched true once a second finger lands; cleared when all fingers lift. */
     private var scrolling = false
     private var lastScrollY = 0f
+    private var lastSpread = 0f
 
     /** True once a press-and-hold has turned the current touch into a window drag. */
     private var dragging = false
@@ -79,18 +87,33 @@ class TrackpadView @JvmOverloads constructor(
                 postDelayed(holdRunnable, HOLD_MS)
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // A second finger — switch from cursor-move to two-finger scroll.
+                // A second finger — switch from cursor-move to two-finger scroll / zoom.
                 scrolling = true
                 movedFar = true
                 removeCallbacks(holdRunnable)
                 endDragIfActive()
                 lastScrollY = averageY(event)
+                lastSpread = pointerSpread(event)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (scrolling) {
                     val y = averageY(event)
-                    if (height > 0) onScroll?.invoke((y - lastScrollY) / height)
+                    val spread = pointerSpread(event)
+                    val dy = y - lastScrollY
+                    val dSpread = spread - lastSpread
+                    // Dominant-motion: whichever axis changed more this frame wins. The
+                    // PINCH_BIAS makes pinch a bit "stickier" to avoid flickering between
+                    // modes when both fingers slide together.
+                    if (
+                        spread > MIN_PINCH_SPREAD_PX && lastSpread > MIN_PINCH_SPREAD_PX &&
+                        abs(dSpread) > abs(dy) * PINCH_BIAS
+                    ) {
+                        onZoom?.invoke(spread / lastSpread)
+                    } else if (height > 0) {
+                        onScroll?.invoke(dy / height)
+                    }
                     lastScrollY = y
+                    lastSpread = spread
                 } else {
                     val dx = event.x - lastX
                     val dy = event.y - lastY
@@ -109,6 +132,7 @@ class TrackpadView @JvmOverloads constructor(
             MotionEvent.ACTION_POINTER_UP -> {
                 // Re-average over the fingers that remain, so the next move does not jump.
                 lastScrollY = averageY(event, lifting = event.actionIndex)
+                lastSpread = pointerSpread(event, lifting = event.actionIndex)
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(holdRunnable)
@@ -147,6 +171,16 @@ class TrackpadView @JvmOverloads constructor(
         return if (count > 0) sum / count else lastScrollY
     }
 
+    /** Distance between the first two active pointers; 0 if only one pointer remains. */
+    private fun pointerSpread(event: MotionEvent, lifting: Int = -1): Float {
+        val indices = (0 until event.pointerCount).filter { it != lifting }
+        if (indices.size < 2) return 0f
+        val a = indices[0]; val b = indices[1]
+        val dx = event.getX(a) - event.getX(b)
+        val dy = event.getY(a) - event.getY(b)
+        return sqrt(dx * dx + dy * dy)
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawText(
@@ -163,5 +197,11 @@ class TrackpadView @JvmOverloads constructor(
 
         /** Hold this long without moving and the touch becomes a window drag. */
         const val HOLD_MS = 240L
+
+        /** Below this finger spread (pixels) a pinch reading is too jittery — fall back to scroll. */
+        const val MIN_PINCH_SPREAD_PX = 50f
+
+        /** Spread-change must outpace centroid-change by this factor to register as a pinch. */
+        const val PINCH_BIAS = 1.2f
     }
 }

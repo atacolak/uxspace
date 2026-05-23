@@ -61,6 +61,32 @@ object WorkspaceController {
     var appTap: ((displayId: Int, x: Int, y: Int) -> Unit)? = null
 
     /**
+     * Injects a vertical scroll into a launched app's display at the cursor's content
+     * coordinates — [vScroll] is the same sign convention as a mouse wheel (positive →
+     * scroll up / content moves down). Implemented through the privileged helper as a
+     * quick touch swipe, since `input` doesn't expose `ACTION_SCROLL` directly.
+     * Set by the app at startup.
+     */
+    @Volatile
+    var appScroll: ((displayId: Int, x: Int, y: Int, vScroll: Float) -> Unit)? = null
+
+    /**
+     * Injects a two-finger pinch into a launched app's display, centred at (x, y), with
+     * the pointer spread going from [fromSpan] to [toSpan] over [durationMs]. The
+     * privileged helper builds the multi-pointer MotionEvent and submits it through
+     * `InputManager.injectInputEvent`. Set by the app at startup.
+     */
+    @Volatile
+    var appPinch: (
+        (displayId: Int, x: Int, y: Int, fromSpan: Int, toSpan: Int, durationMs: Int) -> Unit
+    )? = null
+
+    /** Forward a pinch scale factor (1.0 = identity) into the app under the cursor. */
+    fun pinch(scaleFactor: Float) {
+        renderer?.requestPinch(scaleFactor)
+    }
+
+    /**
      * Sends Back to a launched app; [onEmptied] is run if Back closed it (its display went
      * empty), so the window can be closed. Set by the app at startup.
      */

@@ -41,6 +41,12 @@ class VSpaceApp : Application() {
         WorkspaceController.appTap = { displayId, x, y ->
             PrivilegedService.tap(displayId, x, y)
         }
+        WorkspaceController.appScroll = { displayId, x, y, vScroll ->
+            PrivilegedService.scrollOnDisplay(displayId, x, y, vScroll)
+        }
+        WorkspaceController.appPinch = { displayId, x, y, fromSpan, toSpan, durationMs ->
+            PrivilegedService.pinchOnDisplay(displayId, x, y, fromSpan, toSpan, durationMs)
+        }
         WorkspaceController.appBack = { displayId, onEmptied ->
             PrivilegedService.sendBack(displayId, onEmptied)
         }

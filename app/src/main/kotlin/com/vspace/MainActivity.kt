@@ -99,6 +99,7 @@ class MainActivity : ComponentActivity() {
         binding.trackpad.onMove = { dx, dy -> WorkspaceController.moveCursor(dx, dy) }
         binding.trackpad.onTap = { WorkspaceController.click() }
         binding.trackpad.onScroll = { dy -> WorkspaceController.scroll(dy) }
+        binding.trackpad.onZoom = { scale -> WorkspaceController.pinch(scale) }
         binding.trackpad.onDragStart = { WorkspaceController.beginDrag() }
         binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
 
