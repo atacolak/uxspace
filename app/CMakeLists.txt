@@ -38,9 +38,20 @@ set_target_properties(uxspace_app PROPERTIES
 target_link_libraries(uxspace_app PRIVATE
     uxspace::shared
     uxspace::spatial
+    uxspace::tracking
+    uxspace::viture
     imgui
     d3d11
     dxgi
     d3dcompiler
     dwmapi
 )
+
+# Ship Viture SDK runtime DLLs next to UxSpace.exe. The SDK is dlopen'd
+# implicitly via glasses.lib; without these the exe fails to load.
+foreach(_dll IN LISTS UXSPACE_VITURE_RUNTIME_DLLS)
+    add_custom_command(TARGET uxspace_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_dll}" "$<TARGET_FILE_DIR:uxspace_app>"
+        VERBATIM)
+endforeach()

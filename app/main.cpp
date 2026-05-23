@@ -25,6 +25,7 @@
 #include <uxspace/spatial/Surface3D.h>
 #include <uxspace/spatial/Scene.h>
 #include <uxspace/spatial/GlassesOutput.h>
+#include <uxspace/viture/VitureTracker.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -122,6 +123,7 @@ sp::Scene            g_scene;
 sp::StereoCamera     g_camera;
 sp::GlassesOutput    g_glasses;
 DevPreview           g_devPreview;
+uxspace::viture::VitureTracker g_tracker;
 int                  g_screenBandIndex = 2;            // index into kScreenBandPresets (default = 0.90)
 
 // --- Zoom (Win+Shift+wheel over the UxSpace virtual monitor) -------------
@@ -169,6 +171,11 @@ std::vector<sp::GlassesOutput::DetectedMonitor> g_lastSeenMonitors;
 // the wearer is actually looking at. The two events are independent, so
 // we can't just SetCursorPos right after open().
 bool g_pendingCenterCursorOnUxSpace = false;
+
+// Defer tracker start by one frame so the dev window paints before the
+// SDK's xr_device_provider_initialize/start (which can block for a few
+// seconds on calibration init / USB negotiation).
+bool g_pendingTrackerStart = true;
 
 bool CursorInRect(POINT p, const RECT& r) {
     return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
@@ -445,26 +452,19 @@ void TryOpenGlasses() {
 }
 
 // On display topology changes (hotplug, mode change, screen lock/unlock):
-// 1. If we currently hold a swap chain on a now-gone output, close it.
-//    Otherwise the orphaned WS_POPUP host window gets reassigned to
-//    another monitor by the OS and ends up covering the desktop with no
-//    chrome to dismiss it.
-// 2. Re-attempt to open if not currently attached.
+// close any existing glasses swap chain and re-open. Closing-first is
+// what stops the orphaned WS_POPUP from covering the desktop when the
+// output goes away, AND it ensures we pick up new modes when the EDID
+// re-publishes (e.g. after :viture toggles 3D and 3840xN SBS modes
+// become available where only 1920xN mono existed before).
 void RefreshGlassesState() {
     std::vector<sp::GlassesOutput::DetectedMonitor> active;
     sp::GlassesOutput::DetectedMonitor dummy;
     sp::GlassesOutput::find(kGlassesNameMatch, dummy, &active);
-
-    if (g_glasses.opened()) {
-        bool stillThere = false;
-        for (const auto& m : active) {
-            if (m.deviceName == g_glasses.deviceName()) { stillThere = true; break; }
-        }
-        if (!stillThere) g_glasses.close();
-    }
     g_lastSeenMonitors = std::move(active);
 
-    if (!g_glasses.opened()) TryOpenGlasses();
+    g_glasses.close();
+    TryOpenGlasses();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -764,6 +764,21 @@ void DrawDevUI(HWND devWnd) {
     }
     ImGui::Separator();
 
+    // Head tracker (W2)
+    if (g_tracker.isConnected()) {
+        ImGui::Text("Tracker: %s  (%s)",
+                    g_tracker.deviceName().c_str(),
+                    g_tracker.supportsTranslation() ? "6DOF" : "3DOF");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Stop###tracker")) g_tracker.stop();
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+                           "Tracker: not connected.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Connect###tracker")) g_tracker.start();
+    }
+    ImGui::Separator();
+
     // Pseudo-3D layering (W1.5)
     ImGui::Text("Pseudo-3D: %s", g_pseudo3D ? "ON" : "off");
     ImGui::SameLine();
@@ -910,6 +925,16 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         g_vscreen.tick(g_d3d.device.Get(), g_d3d.context.Get());
 
+        // Bring up the head tracker on the second frame so the window has
+        // painted once before we block in the SDK. The 3D-mode toggle
+        // performed by start() re-publishes the EDID with SBS modes,
+        // which triggers WM_DISPLAYCHANGE → RefreshGlassesState reopens
+        // the glasses on the new wider mode automatically.
+        if (g_pendingTrackerStart) {
+            g_tracker.start();
+            g_pendingTrackerStart = false;
+        }
+
         // If the glasses connected before the UxSpace virtual monitor was
         // captured, drop the cursor onto the captured monitor as soon as
         // both are live. This is what the wearer sees through the glasses,
@@ -948,6 +973,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_winEventHook) { UnhookWinEvent(g_winEventHook);      g_winEventHook = nullptr; }
     if (g_mouseHook)    { UnhookWindowsHookEx(g_mouseHook);    g_mouseHook    = nullptr; }
     if (g_keyboardHook) { UnhookWindowsHookEx(g_keyboardHook); g_keyboardHook = nullptr; }
+    g_tracker.stop();
     g_glasses.close();
 
     ImGui_ImplDX11_Shutdown();

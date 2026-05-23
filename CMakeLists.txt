@@ -29,6 +29,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 add_subdirectory(shared)
 add_subdirectory(spatial)
+add_subdirectory(tracking)
+add_subdirectory(viture)
 add_subdirectory(app)
 
 # :driver is a hand-written WDK .vcxproj (UMDF2 + IddCx).
@@ -40,6 +42,3 @@ include_external_msproject(
     GUID 6C4EF776-A8E2-49BA-83E4-C3B3503CF0E9
 )
 
-# Added as their milestones come up (see docs/ROADMAP.md):
-#   add_subdirectory(tracking)   # W2
-#   add_subdirectory(viture)     # W2
