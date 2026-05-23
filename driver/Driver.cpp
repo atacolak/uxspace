@@ -35,7 +35,68 @@ using namespace Microsoft::WRL;
 // named-pipe channel lands in the next W3 stage; for now each monitor
 // comes up edid-less at the single 1920x1080 default mode.
 static constexpr DWORD kUxSpaceMaxMonitors      = 3;
-static constexpr DWORD kUxSpaceDefaultMonitorCount = 3;
+// First-run default. After the user sets a count via SetMonitorCount IPC
+// (which persists to HKLM), the registry value wins. Starting at 1
+// because IddCxMonitorDeparture causes WUDFHost to recycle the driver
+// context, and a recycle that goes back to 3 monitors would undo the
+// user's removal request — much better UX to grow up from 1.
+static constexpr DWORD kUxSpaceDefaultMonitorCount = 1;
+
+// Persists the desired monitor count across WUDFHost driver recycles.
+// HKLM is required because the driver runs as LocalService and HKCU
+// would point at the wrong user hive. The MSI does NOT pre-create this
+// key; if RegSetValueExW fails (ACCESS_DENIED in a constrained service
+// context), the next monitor-count request will log the error and the
+// count just won't survive recycles — non-fatal.
+inline constexpr wchar_t kDriverSettingsKey[]  = L"Software\\UxSpace\\Driver";
+inline constexpr wchar_t kMonitorCountValue[]  = L"MonitorCount";
+
+DWORD ReadDesiredMonitorCount()
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kDriverSettingsKey, 0,
+                      KEY_READ, &key) != ERROR_SUCCESS) {
+        return kUxSpaceDefaultMonitorCount;
+    }
+    DWORD value = 0, size = sizeof(value), type = 0;
+    const LSTATUS s = RegQueryValueExW(key, kMonitorCountValue, nullptr, &type,
+                                       reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(key);
+    if (s != ERROR_SUCCESS || type != REG_DWORD) {
+        return kUxSpaceDefaultMonitorCount;
+    }
+    if (value < 1)                       value = 1;
+    if (value > kUxSpaceMaxMonitors)     value = kUxSpaceMaxMonitors;
+    return value;
+}
+
+void WriteDesiredMonitorCount(DWORD count)
+{
+    if (count < 1)                       count = 1;
+    if (count > kUxSpaceMaxMonitors)     count = kUxSpaceMaxMonitors;
+    HKEY key = nullptr;
+    DWORD disp = 0;
+    const LSTATUS open = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kDriverSettingsKey,
+                                         0, nullptr, 0, KEY_WRITE, nullptr,
+                                         &key, &disp);
+    if (open != ERROR_SUCCESS) {
+        uxspace::log::warn("driver: RegCreateKeyExW(HKLM\\%ls) failed err=%ld",
+                           kDriverSettingsKey, static_cast<long>(open));
+        return;
+    }
+    const LSTATUS set = RegSetValueExW(key, kMonitorCountValue, 0, REG_DWORD,
+                                       reinterpret_cast<const BYTE*>(&count),
+                                       sizeof(count));
+    RegCloseKey(key);
+    if (set != ERROR_SUCCESS) {
+        uxspace::log::warn("driver: RegSetValueExW(%ls=%u) failed err=%ld",
+                           kMonitorCountValue, (unsigned) count,
+                           static_cast<long>(set));
+    } else {
+        uxspace::log::info("driver: persisted desired MonitorCount=%u to HKLM\\%ls",
+                           (unsigned) count, kDriverSettingsKey);
+    }
+}
 
 // UxSpace: ignore the upstream s_SampleMonitors EDIDs (Dell / Lenovo derived).
 // Every monitor is edid-less; the OS reports it under the INF DeviceName
@@ -215,7 +276,7 @@ void PipeServer::Start()
     // monitor change, so a CREATE_ALWAYS init would erase the previous
     // session's lines on every recycle (verified in v2300 logs).
     uxspace::log::init(L"C:\\Windows\\Temp\\UxSpace-driver.log", /*append=*/true);
-    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2400 ========");
+    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2500 ========");
 
     m_terminate.Attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     m_thread.Attach(CreateThread(nullptr, 0, &PipeServer::ThreadProc, this, 0, nullptr));
@@ -398,7 +459,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-2400";
+            static const char kBuildStamp[] = "v20260523-2500";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -1001,6 +1062,11 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
     uxspace::log::info("driver: IndirectDeviceContext::SetMonitorCount target=%u (clamped to <=%u)",
                        (unsigned) targetCount, (unsigned) kUxSpaceMaxMonitors);
     if (targetCount > kUxSpaceMaxMonitors) targetCount = kUxSpaceMaxMonitors;
+    if (targetCount < 1)                   targetCount = 1;
+    // Persist BEFORE doing the IddCx work. WUDFHost recycles the driver
+    // mid-call on monitor removals; persisting first means the recycled
+    // instance comes back up with the new target count via the registry.
+    WriteDesiredMonitorCount(targetCount);
     NTSTATUS firstFailure = STATUS_SUCCESS;
     if (outDiag && outDiagBytes > 0) outDiag[0] = '\0';
 
@@ -1114,7 +1180,18 @@ NTSTATUS UxSpaceAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_
     auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
     if (NT_SUCCESS(pInArgs->AdapterInitStatus))
     {
-        for (DWORD i = 0; i < kUxSpaceDefaultMonitorCount; i++)
+        // Number of monitors to bring up = whatever the user last
+        // requested via SetMonitorCount IPC (persisted to HKLM). On
+        // first boot the registry value is missing and we fall back to
+        // kUxSpaceDefaultMonitorCount (= 1). This is what makes the
+        // user's monitor-count choice survive the WUDFHost recycle
+        // that IddCxMonitorDeparture triggers — without persistence,
+        // every SetMonitorCount removal would bounce back to 3 the
+        // moment the next recycle fired (verified in v2400 logs).
+        const DWORD desired = ReadDesiredMonitorCount();
+        uxspace::log::info("driver: AdapterFinishInit creating %u monitor(s) (from HKLM)",
+                           (unsigned) desired);
+        for (DWORD i = 0; i < desired; i++)
         {
             pDeviceContextWrapper->pContext->FinishInit(i);
         }
