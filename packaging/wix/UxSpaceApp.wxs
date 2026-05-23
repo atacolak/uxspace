@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  UxSpace app MSI. Per-user install at %LOCALAPPDATA%\Programs\UxSpace.
+  Ships UxSpace.exe + the five Viture SDK runtime DLLs that glasses.lib
+  pulls in. Creates Start Menu (DVladi\UxSpace) and Desktop shortcuts.
+  No driver bits — that's the separate UxSpaceDriver MSI.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="UxSpace"
+           Manufacturer="DVladi"
+           Version="$(var.Version)"
+           UpgradeCode="0e2a8c19-6f7b-4a9d-9d31-3b41f5a82e4c"
+           Scope="perUser"
+           InstallerVersion="500">
+    <SummaryInformation Description="UxSpace — spatial multi-monitor compositor for Viture AR glasses."/>
+    <MajorUpgrade DowngradeErrorMessage="A newer version of UxSpace is already installed."/>
+    <Media Id="1" Cabinet="UxSpace.cab" EmbedCab="yes"/>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="UxSpace">
+          <Component Id="CompUxSpaceExe">
+            <File Id="UxSpaceExe" Source="$(var.AppDir)\UxSpace.exe" KeyPath="yes"/>
+          </Component>
+          <Component Id="CompGlassesDll">
+            <File Source="$(var.AppDir)\glasses.dll"/>
+          </Component>
+          <Component Id="CompCarinaDll">
+            <File Source="$(var.AppDir)\carina_vio.dll"/>
+          </Component>
+          <Component Id="CompGlewDll">
+            <File Source="$(var.AppDir)\glew32.dll"/>
+          </Component>
+          <Component Id="CompLibusbDll">
+            <File Source="$(var.AppDir)\libusb-1.0.dll"/>
+          </Component>
+          <Component Id="CompOpencvDll">
+            <File Source="$(var.AppDir)\opencv_world4100.dll"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuVendor" Name="DVladi">
+        <Component Id="CompStartMenuShortcut">
+          <Shortcut Id="StartMenuShortcut"
+                    Name="UxSpace"
+                    Description="Spatial multi-monitor compositor for Viture AR glasses"
+                    Target="[#UxSpaceExe]"
+                    WorkingDirectory="INSTALLFOLDER"/>
+          <RemoveFolder Id="RemoveStartMenuVendor" Directory="StartMenuVendor" On="uninstall"/>
+          <RegistryValue Root="HKCU"
+                         Key="Software\DVladi\UxSpace"
+                         Name="startMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="CompDesktopShortcut">
+        <Shortcut Id="DesktopShortcut"
+                  Name="UxSpace"
+                  Description="Spatial multi-monitor compositor for Viture AR glasses"
+                  Target="[#UxSpaceExe]"
+                  WorkingDirectory="INSTALLFOLDER"/>
+        <RegistryValue Root="HKCU"
+                       Key="Software\DVladi\UxSpace"
+                       Name="desktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes"/>
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="AppFeature" Title="UxSpace" Level="1">
+      <ComponentRef Id="CompUxSpaceExe"/>
+      <ComponentRef Id="CompGlassesDll"/>
+      <ComponentRef Id="CompCarinaDll"/>
+      <ComponentRef Id="CompGlewDll"/>
+      <ComponentRef Id="CompLibusbDll"/>
+      <ComponentRef Id="CompOpencvDll"/>
+      <ComponentRef Id="CompStartMenuShortcut"/>
+      <ComponentRef Id="CompDesktopShortcut"/>
+    </Feature>
+  </Package>
+</Wix>
