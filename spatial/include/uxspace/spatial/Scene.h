@@ -42,13 +42,12 @@ struct Scene {
                     UINT framebufferHeight) const;
 };
 
-// Preset cycle for the screen-band button. Values <= 1.0 letterbox the
-// content (smaller band = more FoV unused, more comfortable). Values
-// > 1.0 overflow the framebuffer — the central crop is what the wearer
-// sees, so the displayed quad appears LARGER / CLOSER. 1.0 fills the
-// frame exactly; 1.2/1.3 are "make the screen closer" steps.
-inline constexpr float kScreenBandPresets[] = { 0.80f, 0.85f, 0.90f, 1.00f, 1.20f, 1.30f };
-inline constexpr float kScreenBandMin = 0.5f;
-inline constexpr float kScreenBandMax = 1.50f;
+// Continuous slider range for screen size. Values <= 1.0 letterbox the
+// content (smaller = more FoV unused, more comfortable). Values > 1.0
+// overflow the framebuffer — the central crop is what the wearer sees,
+// so the displayed quad appears LARGER / CLOSER.
+inline constexpr float kScreenBandMin  = 0.70f;
+inline constexpr float kScreenBandMax  = 2.00f;
+inline constexpr float kScreenBandStep = 0.10f;
 
 } // namespace uxspace::spatial

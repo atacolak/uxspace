@@ -33,7 +33,10 @@
 #include <uxspace/viture/VitureTracker.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -145,7 +148,104 @@ uxspace::tracking::HeadPose g_anchorPose;  // identity by default
 // show the key-legend overlay so the wearer can discover bindings in
 // situ. Recomputed each frame from GetAsyncKeyState; cheap enough.
 bool g_winShiftHeld = false;
-int                  g_screenBandIndex = 2;            // index into kScreenBandPresets (default = 0.90)
+
+// GDI-rendered legend bitmap, uploaded once to a D3D11 texture. Drawn
+// as a Surface3D in a separate PINNED render pass when Win+Shift is
+// held, so the wearer sees the hotkey list anchored to the bottom-left
+// of their view without it being affected by head tracking or zoom.
+struct LegendOverlay {
+    ComPtr<ID3D11Texture2D>          tex;
+    ComPtr<ID3D11ShaderResourceView> srv;
+};
+LegendOverlay g_legend;
+
+bool BuildLegendTexture(ID3D11Device* device) {
+    constexpr int W = 480;
+    constexpr int H = 220;
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC    = CreateCompatibleDC(screenDC);
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = W;
+    bi.bmiHeader.biHeight      = -H;  // top-down
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp) { DeleteDC(memDC); ReleaseDC(nullptr, screenDC); return false; }
+    HGDIOBJ oldBmp = SelectObject(memDC, bmp);
+
+    RECT rect{ 0, 0, W, H };
+    HBRUSH bg = CreateSolidBrush(RGB(16, 18, 28));
+    FillRect(memDC, &rect, bg);
+    DeleteObject(bg);
+
+    HFONT font = CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             ANTIALIASED_QUALITY, FF_MODERN, L"Consolas");
+    HGDIOBJ oldFont = SelectObject(memDC, font);
+    SetBkMode(memDC, TRANSPARENT);
+
+    SetTextColor(memDC, RGB(255, 220, 100));
+    TextOutW(memDC, 14, 8, L"Win + Shift +", 13);
+    SetTextColor(memDC, RGB(220, 220, 220));
+
+    struct Row { const wchar_t* k; const wchar_t* v; };
+    const Row rows[] = {
+        { L"Wheel",  L"Zoom (cursor on UxSpace)" },
+        { L"+ / -",  L"Zoom in / out (keyboard)" },
+        { L"Z",      L"Screen size +0.1 (wraps)" },
+        { L"D",      L"Pseudo-3D layering" },
+        { L"X",      L"Toggle PINNED / FREE" },
+        { L"R",      L"SDK recenter (hard)" },
+        { L"C",      L"Anchor at current pose" },
+    };
+    int y = 36;
+    for (const auto& r : rows) {
+        TextOutW(memDC, 14,  y, r.k, static_cast<int>(wcslen(r.k)));
+        TextOutW(memDC, 100, y, r.v, static_cast<int>(wcslen(r.v)));
+        y += 24;
+    }
+
+    SelectObject(memDC, oldFont);
+    DeleteObject(font);
+
+    // GDI writes BGR but leaves alpha = 0 (BI_RGB doesn't manage the
+    // alpha channel). Set alpha = 255 across the whole bitmap so the
+    // texture isn't fully transparent.
+    auto* px = static_cast<std::uint32_t*>(bits);
+    for (int i = 0; i < W * H; ++i) px[i] |= 0xFF000000u;
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width      = W;
+    td.Height     = H;
+    td.MipLevels  = 1;
+    td.ArraySize  = 1;
+    td.Format     = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc = { 1, 0 };
+    td.Usage      = D3D11_USAGE_DEFAULT;
+    td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA sd{};
+    sd.pSysMem     = bits;
+    sd.SysMemPitch = W * 4;
+
+    const HRESULT hrT = device->CreateTexture2D(&td, &sd, &g_legend.tex);
+    if (SUCCEEDED(hrT)) {
+        device->CreateShaderResourceView(g_legend.tex.Get(), nullptr, &g_legend.srv);
+    }
+
+    SelectObject(memDC, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+    return g_legend.srv != nullptr;
+}
+float                g_screenBandTarget = 0.90f;       // mirror of g_scene.screenBand for UI
 
 // --- Zoom (Win+Shift+wheel over the UxSpace virtual monitor) -------------
 //
@@ -762,9 +862,53 @@ void RenderStereoTo(ID3D11RenderTargetView* rtv,
     }
 }
 
+// Overlays the GDI-rendered hotkey legend on top of an already-rendered
+// framebuffer. Runs as a second pass with no clear so the main scene
+// remains visible behind it. The legend uses its own clean camera
+// (PINNED, IPD = 0) so it always appears at the same screen position in
+// both eyes regardless of the active tracker pose / view mode / anchor.
+void RenderLegendOverlay(ID3D11RenderTargetView* rtv,
+                         UINT w,
+                         UINT h,
+                         bool stereo) {
+    if (!g_legend.srv) return;
+
+    g_d3d.context->OMSetRenderTargets(1, &rtv, nullptr);
+
+    sp::Scene legendScene;
+    legendScene.screenBand = g_scene.screenBand;
+
+    sp::Surface3D s;
+    // Bottom-left in the wearer's view. Aspect is the source bitmap's
+    // 480:220 (~2.18:1); size in metres at z=1m is comfortable to read
+    // without dominating the FoV.
+    s.position = { -0.45f, -0.30f, 1.00f };
+    s.size     = { 0.30f, 0.30f * 220.0f / 480.0f };
+    s.uvRect   = { 0.0f, 0.0f, 1.0f, 1.0f };
+    s.texture  = g_legend.srv.Get();
+    legendScene.surfaces.push_back(s);
+
+    sp::StereoCamera cam;
+    cam.ipdMeters = 0.0f;
+    cam.mode      = uxspace::tracking::ViewMode::PINNED;
+
+    if (stereo) {
+        legendScene.renderStereo(g_d3d.context.Get(), g_renderer, cam, w, h);
+    } else {
+        legendScene.renderMono(g_d3d.context.Get(), g_renderer, cam, w, h);
+    }
+}
+
 void CycleScreenBand() {
-    g_screenBandIndex = (g_screenBandIndex + 1) % static_cast<int>(std::size(sp::kScreenBandPresets));
-    g_scene.screenBand = sp::kScreenBandPresets[g_screenBandIndex];
+    // Step by kScreenBandStep (0.10), wrap from max back to min.
+    float v = g_scene.screenBand + sp::kScreenBandStep;
+    // Compare with a small epsilon so the float arithmetic doesn't
+    // accumulate drift across many presses.
+    if (v > sp::kScreenBandMax + 0.001f) v = sp::kScreenBandMin;
+    // Snap to nearest 0.10 multiple to keep values clean (0.7, 0.8, ...).
+    v = std::round(v * 10.0f) / 10.0f;
+    g_scene.screenBand   = std::clamp(v, sp::kScreenBandMin, sp::kScreenBandMax);
+    g_screenBandTarget   = g_scene.screenBand;
 }
 
 // --- Dev UI: Hotkeys panel ---------------------------------------------
@@ -793,7 +937,7 @@ void DrawHotkeysWindow() {
         row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x).");
         row("Win+Shift++",     "global", "Zoom in by 0.25x (keyboard alternative).");
         row("Win+Shift+-",     "global", "Zoom out by 0.25x.");
-        row("Win+Shift+Z",     "global", "Cycle screen band (0.80 / 0.85 / 0.90).");
+        row("Win+Shift+Z",     "global", "Screen size +0.10 (0.70..2.00, wraps).");
         row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
         row("Win+Shift+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
         row("Win+Shift+R",     "global", "Recenter: SDK reset_origin (hard reset of tracking).");
@@ -945,22 +1089,14 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SetNextWindowSize(ImVec2(520, 460), ImGuiCond_FirstUseEver);
     ImGui::Begin("UxSpace");
 
-    // Screen-band picker first — most-used control during W1 tuning.
-    ImGui::TextUnformatted("Screen band (Win+Shift+Z to cycle):");
-    for (int i = 0; i < static_cast<int>(std::size(sp::kScreenBandPresets)); ++i) {
-        if (i > 0) ImGui::SameLine();
-        char label[32];
-        snprintf(label, sizeof(label), "%.2f##band%d", sp::kScreenBandPresets[i], i);
-        const bool active = (i == g_screenBandIndex);
-        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.90f, 1.0f));
-        if (ImGui::Button(label, ImVec2(80, 32))) {
-            g_screenBandIndex   = i;
-            g_scene.screenBand  = sp::kScreenBandPresets[i];
-        }
-        if (active) ImGui::PopStyleColor();
+    // Screen size — continuous slider. Win+Shift+Z steps by 0.10 with wrap.
+    // Values <= 1.0 letterbox; > 1.0 zoom the displayed quad ("closer").
+    g_screenBandTarget = g_scene.screenBand;
+    if (ImGui::SliderFloat("Screen size (Win+Shift+Z = +0.1)",
+                           &g_screenBandTarget,
+                           sp::kScreenBandMin, sp::kScreenBandMax, "%.2f")) {
+        g_scene.screenBand = g_screenBandTarget;
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(current: %.2f)", g_scene.screenBand);
     ImGui::Separator();
 
     // Zoom (Win+Shift+wheel over the UxSpace virtual monitor).
@@ -1227,10 +1363,19 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
     CreateDevPreview(g_d3d.device.Get(), kDevPreviewWidth, kDevPreviewHeight, g_devPreview);
 
+    // GDI -> texture for the Win+Shift hotkey legend (drawn as a Surface3D
+    // overlay on the glasses framebuffer while Win+Shift is held). One-shot
+    // build; the texture is reused for every overlay pass.
+    if (!BuildLegendTexture(g_d3d.device.Get())) {
+        uxspace::log::warn("legend: BuildLegendTexture failed; glasses-side hotkey legend disabled.");
+    } else {
+        uxspace::log::info("legend: texture built (480x220 B8G8R8A8).");
+    }
+
     // Surfaces are rebuilt every frame by UpdateScene(): back plane + (if
-    // pseudo-3D is on and we're not zoomed) per-window quads. Just seed
-    // the screen-band preset here.
-    g_scene.screenBand = sp::kScreenBandPresets[g_screenBandIndex];
+    // pseudo-3D is on and we're not zoomed) per-window quads. Screen-size
+    // initial value comes from g_scene.screenBand's default (0.90); the
+    // slider + Win+Shift+Z mutate it at runtime.
 
     // Try the glasses up-front; user can rescan via the UI later.
     TryOpenGlasses();
@@ -1375,14 +1520,23 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         // Render to glasses (if open). Stereo or mono depending on whether
         // the framebuffer reports an SBS-aspect mode; see GlassesOutput.h.
+        // Overlay the hotkey legend on top when Win+Shift is held — the
+        // wearer sees the bindings without taking the glasses off.
         if (g_glasses.opened()) {
             const bool stereo = g_glasses.isStereoMode();
             RenderStereoTo(g_glasses.rtv(), g_glasses.width(), g_glasses.height(), stereo);
+            if (g_winShiftHeld) {
+                RenderLegendOverlay(g_glasses.rtv(), g_glasses.width(), g_glasses.height(), stereo);
+            }
             g_glasses.swap()->Present(1, 0);
         }
 
         // Render to the dev SBS preview (always — useful even without glasses).
         RenderStereoTo(g_devPreview.rtv.Get(), kDevPreviewWidth, kDevPreviewHeight, /*stereo*/true);
+        if (g_winShiftHeld) {
+            RenderLegendOverlay(g_devPreview.rtv.Get(),
+                                kDevPreviewWidth, kDevPreviewHeight, /*stereo*/true);
+        }
 
         DrawDevUI(hwnd);
     }

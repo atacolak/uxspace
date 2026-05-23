@@ -136,6 +136,39 @@ static IDDCX_TARGET_MODE CreateIddCxTargetMode(DWORD Width, DWORD Height, DWORD 
 
 #pragma endregion
 
+#pragma region StringBuilders
+
+// Hand-rolled minimal formatters because the UMDF runtime's _snprintf_s
+// silently writes nothing for some format specifiers (confirmed via the
+// W3 SetMonitorCount Nack diagnostics: every %u / %08X invocation left
+// the buffer empty). These bypass the CRT printf family entirely.
+static void DiagAppendStr(char* buf, std::size_t bufSize, std::size_t& pos, const char* s)
+{
+    while (s && *s && pos + 1 < bufSize) buf[pos++] = *s++;
+    if (pos < bufSize) buf[pos] = '\0';
+}
+
+static void DiagAppendUInt(char* buf, std::size_t bufSize, std::size_t& pos, unsigned v)
+{
+    char tmp[16];
+    int n = 0;
+    do { tmp[n++] = char('0' + (v % 10)); v /= 10; } while (v && n < (int) sizeof(tmp));
+    while (n > 0 && pos + 1 < bufSize) buf[pos++] = tmp[--n];
+    if (pos < bufSize) buf[pos] = '\0';
+}
+
+static void DiagAppendHex32(char* buf, std::size_t bufSize, std::size_t& pos, unsigned v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    if (pos + 2 < bufSize) { buf[pos++] = '0'; buf[pos++] = 'x'; }
+    for (int i = 28; i >= 0; i -= 4) {
+        if (pos + 1 < bufSize) buf[pos++] = hex[(v >> i) & 0xF];
+    }
+    if (pos < bufSize) buf[pos] = '\0';
+}
+
+#pragma endregion
+
 #pragma region PipeServer
 
 // Named-pipe server for the W3 control channel. Runs on a worker
@@ -319,7 +352,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1240";
+            static const char kBuildStamp[] = "v20260523-1300";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -332,12 +365,11 @@ void PipeServer::HandleClient(HANDLE pipe)
             if (reqHdr.payload_bytes != sizeof(SetMonitorCountPayload))
             {
                 char diag[124] = {};
-                // %zu fails silently in this UMDF runtime; use %u with a
-                // cast so the message always renders.
-                _snprintf_s(diag, sizeof(diag), _TRUNCATE,
-                            "SetMonitorCount payload expected %u bytes, got %u",
-                            (unsigned) sizeof(SetMonitorCountPayload),
-                            (unsigned) reqHdr.payload_bytes);
+                std::size_t pos = 0;
+                DiagAppendStr(diag, sizeof(diag), pos, "SetMonitorCount payload expected ");
+                DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) sizeof(SetMonitorCountPayload));
+                DiagAppendStr(diag, sizeof(diag), pos, " bytes, got ");
+                DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) reqHdr.payload_bytes);
                 if (!drain(reqHdr.payload_bytes)) return;
                 if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
                 break;
@@ -347,9 +379,11 @@ void PipeServer::HandleClient(HANDLE pipe)
             if (payload.count > kMaxMonitors)
             {
                 char diag[124] = {};
-                _snprintf_s(diag, sizeof(diag), _TRUNCATE,
-                            "count=%u > max=%u",
-                            (unsigned) payload.count, (unsigned) kMaxMonitors);
+                std::size_t pos = 0;
+                DiagAppendStr(diag, sizeof(diag), pos, "count=");
+                DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) payload.count);
+                DiagAppendStr(diag, sizeof(diag), pos, " > max=");
+                DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) kMaxMonitors);
                 if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
@@ -362,9 +396,15 @@ void PipeServer::HandleClient(HANDLE pipe)
             if (!NT_SUCCESS(rmStatus))
             {
                 if (diag[0] == '\0') {
-                    _snprintf_s(diag, sizeof(diag), _TRUNCATE,
-                                "SetMonitorCount(%u): before=%u after=%u rmStatus=0x%08X",
-                                (unsigned) payload.count, before, after, (unsigned) rmStatus);
+                    std::size_t pos = 0;
+                    DiagAppendStr(diag, sizeof(diag), pos, "SetMonitorCount(");
+                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) payload.count);
+                    DiagAppendStr(diag, sizeof(diag), pos, "): before=");
+                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) before);
+                    DiagAppendStr(diag, sizeof(diag), pos, " after=");
+                    DiagAppendUInt(diag, sizeof(diag), pos, (unsigned) after);
+                    DiagAppendStr(diag, sizeof(diag), pos, " rmStatus=");
+                    DiagAppendHex32(diag, sizeof(diag), pos, (unsigned) rmStatus);
                 }
                 if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
                 break;
@@ -919,9 +959,10 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
         if (!NT_SUCCESS(s) && NT_SUCCESS(firstFailure)) {
             firstFailure = s;
             if (outDiag && outDiagBytes > 0) {
-                _snprintf_s(outDiag, outDiagBytes, _TRUNCATE,
-                            "IddCxMonitorDeparture failed: hr=0x%08X",
-                            (unsigned) s);
+                std::size_t pos = 0;
+                outDiag[0] = '\0';
+                DiagAppendStr(outDiag, outDiagBytes, pos, "IddCxMonitorDeparture failed: hr=");
+                DiagAppendHex32(outDiag, outDiagBytes, pos, (unsigned) s);
             }
         }
         WdfObjectDelete(mon);
