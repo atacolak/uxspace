@@ -50,6 +50,21 @@ class TrackpadView @JvmOverloads constructor(
     private var downTime = 0L
     private var movedFar = false
 
+    /**
+     * Cursor-movement buffered during the touch's "warmup". A two-finger gesture often
+     * lands its second finger a few ms after the first; if we treat that gap as a
+     * one-finger drag the cursor jumps before the gesture is recognised, which then sends
+     * the auto-scroll to wherever the cursor jumped to. We buffer the first ~30 ms / 8 px
+     * of one-finger movement and discard it if `POINTER_DOWN` arrives during the window.
+     */
+    private var warmupActive = false
+    private var warmupDx = 0f
+    private var warmupDy = 0f
+
+    /** Total cursor delta emitted by *this* touch — undone on `POINTER_DOWN`. */
+    private var cursorEmittedDx = 0f
+    private var cursorEmittedDy = 0f
+
     /** Latched true once a second finger lands; cleared when all fingers lift. */
     private var scrolling = false
     private var lastScrollY = 0f
@@ -128,6 +143,11 @@ class TrackpadView @JvmOverloads constructor(
                 movedFar = false
                 scrolling = false
                 dragging = false
+                warmupActive = true
+                warmupDx = 0f
+                warmupDy = 0f
+                cursorEmittedDx = 0f
+                cursorEmittedDy = 0f
                 removeCallbacks(holdRunnable)
                 postDelayed(holdRunnable, HOLD_MS)
             }
@@ -139,6 +159,19 @@ class TrackpadView @JvmOverloads constructor(
                 movedFar = true
                 removeCallbacks(holdRunnable)
                 endDragIfActive()
+                // Discard any one-finger movement buffered while we were waiting to see if
+                // a second finger would arrive, and undo any cursor delta that already
+                // emitted (warmup may have flushed early). Both keep the cursor where it
+                // was when the gesture really began so auto-scroll can target the right
+                // window.
+                warmupActive = false
+                warmupDx = 0f
+                warmupDy = 0f
+                if (cursorEmittedDx != 0f || cursorEmittedDy != 0f) {
+                    onMove?.invoke(-cursorEmittedDx, -cursorEmittedDy)
+                    cursorEmittedDx = 0f
+                    cursorEmittedDy = 0f
+                }
                 twoFingerStartedDuringAutoScroll = autoScrollActive
                 cancelAutoScroll()
                 twoFingerDownTime = event.eventTime
@@ -179,7 +212,32 @@ class TrackpadView @JvmOverloads constructor(
                         // Moving before the hold fires means a cursor move, not a drag.
                         if (!dragging) removeCallbacks(holdRunnable)
                     }
-                    if (width > 0) onMove?.invoke(dx / width, dy / width)
+                    if (warmupActive) {
+                        warmupDx += dx
+                        warmupDy += dy
+                        val warmupOver =
+                            event.eventTime - downTime > WARMUP_MS ||
+                                abs(warmupDx) > WARMUP_DISTANCE_PX ||
+                                abs(warmupDy) > WARMUP_DISTANCE_PX
+                        if (warmupOver) {
+                            if (width > 0) {
+                                val fx = warmupDx / width
+                                val fy = warmupDy / width
+                                onMove?.invoke(fx, fy)
+                                cursorEmittedDx += fx
+                                cursorEmittedDy += fy
+                            }
+                            warmupActive = false
+                            warmupDx = 0f
+                            warmupDy = 0f
+                        }
+                    } else if (width > 0) {
+                        val fx = dx / width
+                        val fy = dy / width
+                        onMove?.invoke(fx, fy)
+                        cursorEmittedDx += fx
+                        cursorEmittedDy += fy
+                    }
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> {
@@ -266,6 +324,13 @@ class TrackpadView @JvmOverloads constructor(
 
         /** Auto-scroll tick interval — 60 Hz, matches typical display refresh. */
         const val AUTO_SCROLL_TICK_MS = 16
+
+        /** Hold one-finger cursor moves for this long before flushing — swallows the brief
+         *  one-finger window before a two-finger gesture's second finger lands. */
+        const val WARMUP_MS = 30L
+
+        /** ...unless the finger has moved this far first, in which case flush early. */
+        const val WARMUP_DISTANCE_PX = 8f
 
         /** Below this total vertical travel during the gesture, no auto-scroll starts. */
         const val MIN_FLICK_PX = 20

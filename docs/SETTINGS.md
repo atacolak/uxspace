@@ -60,6 +60,13 @@ the toolbar or a row under the status banner. It holds:
   ([`PrivilegedService.SCROLL_PIXELS_PER_UNIT`](../app/src/main/kotlin/com/vspace/privileged/PrivilegedService.kt))
   lets the user tune how aggressively each unit of touchpad scroll
   translates into a swipe inside the app.
+- **app display density (DPI)** — the dpi the launched-app virtual display
+  is created at, [`VirtualScreen.APP_DISPLAY_DPI`](../spatial/src/main/kotlin/com/vspace/spatial/VirtualScreen.kt).
+  Default 160 (mdpi / 1×) reads as desktop-class to most apps; raising it
+  makes UI larger, lowering it denser. Sensible range 120–320. Stored on
+  `WorkspaceSettings`; read on next-window creation (existing windows keep
+  their density). A per-app override (a map of `packageName` → dpi) belongs
+  here too, for the few apps that need a different scale.
 - room to grow — screen-size default, theme colours ([[VSpaceTheme]]), etc.
 
 It is plain phone UI (no glasses needed), so it can be a normal `Activity` or a
