@@ -174,6 +174,121 @@ int              g_lastLayeredCount = 0;
 
 std::vector<sp::GlassesOutput::DetectedMonitor> g_lastSeenMonitors;
 
+// --- Driver IPC client (W3) -------------------------------------------
+//
+// One-shot RPC over the :shared named-pipe protocol. Each call opens
+// the pipe, sends the request, reads the response, closes — keeps the
+// client simple and matches the driver-side single-instance pipe.
+//
+// Synchronous + blocking is fine because all callers are :app's main
+// thread (startup probe, UI button click). The driver responds within
+// a few ms in practice.
+
+struct IpcResult {
+    bool                     ok           = false;
+    uxspace::ipc::MessageType replyType   = uxspace::ipc::MessageType::Nack;
+    uxspace::ipc::ErrorCode  nackCode     = uxspace::ipc::ErrorCode::Internal;
+    DWORD                    win32Error   = 0;
+};
+
+IpcResult IpcRequest(uxspace::ipc::MessageType type,
+                     const void* payload, std::uint32_t payloadBytes) {
+    using namespace uxspace::ipc;
+    static std::atomic<std::uint32_t> s_requestId{ 0 };
+
+    IpcResult r;
+    HANDLE pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE,
+                              0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        r.win32Error = GetLastError();
+        return r;
+    }
+    DWORD pipeMode = PIPE_READMODE_MESSAGE;
+    SetNamedPipeHandleState(pipe, &pipeMode, nullptr, nullptr);
+
+    Header req{};
+    req.protocol_version = kProtocolVersion;
+    req.type             = type;
+    req.payload_bytes    = payloadBytes;
+    req.request_id       = s_requestId.fetch_add(1) + 1;
+
+    DWORD wrote = 0;
+    if (!WriteFile(pipe, &req, sizeof(req), &wrote, nullptr) ||
+        wrote != sizeof(req)) {
+        r.win32Error = GetLastError();
+        CloseHandle(pipe);
+        return r;
+    }
+    if (payloadBytes > 0) {
+        if (!WriteFile(pipe, payload, payloadBytes, &wrote, nullptr) ||
+            wrote != payloadBytes) {
+            r.win32Error = GetLastError();
+            CloseHandle(pipe);
+            return r;
+        }
+    }
+
+    Header rsp{};
+    DWORD read = 0;
+    if (!ReadFile(pipe, &rsp, sizeof(rsp), &read, nullptr) ||
+        read != sizeof(rsp)) {
+        r.win32Error = GetLastError();
+        CloseHandle(pipe);
+        return r;
+    }
+    r.replyType = rsp.type;
+
+    if (rsp.payload_bytes == sizeof(NackPayload) && rsp.type == MessageType::Nack) {
+        NackPayload np{};
+        ReadFile(pipe, &np, sizeof(np), &read, nullptr);
+        r.nackCode = np.code;
+    } else if (rsp.payload_bytes > 0) {
+        std::vector<BYTE> scratch(rsp.payload_bytes);
+        ReadFile(pipe, scratch.data(), rsp.payload_bytes, &read, nullptr);
+    }
+
+    CloseHandle(pipe);
+    r.ok = (rsp.type != MessageType::Nack);
+    return r;
+}
+
+IpcResult IpcPing() { return IpcRequest(uxspace::ipc::MessageType::Ping, nullptr, 0); }
+
+IpcResult IpcSetMonitorCount(std::uint8_t count) {
+    uxspace::ipc::SetMonitorCountPayload payload{};
+    payload.count = count;
+    return IpcRequest(uxspace::ipc::MessageType::SetMonitorCount,
+                      &payload, sizeof(payload));
+}
+
+const char* IpcMessageName(uxspace::ipc::MessageType t) {
+    using uxspace::ipc::MessageType;
+    switch (t) {
+        case MessageType::Ping:            return "Ping";
+        case MessageType::SetMonitorCount: return "SetMonitorCount";
+        case MessageType::SetMonitorMode:  return "SetMonitorMode";
+        case MessageType::Pong:            return "Pong";
+        case MessageType::Ack:             return "Ack";
+        case MessageType::Nack:            return "Nack";
+    }
+    return "?";
+}
+
+const char* IpcErrorName(uxspace::ipc::ErrorCode c) {
+    using uxspace::ipc::ErrorCode;
+    switch (c) {
+        case ErrorCode::None:             return "None";
+        case ErrorCode::UnknownMessage:   return "UnknownMessage";
+        case ErrorCode::VersionMismatch:  return "VersionMismatch";
+        case ErrorCode::InvalidMonitorId: return "InvalidMonitorId";
+        case ErrorCode::InvalidMode:      return "InvalidMode";
+        case ErrorCode::TooManyMonitors:  return "TooManyMonitors";
+        case ErrorCode::DriverBusy:       return "DriverBusy";
+        case ErrorCode::Internal:         return "Internal";
+    }
+    return "?";
+}
+
 // Set when the glasses connect; consumed on the first frame the UxSpace
 // virtual monitor is also live so we can place the cursor on the surface
 // the wearer is actually looking at. The two events are independent, so
@@ -887,6 +1002,32 @@ void DrawDevUI(HWND devWnd) {
     }
     ImGui::Separator();
 
+    // Driver IPC + monitor count (W3)
+    ImGui::Text("Driver IPC:");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Ping")) {
+        const IpcResult r = IpcPing();
+        if (r.ok) uxspace::log::info("ipc: manual Ping -> %s.", IpcMessageName(r.replyType));
+        else      uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s).",
+                                     r.win32Error,
+                                     IpcMessageName(r.replyType),
+                                     IpcErrorName(r.nackCode));
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Monitor count:");
+    for (std::uint8_t n = 1; n <= uxspace::ipc::kMaxMonitors; ++n) {
+        ImGui::SameLine();
+        char label[16]; snprintf(label, sizeof(label), "%u##mcount", n);
+        if (ImGui::SmallButton(label)) {
+            const IpcResult r = IpcSetMonitorCount(n);
+            uxspace::log::info("ipc: SetMonitorCount(%u) -> %s%s%s.", n,
+                               IpcMessageName(r.replyType),
+                               r.replyType == uxspace::ipc::MessageType::Nack ? "/" : "",
+                               r.replyType == uxspace::ipc::MessageType::Nack ? IpcErrorName(r.nackCode) : "");
+        }
+    }
+    ImGui::Separator();
+
     // Pseudo-3D layering (W1.5)
     ImGui::Text("Pseudo-3D: %s", g_pseudo3D ? "ON" : "off");
     ImGui::SameLine();
@@ -1008,6 +1149,24 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // Try the glasses up-front; user can rescan via the UI later.
     TryOpenGlasses();
+
+    // W3: probe the driver's named-pipe control channel. Logged for
+    // diagnostic purposes; failure is non-fatal — the W2 single-monitor
+    // display path keeps working even without IPC.
+    {
+        const IpcResult ping = IpcPing();
+        if (ping.ok && ping.replyType == uxspace::ipc::MessageType::Pong) {
+            uxspace::log::info("ipc: driver pipe Ping OK (Pong received).");
+        } else if (ping.win32Error != 0) {
+            uxspace::log::warn("ipc: driver pipe Ping failed at Win32 layer "
+                               "(err=%lu). Driver may be pre-W3.",
+                               ping.win32Error);
+        } else {
+            uxspace::log::warn("ipc: driver pipe responded with %s/%s.",
+                               IpcMessageName(ping.replyType),
+                               IpcErrorName(ping.nackCode));
+        }
+    }
 
     // Global low-level hooks for the zoom gestures:
     //   - Win+Shift+wheel over the UxSpace display: continuous zoom (mouse hook)

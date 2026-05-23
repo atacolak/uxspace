@@ -20,6 +20,8 @@ Environment:
 // the sample driver does not actually call Trace()/TraceEvents() so this is a no-op for W0.
 // #include "Driver.tmh"
 
+#include <uxspace/ipc.h>
+
 using namespace std;
 using namespace UxSpace::Driver;
 using namespace Microsoft::WRL;
@@ -130,6 +132,192 @@ static IDDCX_TARGET_MODE CreateIddCxTargetMode(DWORD Width, DWORD Height, DWORD 
 
     return Mode;
 }
+
+#pragma endregion
+
+#pragma region PipeServer
+
+// Named-pipe server for the W3 control channel. Runs on a worker
+// thread inside WUDFHost.exe; accepts one client at a time, handles
+// :app -> driver request messages, and sends responses back. The wire
+// format lives in :shared (uxspace/ipc.h) so both ends stay in lockstep.
+//
+// W3 stage B: only Ping is implemented end-to-end (round-trips a Pong
+// header). Other request types are answered with Nack:UnknownMessage.
+// Stage C wires SetMonitorCount; stage D adds SetMonitorMode.
+
+namespace UxSpace::Driver {
+
+class PipeServer
+{
+public:
+    explicit PipeServer(IndirectDeviceContext* owner) : m_owner(owner) {}
+    ~PipeServer() { Stop(); }
+
+    void Start();
+    void Stop();
+
+private:
+    static DWORD WINAPI ThreadProc(LPVOID self);
+    void Run();
+    bool ReadExact(HANDLE pipe, void* buf, DWORD bytes) const;
+    bool WriteAll(HANDLE pipe, const void* buf, DWORD bytes) const;
+    void HandleClient(HANDLE pipe);
+
+    IndirectDeviceContext* m_owner = nullptr;
+    Wrappers::Thread       m_thread;
+    Wrappers::Event        m_terminate;
+};
+
+void PipeServer::Start()
+{
+    if (m_thread.Get() != nullptr) return;
+    m_terminate.Attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    m_thread.Attach(CreateThread(nullptr, 0, &PipeServer::ThreadProc, this, 0, nullptr));
+}
+
+void PipeServer::Stop()
+{
+    if (m_terminate.Get() != nullptr) SetEvent(m_terminate.Get());
+    if (m_thread.Get() != nullptr)
+    {
+        WaitForSingleObject(m_thread.Get(), 2000);
+        m_thread.Close();
+    }
+    m_terminate.Close();
+}
+
+DWORD WINAPI PipeServer::ThreadProc(LPVOID self)
+{
+    static_cast<PipeServer*>(self)->Run();
+    return 0;
+}
+
+void PipeServer::Run()
+{
+    while (WaitForSingleObject(m_terminate.Get(), 0) == WAIT_TIMEOUT)
+    {
+        // PIPE_ACCESS_DUPLEX so we can read requests and write responses.
+        // FILE_FLAG_FIRST_PIPE_INSTANCE asserts no other server owns the
+        // name (defence against a second driver instance accidentally
+        // racing on the same pipe).
+        HANDLE pipe = CreateNamedPipeW(
+            uxspace::ipc::kPipeName,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1,           // max instances
+            4096, 4096,  // out / in buffer sizes
+            0,           // default timeout
+            nullptr);
+        if (pipe == INVALID_HANDLE_VALUE)
+        {
+            // Most common cause: another instance already owns the
+            // pipe. Wait briefly so we don't busy-loop, then retry.
+            if (WaitForSingleObject(m_terminate.Get(), 500) != WAIT_TIMEOUT) break;
+            continue;
+        }
+
+        const BOOL connected = ConnectNamedPipe(pipe, nullptr);
+        if (connected || GetLastError() == ERROR_PIPE_CONNECTED)
+        {
+            HandleClient(pipe);
+            FlushFileBuffers(pipe);
+            DisconnectNamedPipe(pipe);
+        }
+        CloseHandle(pipe);
+    }
+}
+
+bool PipeServer::ReadExact(HANDLE pipe, void* buf, DWORD bytes) const
+{
+    DWORD read = 0;
+    if (!ReadFile(pipe, buf, bytes, &read, nullptr)) return false;
+    return read == bytes;
+}
+
+bool PipeServer::WriteAll(HANDLE pipe, const void* buf, DWORD bytes) const
+{
+    DWORD wrote = 0;
+    if (!WriteFile(pipe, buf, bytes, &wrote, nullptr)) return false;
+    return wrote == bytes;
+}
+
+void PipeServer::HandleClient(HANDLE pipe)
+{
+    using namespace uxspace::ipc;
+
+    auto sendHeader = [&](MessageType type, std::uint32_t payloadBytes,
+                          std::uint32_t requestId) -> bool {
+        Header rsp{};
+        rsp.protocol_version = kProtocolVersion;
+        rsp.type             = type;
+        rsp.payload_bytes    = payloadBytes;
+        rsp.request_id       = requestId;
+        return WriteAll(pipe, &rsp, sizeof(rsp));
+    };
+    auto sendNack = [&](ErrorCode code, std::uint32_t requestId) -> bool {
+        if (!sendHeader(MessageType::Nack, sizeof(NackPayload), requestId)) return false;
+        NackPayload np{};
+        np.code = code;
+        return WriteAll(pipe, &np, sizeof(np));
+    };
+    auto drain = [&](std::uint32_t bytes) -> bool {
+        if (bytes == 0) return true;
+        if (bytes > 1024) return false;  // hostile-client guard
+        BYTE scratch[1024];
+        return ReadExact(pipe, scratch, bytes);
+    };
+
+    for (;;)
+    {
+        Header reqHdr{};
+        if (!ReadExact(pipe, &reqHdr, sizeof(reqHdr))) return;
+
+        if (reqHdr.protocol_version != kProtocolVersion)
+        {
+            if (!drain(reqHdr.payload_bytes)) return;
+            if (!sendNack(ErrorCode::VersionMismatch, reqHdr.request_id)) return;
+            continue;
+        }
+
+        switch (reqHdr.type)
+        {
+        case MessageType::Ping:
+            if (!drain(reqHdr.payload_bytes)) return;
+            if (!sendHeader(MessageType::Pong, 0, reqHdr.request_id)) return;
+            break;
+
+        case MessageType::SetMonitorCount:
+        {
+            if (reqHdr.payload_bytes != sizeof(SetMonitorCountPayload))
+            {
+                if (!drain(reqHdr.payload_bytes)) return;
+                if (!sendNack(ErrorCode::Internal, reqHdr.request_id)) return;
+                break;
+            }
+            SetMonitorCountPayload payload{};
+            if (!ReadExact(pipe, &payload, sizeof(payload))) return;
+            if (payload.count > kMaxMonitors)
+            {
+                if (!sendNack(ErrorCode::TooManyMonitors, reqHdr.request_id)) return;
+                break;
+            }
+            if (m_owner) m_owner->SetMonitorCount(payload.count);
+            if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
+            break;
+        }
+
+        default:
+            // SetMonitorMode lands in stage D; everything else is
+            // genuinely unknown.
+            if (!drain(reqHdr.payload_bytes)) return;
+            if (!sendNack(ErrorCode::UnknownMessage, reqHdr.request_id)) return;
+            break;
+        }
+    }
+}
+
+} // namespace UxSpace::Driver
 
 #pragma endregion
 
@@ -492,6 +680,7 @@ IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) :
 
 IndirectDeviceContext::~IndirectDeviceContext()
 {
+    if (m_PipeServer) m_PipeServer->Stop();
 }
 
 void IndirectDeviceContext::InitAdapter()
@@ -545,6 +734,13 @@ void IndirectDeviceContext::InitAdapter()
         // Store the device context object into the WDF object context
         auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterInitOut.AdapterObject);
         pContext->pContext = this;
+
+        // W3 stages B/C: bring up the named-pipe control channel so
+        // :app can Ping us and adjust the monitor count at runtime.
+        // Failures here aren't fatal — display output continues to
+        // work even if the control channel won't bind.
+        m_PipeServer = std::make_unique<PipeServer>(this);
+        m_PipeServer->Start();
     }
 }
 
@@ -612,7 +808,49 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
         // Tell the OS that the monitor has been plugged in
         IDARG_OUT_MONITORARRIVAL ArrivalOut;
         Status = IddCxMonitorArrival(MonitorCreateOut.MonitorObject, &ArrivalOut);
+
+        if (NT_SUCCESS(Status))
+        {
+            std::lock_guard<std::mutex> lk(m_MonitorsMutex);
+            m_Monitors.push_back(MonitorCreateOut.MonitorObject);
+        }
     }
+}
+
+std::uint8_t IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount)
+{
+    if (targetCount > kUxSpaceMaxMonitors) targetCount = kUxSpaceMaxMonitors;
+
+    std::vector<IDDCX_MONITOR> toRemove;
+    std::uint8_t currentCount = 0;
+    UINT nextConnectorIndex = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_MonitorsMutex);
+        currentCount       = static_cast<std::uint8_t>(m_Monitors.size());
+        nextConnectorIndex = static_cast<UINT>(m_Monitors.size());
+        while (m_Monitors.size() > targetCount)
+        {
+            toRemove.push_back(m_Monitors.back());
+            m_Monitors.pop_back();
+        }
+    }
+
+    // Detach excess monitors outside the lock so we don't hold it
+    // across IddCx framework calls.
+    for (IDDCX_MONITOR mon : toRemove)
+    {
+        IddCxMonitorDeparture(mon);
+        WdfObjectDelete(mon);
+    }
+
+    // Grow up to targetCount.
+    for (std::uint8_t i = currentCount; i < targetCount; ++i)
+    {
+        FinishInit(nextConnectorIndex++);
+    }
+
+    std::lock_guard<std::mutex> lk(m_MonitorsMutex);
+    return static_cast<std::uint8_t>(m_Monitors.size());
 }
 
 IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :

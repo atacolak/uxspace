@@ -12,7 +12,9 @@
 #include <avrt.h>
 #include <wrl.h>
 
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "Trace.h"
@@ -88,6 +90,10 @@ namespace UxSpace
             Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
         };
 
+        // Forward decl — PipeServer is defined in Driver.cpp's anonymous
+        // namespace; we hold a unique_ptr to it by-pointer.
+        class PipeServer;
+
         /// <summary>
         /// Provides a sample implementation of an indirect display driver.
         /// </summary>
@@ -100,9 +106,22 @@ namespace UxSpace
             void InitAdapter();
             void FinishInit(UINT ConnectorIndex);
 
+            // W3 stage C: adjust the number of attached monitors at
+            // runtime. Returns the actual count after the change
+            // (clamped to [0, kUxSpaceMaxMonitors] driver-side). Safe
+            // to call from any thread; the IddCx API itself is
+            // serialised by the framework.
+            std::uint8_t SetMonitorCount(std::uint8_t targetCount);
+
         protected:
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
+            std::unique_ptr<PipeServer> m_PipeServer;
+
+            // Tracks the currently-attached monitor objects so we can
+            // detach the excess when SetMonitorCount shrinks the set.
+            std::vector<IDDCX_MONITOR> m_Monitors;
+            std::mutex m_MonitorsMutex;
         };
 
         class IndirectMonitorContext
