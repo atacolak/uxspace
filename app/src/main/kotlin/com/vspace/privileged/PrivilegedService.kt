@@ -13,6 +13,8 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Orchestrates VSpace's own shell-uid helper: pairs with the device's wireless-debugging
@@ -307,12 +309,61 @@ object PrivilegedService {
     /**
      * Quick vertical swipe to simulate a scroll. `vScroll` matches mouse-wheel convention
      * (positive → scroll up); the swipe goes in the opposite direction on the screen.
+     *
+     * Each `input swipe` blocks ~SCROLL_SWIPE_MS on the helper, so naively queueing one
+     * per touchpad frame backs up rapidly and the scroll "keeps going" after the user has
+     * stopped. Instead we accumulate the pending pixel delta and run a single drainer
+     * that loops until the accumulator is empty — new scrolls during a drain are absorbed
+     * into the next swipe, so the worst-case lag after the user lifts is one swipe.
      */
     fun scrollOnDisplay(displayId: Int, x: Int, y: Int, vScroll: Float) {
-        val pixels = (vScroll * SCROLL_PIXELS_PER_UNIT).toInt().coerceIn(-MAX_SCROLL_PX, MAX_SCROLL_PX)
-        if (pixels == 0) return
-        // Wheel-up (positive) = scroll content up = swipe finger down → toY > fromY.
-        onWorker { service?.swipe(displayId, x, y, x, y + pixels, SCROLL_SWIPE_MS) }
+        val delta = (vScroll * SCROLL_PIXELS_PER_UNIT).toInt()
+        if (delta == 0) return
+        pendingScrollPixels.addAndGet(delta)
+        pendingScrollDisplayId = displayId
+        pendingScrollX = x
+        pendingScrollY = y
+        scheduleScrollDrain()
+    }
+
+    private val pendingScrollPixels = AtomicInteger(0)
+
+    @Volatile
+    private var pendingScrollDisplayId = -1
+
+    @Volatile
+    private var pendingScrollX = 0
+
+    @Volatile
+    private var pendingScrollY = 0
+
+    private val scrollDrainScheduled = AtomicBoolean(false)
+
+    private fun scheduleScrollDrain() {
+        if (!scrollDrainScheduled.compareAndSet(false, true)) return
+        worker.execute {
+            try {
+                while (true) {
+                    val raw = pendingScrollPixels.getAndSet(0)
+                    if (raw == 0) break
+                    val pixels = raw.coerceIn(-MAX_SCROLL_PX, MAX_SCROLL_PX)
+                    val helper = service ?: break
+                    val displayId = pendingScrollDisplayId
+                    val x = pendingScrollX
+                    val y = pendingScrollY
+                    if (displayId < 0) break
+                    runCatching {
+                        // Wheel-up (positive) = scroll content up = swipe finger down.
+                        helper.swipe(displayId, x, y, x, y + pixels, SCROLL_SWIPE_MS)
+                    }
+                }
+            } finally {
+                scrollDrainScheduled.set(false)
+                // A delta may have landed in the brief window after the loop checked the
+                // accumulator and before we cleared the scheduled flag — re-arm if so.
+                if (pendingScrollPixels.get() != 0) scheduleScrollDrain()
+            }
+        }
     }
 
     /** Two-finger pinch — delegated straight to the helper. */
