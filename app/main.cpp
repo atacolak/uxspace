@@ -189,6 +189,7 @@ struct IpcResult {
     uxspace::ipc::MessageType replyType   = uxspace::ipc::MessageType::Nack;
     uxspace::ipc::ErrorCode  nackCode     = uxspace::ipc::ErrorCode::Internal;
     DWORD                    win32Error   = 0;
+    char                     nackMessage[128] = {};  // ASCII diagnostic from driver
 };
 
 IpcResult IpcRequest(uxspace::ipc::MessageType type,
@@ -242,6 +243,11 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
         NackPayload np{};
         ReadFile(pipe, &np, sizeof(np), &read, nullptr);
         r.nackCode = np.code;
+        // Defensive copy + NUL-terminate so we can pass to %s without
+        // worrying about driver-side termination.
+        std::memcpy(r.nackMessage, np.message,
+                    std::min(sizeof(r.nackMessage) - 1, sizeof(np.message)));
+        r.nackMessage[sizeof(r.nackMessage) - 1] = '\0';
     } else if (rsp.payload_bytes > 0) {
         std::vector<BYTE> scratch(rsp.payload_bytes);
         ReadFile(pipe, scratch.data(), rsp.payload_bytes, &read, nullptr);
@@ -1008,10 +1014,11 @@ void DrawDevUI(HWND devWnd) {
     if (ImGui::SmallButton("Ping")) {
         const IpcResult r = IpcPing();
         if (r.ok) uxspace::log::info("ipc: manual Ping -> %s.", IpcMessageName(r.replyType));
-        else      uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s).",
+        else      uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s: %s).",
                                      r.win32Error,
                                      IpcMessageName(r.replyType),
-                                     IpcErrorName(r.nackCode));
+                                     IpcErrorName(r.nackCode),
+                                     r.nackMessage);
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Monitor count:");
@@ -1020,10 +1027,14 @@ void DrawDevUI(HWND devWnd) {
         char label[16]; snprintf(label, sizeof(label), "%u##mcount", n);
         if (ImGui::SmallButton(label)) {
             const IpcResult r = IpcSetMonitorCount(n);
-            uxspace::log::info("ipc: SetMonitorCount(%u) -> %s%s%s.", n,
-                               IpcMessageName(r.replyType),
-                               r.replyType == uxspace::ipc::MessageType::Nack ? "/" : "",
-                               r.replyType == uxspace::ipc::MessageType::Nack ? IpcErrorName(r.nackCode) : "");
+            if (r.replyType == uxspace::ipc::MessageType::Nack) {
+                uxspace::log::warn("ipc: SetMonitorCount(%u) -> Nack/%s: %s", n,
+                                   IpcErrorName(r.nackCode),
+                                   r.nackMessage);
+            } else {
+                uxspace::log::info("ipc: SetMonitorCount(%u) -> %s.", n,
+                                   IpcMessageName(r.replyType));
+            }
         }
     }
     ImGui::Separator();
@@ -1150,21 +1161,29 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Try the glasses up-front; user can rescan via the UI later.
     TryOpenGlasses();
 
-    // W3: probe the driver's named-pipe control channel. Logged for
-    // diagnostic purposes; failure is non-fatal — the W2 single-monitor
-    // display path keeps working even without IPC.
+    // W3: probe the driver's named-pipe control channel. Retried a few
+    // times with backoff because the driver's pipe-server thread starts
+    // shortly after WUDFHost loads us — there's a tiny race window
+    // where the pipe doesn't exist yet on a fresh boot.
     {
-        const IpcResult ping = IpcPing();
+        IpcResult ping;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            ping = IpcPing();
+            if (ping.ok || ping.win32Error == 0) break;
+            Sleep(250);
+        }
         if (ping.ok && ping.replyType == uxspace::ipc::MessageType::Pong) {
             uxspace::log::info("ipc: driver pipe Ping OK (Pong received).");
         } else if (ping.win32Error != 0) {
-            uxspace::log::warn("ipc: driver pipe Ping failed at Win32 layer "
-                               "(err=%lu). Driver may be pre-W3.",
+            uxspace::log::warn("ipc: driver pipe Ping never came up after retries "
+                               "(last err=%lu). Driver may be pre-W3 or the pipe "
+                               "is being held by another process.",
                                ping.win32Error);
         } else {
-            uxspace::log::warn("ipc: driver pipe responded with %s/%s.",
+            uxspace::log::warn("ipc: driver pipe responded with %s/%s: %s",
                                IpcMessageName(ping.replyType),
-                               IpcErrorName(ping.nackCode));
+                               IpcErrorName(ping.nackCode),
+                               ping.nackMessage);
         }
     }
 

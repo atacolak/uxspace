@@ -255,11 +255,18 @@ void PipeServer::HandleClient(HANDLE pipe)
         rsp.request_id       = requestId;
         return WriteAll(pipe, &rsp, sizeof(rsp));
     };
-    auto sendNack = [&](ErrorCode code, std::uint32_t requestId) -> bool {
+    auto sendNackMsg = [&](ErrorCode code, std::uint32_t requestId, const char* msg) -> bool {
         if (!sendHeader(MessageType::Nack, sizeof(NackPayload), requestId)) return false;
         NackPayload np{};
         np.code = code;
+        if (msg) {
+            // strncpy is fine for fixed-size char arrays; ensure NUL-termination.
+            strncpy_s(np.message, sizeof(np.message), msg, _TRUNCATE);
+        }
         return WriteAll(pipe, &np, sizeof(np));
+    };
+    auto sendNack = [&](ErrorCode code, std::uint32_t requestId) -> bool {
+        return sendNackMsg(code, requestId, nullptr);
     };
     auto drain = [&](std::uint32_t bytes) -> bool {
         if (bytes == 0) return true;
@@ -291,18 +298,29 @@ void PipeServer::HandleClient(HANDLE pipe)
         {
             if (reqHdr.payload_bytes != sizeof(SetMonitorCountPayload))
             {
+                char diag[124];
+                _snprintf_s(diag, sizeof(diag), _TRUNCATE,
+                            "SetMonitorCount payload expected %zu bytes, got %u",
+                            sizeof(SetMonitorCountPayload),
+                            (unsigned) reqHdr.payload_bytes);
                 if (!drain(reqHdr.payload_bytes)) return;
-                if (!sendNack(ErrorCode::Internal, reqHdr.request_id)) return;
+                if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
                 break;
             }
             SetMonitorCountPayload payload{};
             if (!ReadExact(pipe, &payload, sizeof(payload))) return;
             if (payload.count > kMaxMonitors)
             {
-                if (!sendNack(ErrorCode::TooManyMonitors, reqHdr.request_id)) return;
+                char diag[124];
+                _snprintf_s(diag, sizeof(diag), _TRUNCATE,
+                            "count=%u > max=%u",
+                            (unsigned) payload.count, (unsigned) kMaxMonitors);
+                if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
-            if (m_owner) m_owner->SetMonitorCount(payload.count);
+            std::uint8_t actual = 0;
+            if (m_owner) actual = m_owner->SetMonitorCount(payload.count);
+            (void) actual;
             if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
             break;
         }
