@@ -21,6 +21,7 @@ Environment:
 // #include "Driver.tmh"
 
 #include <uxspace/ipc.h>
+#include <sddl.h>
 
 using namespace std;
 using namespace UxSpace::Driver;
@@ -195,6 +196,24 @@ DWORD WINAPI PipeServer::ThreadProc(LPVOID self)
 
 void PipeServer::Run()
 {
+    // Build a security descriptor that lets Authenticated Users + the
+    // creating SYSTEM/Administrators talk to the pipe. WUDFHost runs the
+    // driver as a service principal, so the default DACL would lock the
+    // user-mode :app out with ERROR_ACCESS_DENIED (err=5).
+    //   D:(A;;FA;;;AU)  → AuthenticatedUsers Full Access
+    //   (A;;FA;;;BA)    → Built-in Administrators Full Access
+    //   (A;;FA;;;SY)    → SYSTEM Full Access
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;FA;;;AU)(A;;FA;;;BA)(A;;FA;;;SY)",
+            SDDL_REVISION_1, &psd, nullptr)) {
+        psd = nullptr;
+    }
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength              = sizeof(sa);
+    sa.lpSecurityDescriptor = psd;
+    sa.bInheritHandle       = FALSE;
+
     while (WaitForSingleObject(m_terminate.Get(), 0) == WAIT_TIMEOUT)
     {
         // PIPE_ACCESS_DUPLEX so we can read requests and write responses.
@@ -208,7 +227,7 @@ void PipeServer::Run()
             1,           // max instances
             4096, 4096,  // out / in buffer sizes
             0,           // default timeout
-            nullptr);
+            psd ? &sa : nullptr);
         if (pipe == INVALID_HANDLE_VALUE)
         {
             // Most common cause: another instance already owns the
@@ -226,6 +245,8 @@ void PipeServer::Run()
         }
         CloseHandle(pipe);
     }
+
+    if (psd) LocalFree(psd);
 }
 
 bool PipeServer::ReadExact(HANDLE pipe, void* buf, DWORD bytes) const
@@ -298,7 +319,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1122";
+            static const char kBuildStamp[] = "v20260523-1135";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
