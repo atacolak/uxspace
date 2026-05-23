@@ -1,15 +1,26 @@
-// Stereo camera. W1 is PINNED-only: head pose is identity; the per-eye
-// view is purely the inverse of the eye-offset translation. W2 will plug
-// in an inverse head pose for `Camera.FREE`; see docs/ROADMAP.md.
+// Stereo camera with two view modes (PINNED / FREE) per
+// docs/ARCHITECTURE.md §8.
+//
+//   PINNED: head pose is ignored. Quads are head-locked.
+//   FREE:   the inverse of the head pose is applied so quads stay in
+//           world space while the wearer looks around them.
+//
+// The per-eye view always pre-multiplies an eye-offset translation
+// (±ipdMeters/2 in X). headPose is in metres + DirectXMath quaternion
+// (XMFLOAT4 = x, y, z, w) in the same left-handed convention as the
+// rest of the scene.
 //
 // Coordinate convention: left-handed (D3D default). +X right, +Y up,
 // +Z forward. A surface at world (0,0,2) is two metres in front of the
-// camera.
+// camera at identity pose.
 
 #pragma once
 
 #include <cstdint>
 #include <DirectXMath.h>
+
+#include <uxspace/tracking/HeadPose.h>
+#include <uxspace/tracking/ViewMode.h>
 
 namespace uxspace::spatial {
 
@@ -21,6 +32,9 @@ struct StereoCamera {
     float aspect       = 16.0f / 9.0f;
     float nearZ        = 0.05f;
     float farZ         = 100.0f;
+
+    uxspace::tracking::ViewMode mode     = uxspace::tracking::ViewMode::PINNED;
+    uxspace::tracking::HeadPose headPose;  // identity unless explicitly set
 
     DirectX::XMMATRIX view(Eye eye) const;
     DirectX::XMMATRIX projection() const;

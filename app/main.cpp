@@ -19,12 +19,15 @@
 #include <backends/imgui_impl_dx11.h>
 
 #include <uxspace/ipc.h>
+#include <uxspace/log.h>
 #include <uxspace/spatial/VirtualScreen.h>
 #include <uxspace/spatial/Renderer.h>
 #include <uxspace/spatial/Camera.h>
 #include <uxspace/spatial/Surface3D.h>
 #include <uxspace/spatial/Scene.h>
 #include <uxspace/spatial/GlassesOutput.h>
+#include <uxspace/tracking/HeadPose.h>
+#include <uxspace/tracking/ViewMode.h>
 #include <uxspace/viture/VitureTracker.h>
 
 #include <algorithm>
@@ -124,6 +127,8 @@ sp::StereoCamera     g_camera;
 sp::GlassesOutput    g_glasses;
 DevPreview           g_devPreview;
 uxspace::viture::VitureTracker g_tracker;
+uxspace::tracking::ViewMode    g_viewMode = uxspace::tracking::ViewMode::PINNED;
+constexpr int                  kHotkeyRecenter = 2;
 int                  g_screenBandIndex = 2;            // index into kScreenBandPresets (default = 0.90)
 
 // --- Zoom (Win+Shift+wheel over the UxSpace virtual monitor) -------------
@@ -188,29 +193,59 @@ bool WinAndShiftHeld() {
     return winDown && shiftDown;
 }
 
-// Forward decl: cycles the screen-band preset. Defined alongside the
-// dev-UI code that owns g_screenBandIndex.
+// Forward decls — definitions live alongside the dev-UI / tracker code.
 void CycleScreenBand();
+void AdjustZoom(float delta);
+void ToggleViewMode();
+void RecenterTracker();
 
-// Global hotkey: Win+Shift+Z cycles the screen-band preset (0.80 / 0.85
-// / 0.90) regardless of which app has focus. The keyboard hook also
-// consumes the Z keypress so the focused app doesn't receive a stray
-// character.
+// Global hotkeys, all gated on Win+Shift held + a key press transition:
+//   Z       → cycle screen-band preset (0.80 / 0.85 / 0.90)
+//   + / =   → zoom in by kZoomStep (covers both shifted and unshifted)
+//   - / _   → zoom out by kZoomStep
+//   X       → toggle view mode (PINNED ↔ FREE — "tracking on/off")
+//   R       → recenter: wearer's current physical pose becomes the new origin
+//
+// The hook consumes the keystroke when it acts, so the focused app
+// doesn't receive a stray character.
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    static bool zHeld = false;
+    static bool held[256] = {};
     if (nCode == HC_ACTION) {
         const auto* info = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
-        const bool down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
-        const bool up   = (wParam == WM_KEYUP   || wParam == WM_SYSKEYUP);
-        if (info->vkCode == 'Z') {
-            if (down && !zHeld) {
-                zHeld = true;
-                if (WinAndShiftHeld()) {
+        const bool down  = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        const bool up    = (wParam == WM_KEYUP   || wParam == WM_SYSKEYUP);
+        const DWORD vk   = info->vkCode;
+        if (vk >= std::size(held)) return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+        if (up)   { held[vk] = false; }
+        if (down && !held[vk]) {
+            held[vk] = true;
+            if (WinAndShiftHeld()) {
+                switch (vk) {
+                case 'Z':
+                    uxspace::log::info("hotkey: Win+Shift+Z (cycle screen band).");
                     CycleScreenBand();
-                    return 1; // consume so focused app doesn't see Z
+                    return 1;
+                case 'X':
+                    uxspace::log::info("hotkey: Win+Shift+X (toggle view mode).");
+                    ToggleViewMode();
+                    return 1;
+                case 'R':
+                    uxspace::log::info("hotkey: Win+Shift+R (recenter).");
+                    RecenterTracker();
+                    return 1;
+                case VK_OEM_PLUS:
+                case VK_ADD:
+                    uxspace::log::info("hotkey: Win+Shift++ (zoom in).");
+                    AdjustZoom(+kZoomStep);
+                    return 1;
+                case VK_OEM_MINUS:
+                case VK_SUBTRACT:
+                    uxspace::log::info("hotkey: Win+Shift+- (zoom out).");
+                    AdjustZoom(-kZoomStep);
+                    return 1;
+                default: break;
                 }
-            } else if (up) {
-                zHeld = false;
             }
         }
     }
@@ -253,6 +288,44 @@ void UpdateZoomFromCursor() {
                 / float(std::max<LONG>(1, rect.bottom - rect.top)),
         };
     }
+}
+
+// Updates g_zoomFocusUV from the cursor's current position when the
+// cursor is on the UxSpace virtual monitor; otherwise keeps the last
+// focus. Used by the keyboard zoom hotkeys (Win+Shift++ / Win+Shift+-)
+// so a quick keyboard zoom-in re-centres on whatever the user is
+// looking at via the cursor.
+void RefreshZoomFocusFromCursor() {
+    if (!g_vscreen.present()) return;
+    POINT p{};
+    if (!GetCursorPos(&p)) return;
+    const RECT r = g_vscreen.desktopRect();
+    if (!CursorInRect(p, r)) return;
+    g_zoomFocusUV = {
+        float(p.x - r.left) / float(std::max<LONG>(1, r.right  - r.left)),
+        float(p.y - r.top ) / float(std::max<LONG>(1, r.bottom - r.top)),
+    };
+}
+
+void AdjustZoom(float delta) {
+    RefreshZoomFocusFromCursor();
+    const float before = g_zoomLevel;
+    g_zoomLevel = std::clamp(g_zoomLevel + delta, kZoomMin, kZoomMax);
+    uxspace::log::info("zoom: %.2fx -> %.2fx (focus %.2f, %.2f).",
+                       before, g_zoomLevel, g_zoomFocusUV.x, g_zoomFocusUV.y);
+}
+
+void ToggleViewMode() {
+    using uxspace::tracking::ViewMode;
+    g_viewMode = (g_viewMode == ViewMode::FREE) ? ViewMode::PINNED : ViewMode::FREE;
+    uxspace::log::info("view mode: %s%s",
+                       g_viewMode == ViewMode::FREE ? "FREE" : "PINNED",
+                       g_viewMode == ViewMode::FREE && !g_tracker.isConnected()
+                           ? " (no tracker — still rendering PINNED)" : "");
+}
+
+void RecenterTracker() {
+    g_tracker.recenter();
 }
 
 DirectX::XMFLOAT4 ComputeZoomUVRect() {
@@ -445,9 +518,15 @@ void UpdateScene() {
 
 void TryOpenGlasses() {
     sp::GlassesOutput::DetectedMonitor m;
-    if (!sp::GlassesOutput::find(kGlassesNameMatch, m, &g_lastSeenMonitors)) return;
+    if (!sp::GlassesOutput::find(kGlassesNameMatch, m, &g_lastSeenMonitors)) {
+        uxspace::log::info("glasses: TryOpenGlasses — no matching monitor; will retry on next display change.");
+        return;
+    }
     if (g_glasses.open(g_d3d.device.Get(), m)) {
         g_pendingCenterCursorOnUxSpace = true;
+        uxspace::log::info("glasses: TryOpenGlasses — opened, will centre cursor on UxSpace on next vscreen tick.");
+    } else {
+        uxspace::log::warn("glasses: TryOpenGlasses — match found but open() returned false.");
     }
 }
 
@@ -478,11 +557,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DISPLAYCHANGE:
         // Display topology changed (hotplug, mode change, etc.).
+        uxspace::log::info("event: WM_DISPLAYCHANGE (depth=%u, size=%ux%u).",
+                           static_cast<unsigned>(wp), LOWORD(lp), HIWORD(lp));
         RefreshGlassesState();
         return 0;
     case WM_HOTKEY:
         if (wp == kHotkeyTogglePseudo3D) {
             g_pseudo3D = !g_pseudo3D;
+            uxspace::log::info("hotkey: Win+Shift+D pseudo-3D -> %s.",
+                               g_pseudo3D ? "ON" : "off");
         }
         return 0;
     case WM_DESTROY:
@@ -535,8 +618,12 @@ void DrawHotkeysWindow() {
             ImGui::TableNextColumn(); ImGui::TextUnformatted(action);
         };
         row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x).");
+        row("Win+Shift++",     "global", "Zoom in by 0.25x (keyboard alternative).");
+        row("Win+Shift+-",     "global", "Zoom out by 0.25x.");
         row("Win+Shift+Z",     "global", "Cycle screen band (0.80 / 0.85 / 0.90).");
         row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
+        row("Win+Shift+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
+        row("Win+Shift+R",     "global", "Recenter: wearer's current physical pose becomes the new origin.");
         ImGui::EndTable();
     }
     ImGui::End();
@@ -765,17 +852,27 @@ void DrawDevUI(HWND devWnd) {
     ImGui::Separator();
 
     // Head tracker (W2)
+    using uxspace::tracking::ViewMode;
     if (g_tracker.isConnected()) {
         ImGui::Text("Tracker: %s  (%s)",
                     g_tracker.deviceName().c_str(),
                     g_tracker.supportsTranslation() ? "6DOF" : "3DOF");
         ImGui::SameLine();
         if (ImGui::SmallButton("Stop###tracker")) g_tracker.stop();
+
+        const auto& p = g_camera.headPose;
+        ImGui::Text("View: %s   (Win+Shift+X to toggle, Win+Shift+R to recenter)",
+                    g_camera.mode == ViewMode::FREE ? "FREE" : "PINNED");
+        ImGui::Text("Pose: pos=[%+.3f %+.3f %+.3f] q=[%+.3f %+.3f %+.3f %+.3f] valid=%d",
+                    p.position.x, p.position.y, p.position.z,
+                    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w,
+                    p.valid ? 1 : 0);
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
                            "Tracker: not connected.");
         ImGui::SameLine();
         if (ImGui::SmallButton("Connect###tracker")) g_tracker.start();
+        ImGui::TextDisabled("View: PINNED (no tracker)");
     }
     ImGui::Separator();
 
@@ -850,6 +947,24 @@ void DrawDevUI(HWND devWnd) {
 } // namespace
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // Open the diagnostic log first thing — every subsequent step
+    // (D3D init, glasses discovery, tracker probe) records here, so a
+    // user reporting a problem can just ship %TEMP%\UxSpace-app.log.
+    {
+        wchar_t tempDir[MAX_PATH] = {};
+        wchar_t logPath[MAX_PATH] = {};
+        if (GetTempPathW(MAX_PATH, tempDir) > 0) {
+            swprintf_s(logPath, L"%sUxSpace-app.log", tempDir);
+            uxspace::log::init(logPath);
+        }
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        uxspace::log::info("UxSpace boot at %04u-%02u-%02u %02u:%02u:%02u.",
+                           st.wYear, st.wMonth, st.wDay,
+                           st.wHour, st.wMinute, st.wSecond);
+        uxspace::log::info("Log file: %ls", logPath);
+    }
+
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = WndProc;
@@ -931,7 +1046,15 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // which triggers WM_DISPLAYCHANGE → RefreshGlassesState reopens
         // the glasses on the new wider mode automatically.
         if (g_pendingTrackerStart) {
-            g_tracker.start();
+            uxspace::log::info("main: invoking deferred tracker.start() (frame 2).");
+            const bool ok = g_tracker.start();
+            uxspace::log::info("main: tracker.start() returned %s; connected=%d.",
+                               ok ? "true" : "false",
+                               g_tracker.isConnected() ? 1 : 0);
+            // Default to FREE on first successful connect so the wearer
+            // gets head tracking out of the box; explicit Win+Shift+X
+            // toggles back to PINNED.
+            if (ok) g_viewMode = uxspace::tracking::ViewMode::FREE;
             g_pendingTrackerStart = false;
         }
 
@@ -953,6 +1076,18 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // recycles its SRV on ACCESS_LOST, so the pointer is only valid
         // this frame.
         UpdateZoomFromCursor();
+
+        // Push the tracker's latest head pose into the camera. If the
+        // user has requested FREE but the tracker isn't producing,
+        // render PINNED anyway — the user's intent stays sticky, the
+        // visible behaviour falls back gracefully.
+        {
+            using uxspace::tracking::ViewMode;
+            g_camera.headPose = g_tracker.latestPose();
+            g_camera.mode     = (g_viewMode == ViewMode::FREE && g_tracker.isConnected())
+                                ? ViewMode::FREE : ViewMode::PINNED;
+        }
+
         UpdateScene();
 
         // Render to glasses (if open). Stereo or mono depending on whether
@@ -979,5 +1114,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    uxspace::log::info("UxSpace exit.");
+    uxspace::log::shutdown();
     return 0;
 }

@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <vector>
 
+#include <uxspace/log.h>
+
 namespace uxspace::spatial {
 
 using Microsoft::WRL::ComPtr;
@@ -137,29 +139,84 @@ bool GlassesOutput::find(std::wstring_view nameSubstring,
                          DetectedMonitor& match,
                          std::vector<DetectedMonitor>* all) {
     auto monitors = enumerateActiveMonitors();
+    uxspace::log::info("glasses: DisplayConfig enumerated %zu active monitors:",
+                       monitors.size());
+    for (const auto& m : monitors) {
+        uxspace::log::info("glasses:   %ls => '%ls'",
+                           m.deviceName.c_str(), m.friendlyName.c_str());
+    }
     if (all) *all = monitors;
     for (const auto& m : monitors) {
         if (m.friendlyName.find(nameSubstring) != std::wstring::npos) {
             match = m;
+            uxspace::log::info("glasses: matched '%ls' against substring '%.*ls'.",
+                               m.friendlyName.c_str(),
+                               static_cast<int>(nameSubstring.size()),
+                               nameSubstring.data());
             return true;
         }
     }
+    uxspace::log::warn("glasses: no monitor matched substring '%.*ls'.",
+                       static_cast<int>(nameSubstring.size()),
+                       nameSubstring.data());
     return false;
 }
 
 bool GlassesOutput::open(ID3D11Device* device, const DetectedMonitor& monitor) {
     close();
 
+    uxspace::log::info("glasses: open() begin for '%ls' (%ls).",
+                       monitor.friendlyName.c_str(), monitor.deviceName.c_str());
+
     if (!findDxgiOutputByDeviceName(monitor.deviceName, output_)) {
+        uxspace::log::error("glasses: open() failed — DXGI couldn't find output '%ls'.",
+                            monitor.deviceName.c_str());
         return false;
     }
 
     const DXGI_MODE_DESC mode = pickBestMode(output_.Get());
-    if (mode.Width == 0 || mode.Height == 0) return false;
+    if (mode.Width == 0 || mode.Height == 0) {
+        uxspace::log::error("glasses: open() failed — no display modes returned for '%ls'.",
+                            monitor.deviceName.c_str());
+        return false;
+    }
+    const double hz = mode.RefreshRate.Denominator
+        ? static_cast<double>(mode.RefreshRate.Numerator) / mode.RefreshRate.Denominator
+        : 0.0;
+    uxspace::log::info("glasses: picked mode %ux%u @ %.2f Hz (format=%d).",
+                       mode.Width, mode.Height, hz, mode.Format);
 
     DXGI_OUTPUT_DESC od{};
     output_->GetDesc(&od);
     const RECT& r = od.DesktopCoordinates;
+
+    // Log which adapter the passed-in device sits on, and which adapter
+    // the target output sits on. On multi-GPU laptops (e.g. AMD iGPU +
+    // NVIDIA dGPU) these can differ; if they do, CreateSwapChainForHwnd
+    // with restrictToOutput on the *other* adapter fails. We try
+    // restricted first (lets the OS optimise the fullscreen-flip path)
+    // and fall back to unrestricted if that fails.
+    {
+        ComPtr<IDXGIDevice>  ddev;
+        ComPtr<IDXGIAdapter> dad;
+        DXGI_ADAPTER_DESC    dadDesc{};
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&ddev))) &&
+            SUCCEEDED(ddev->GetAdapter(&dad)) &&
+            SUCCEEDED(dad->GetDesc(&dadDesc))) {
+            uxspace::log::info("glasses: D3D device is on adapter '%ls' "
+                               "(vid=0x%04X did=0x%04X).",
+                               dadDesc.Description, dadDesc.VendorId, dadDesc.DeviceId);
+        }
+        ComPtr<IDXGIAdapter> outAd;
+        if (SUCCEEDED(output_->GetParent(IID_PPV_ARGS(&outAd)))) {
+            DXGI_ADAPTER_DESC outDesc{};
+            if (SUCCEEDED(outAd->GetDesc(&outDesc))) {
+                uxspace::log::info("glasses: output is on adapter '%ls' "
+                                   "(vid=0x%04X did=0x%04X).",
+                                   outDesc.Description, outDesc.VendorId, outDesc.DeviceId);
+            }
+        }
+    }
 
     ensureHostClassRegistered();
     host_ = CreateWindowExW(
@@ -168,11 +225,18 @@ bool GlassesOutput::open(ID3D11Device* device, const DetectedMonitor& monitor) {
         WS_POPUP,
         r.left, r.top, r.right - r.left, r.bottom - r.top,
         nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (!host_) return false;
+    if (!host_) {
+        uxspace::log::error("glasses: open() failed — CreateWindowExW returned NULL (GetLastError=%lu).",
+                            GetLastError());
+        return false;
+    }
 
-    // Fresh factory for the same reason as findDxgiOutputByDeviceName.
     ComPtr<IDXGIFactory2> factory;
-    if (!createFreshFactory(factory)) { DestroyWindow(host_); host_ = nullptr; return false; }
+    if (!createFreshFactory(factory)) {
+        uxspace::log::error("glasses: open() failed — createFreshFactory() returned false.");
+        DestroyWindow(host_); host_ = nullptr;
+        return false;
+    }
 
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width       = mode.Width;
@@ -190,22 +254,41 @@ bool GlassesOutput::open(ID3D11Device* device, const DetectedMonitor& monitor) {
     fd.ScanlineOrdering = mode.ScanlineOrdering;
     fd.Windowed         = TRUE;
 
-    // Borderless fullscreen on the target output via a WS_POPUP HWND that
-    // exactly covers the output's desktop rectangle. We skip the legacy
-    // SetFullscreenState(TRUE, output) path: with FLIP_DISCARD the modern
-    // fullscreen-flip optimisation kicks in automatically when the HWND
-    // covers a single output, and we avoid the SetFullscreenState
-    // fragility (Alt-Tab, mode-change loops, focus-loss restore).
-    if (FAILED(factory->CreateSwapChainForHwnd(device, host_, &sd, &fd,
-                                               output_.Get(), &swap_))) {
-        DestroyWindow(host_);
-        host_ = nullptr;
-        return false;
+    // Try restricted first, then unrestricted on failure. The
+    // restricted-to-output mode is just an OS hint for fullscreen-flip
+    // optimisation; passing nullptr drops that hint but lets the OS
+    // route presents to whichever output the HWND covers (which is
+    // already pinned over the glasses' desktop coords).
+    HRESULT hr = factory->CreateSwapChainForHwnd(device, host_, &sd, &fd,
+                                                 output_.Get(), &swap_);
+    if (FAILED(hr)) {
+        uxspace::log::warn("glasses: CreateSwapChainForHwnd(restrictToOutput=output) "
+                           "failed: hr=0x%08X. Retrying without restrictToOutput.",
+                           static_cast<unsigned>(hr));
+        hr = factory->CreateSwapChainForHwnd(device, host_, &sd, &fd,
+                                             nullptr, &swap_);
+        if (FAILED(hr)) {
+            uxspace::log::error("glasses: CreateSwapChainForHwnd(restrictToOutput=null) "
+                                "also failed: hr=0x%08X. Likely cross-GPU mismatch "
+                                "(device on adapter A, output on adapter B).",
+                                static_cast<unsigned>(hr));
+            DestroyWindow(host_);
+            host_ = nullptr;
+            return false;
+        }
+        uxspace::log::info("glasses: unrestricted swap chain created OK.");
+    } else {
+        uxspace::log::info("glasses: restricted swap chain created OK.");
     }
 
     ComPtr<ID3D11Texture2D> back;
-    if (FAILED(swap_->GetBuffer(0, IID_PPV_ARGS(&back)))) { close(); return false; }
+    if (FAILED(swap_->GetBuffer(0, IID_PPV_ARGS(&back)))) {
+        uxspace::log::error("glasses: open() failed — swap_->GetBuffer(0) failed.");
+        close();
+        return false;
+    }
     if (FAILED(device->CreateRenderTargetView(back.Get(), nullptr, &rtv_))) {
+        uxspace::log::error("glasses: open() failed — CreateRenderTargetView failed.");
         close();
         return false;
     }
@@ -218,6 +301,8 @@ bool GlassesOutput::open(ID3D11Device* device, const DetectedMonitor& monitor) {
     refreshDen_   = mode.RefreshRate.Denominator ? mode.RefreshRate.Denominator : 1;
     deviceName_   = monitor.deviceName;
     friendlyName_ = monitor.friendlyName;
+    uxspace::log::info("glasses: open() OK — swap chain on '%ls', stereo=%d.",
+                       monitor.friendlyName.c_str(), isStereoMode() ? 1 : 0);
     return true;
 }
 

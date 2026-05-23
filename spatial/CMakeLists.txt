@@ -17,6 +17,7 @@ target_include_directories(uxspace_spatial PUBLIC
 
 target_link_libraries(uxspace_spatial PUBLIC
     uxspace::shared
+    uxspace::tracking
     d3d11
     dxgi
     d3dcompiler

@@ -52,7 +52,8 @@ target_include_directories(uxspace_viture
 
 target_link_libraries(uxspace_viture
     PUBLIC  uxspace::tracking
-    PRIVATE ${_VITURE_LIB}
+    PRIVATE uxspace::shared
+            ${_VITURE_LIB}
             setupapi
             hid
 )

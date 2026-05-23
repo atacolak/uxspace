@@ -120,13 +120,20 @@ New-Item -ItemType Directory $wixOutDir | Out-Null
 $driverMsi = Join-Path $wixOutDir "UxSpaceDriver-v$VersionLabel.msi"
 $appMsi    = Join-Path $wixOutDir "UxSpaceApp-v$VersionLabel.msi"
 
+# -arch x64 marks the MSI as 64-bit so ProgramFiles64Folder resolves
+# to "C:\Program Files\..." instead of being redirected by WoW64 to
+# "C:\Program Files (x86)\...". Driver components (Bitness="always64")
+# need this. App doesn't strictly need it (it installs under
+# LocalAppDataFolder) but staying consistent costs nothing.
 & wix build "$wixSrcDir\UxSpaceDriver.wxs" `
+    -arch x64 `
     -d "Version=$msiVer" `
     -d "DriverDir=$driverPkg" `
     -o $driverMsi
 if ($LASTEXITCODE -ne 0) { throw "Driver MSI build failed." }
 
 & wix build "$wixSrcDir\UxSpaceApp.wxs" `
+    -arch x64 `
     -d "Version=$msiVer" `
     -d "AppDir=$appBinDir" `
     -o $appMsi

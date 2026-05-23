@@ -15,21 +15,24 @@ function Log($msg) {
 
 Log "Install begin. CWD=$here"
 
-# Test signing must be on. If not, fail cleanly with instructions.
-$bcd = bcdedit /enum '{current}' | Out-String
-if ($bcd -notmatch 'testsigning\s+Yes') {
-    Log "ERROR: Test signing is not enabled."
-    Write-Host @"
-
-  Test signing is not enabled on this machine.
-  Run an Administrator PowerShell:
-      bcdedit /set testsigning on
-  Reboot, then re-run this installer.
-
-"@ -ForegroundColor Red
-    exit 1
+# Best-effort test-signing diagnostic — log it but don't gate the
+# install on it. The PowerShell-vs-bcdedit `{current}` tokenisation is
+# fragile across shells/contexts; if testsigning is actually off,
+# pnputil below will reject the package with a meaningful error and we
+# get a cleaner failure than misreporting here.
+try {
+    $bcd = & 'C:\Windows\System32\cmd.exe' /c 'bcdedit /enum {current}' 2>&1 | Out-String
+    if ($bcd -match 'testsigning\s+Yes') {
+        Log "Test signing: ON (per bcdedit)."
+    } elseif ($bcd -match 'testsigning\s+No') {
+        Log "Test signing: OFF (per bcdedit). Driver install will likely fail; bcdedit /set testsigning on + reboot."
+    } else {
+        Log ("Test signing: could not determine from bcdedit. Raw output: " +
+             ($bcd -replace '\r?\n', ' | ').Substring(0, [Math]::Min(200, $bcd.Length)))
+    }
+} catch {
+    Log "Test signing: bcdedit invocation threw: $_"
 }
-Log "Test signing: ON"
 
 # Trust the self-signed cert in LocalMachine\Root and TrustedPublisher
 # so the OS validates the driver's catalogue without prompting.
@@ -38,22 +41,28 @@ Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\Root' |
 Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
 Log "Cert imported into Root + TrustedPublisher."
 
-# Stage driver into the driver store.
+# Stage driver into the driver store. pnputil's stdout names the
+# OEM-renamed inf and reports success/failure; capture it in the log so
+# we can see what the OS thinks happened.
 $inf = Join-Path $here 'UxSpaceDriver.inf'
-pnputil /add-driver $inf /install
+$pnpOut = & pnputil /add-driver $inf /install 2>&1 | Out-String
+Log "pnputil output:"
+$pnpOut -split "`r?`n" | ForEach-Object { Log "  $_" }
 # pnputil returns 259 (ERROR_NO_MORE_ITEMS) when there's no matching PnP
 # device for the driver — fine here because we install a root devnode
 # explicitly in the next step.
 if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 259) {
-    Log "ERROR: pnputil /add-driver failed: $LASTEXITCODE"
+    Log "ERROR: pnputil /add-driver failed: exit=$LASTEXITCODE"
     throw "pnputil /add-driver failed with $LASTEXITCODE"
 }
-Log "pnputil add-driver done."
+Log "pnputil add-driver done (exit=$LASTEXITCODE)."
 
 # Create the root devnode that materialises the IddCx adapter. Without
 # this the driver is staged but no virtual monitor appears.
 $devcon = Join-Path $here 'devcon.exe'
-& $devcon install $inf 'Root\UxSpaceDriver'
+$devOut = & $devcon install $inf 'Root\UxSpaceDriver' 2>&1 | Out-String
+Log "devcon output:"
+$devOut -split "`r?`n" | ForEach-Object { Log "  $_" }
 if ($LASTEXITCODE -ne 0) {
     Log "ERROR: devcon install returned $LASTEXITCODE"
     throw "devcon install failed: $LASTEXITCODE"
