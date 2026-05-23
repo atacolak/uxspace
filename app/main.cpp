@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-2500";
+constexpr const char kAppBuildStamp[] = "v20260523-2600";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -1506,6 +1506,12 @@ void DrawDevUI(HWND devWnd) {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Monitor count:");
+    // v2500 user report: rapid 3->1->2->1 sequence hung the laptop.
+    // The driver now enforces a 5 s cooldown between SetMonitorCount
+    // calls (Nack/DriverBusy if violated). Surface that here so the
+    // user isn't surprised when a quick second press is rejected.
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+        "Warning: each press triggers a WUDFHost driver recycle. Wait ~5 s between presses; rapid changes can hang the display.");
     for (std::uint8_t n = 1; n <= uxspace::ipc::kMaxMonitors; ++n) {
         ImGui::SameLine();
         char label[16]; snprintf(label, sizeof(label), "%u##mcount", n);

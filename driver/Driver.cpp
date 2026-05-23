@@ -24,6 +24,8 @@ Environment:
 #include <uxspace/log.h>
 #include <sddl.h>
 
+#include <atomic>
+
 using namespace std;
 using namespace UxSpace::Driver;
 using namespace Microsoft::WRL;
@@ -35,68 +37,24 @@ using namespace Microsoft::WRL;
 // named-pipe channel lands in the next W3 stage; for now each monitor
 // comes up edid-less at the single 1920x1080 default mode.
 static constexpr DWORD kUxSpaceMaxMonitors      = 3;
-// First-run default. After the user sets a count via SetMonitorCount IPC
-// (which persists to HKLM), the registry value wins. Starting at 1
-// because IddCxMonitorDeparture causes WUDFHost to recycle the driver
-// context, and a recycle that goes back to 3 monitors would undo the
-// user's removal request — much better UX to grow up from 1.
-static constexpr DWORD kUxSpaceDefaultMonitorCount = 1;
+// First-run default reverted to 3 (was momentarily 1 in v2500). The
+// v2500 attempt to persist user choice to HKLM was denied (err=5
+// ACCESS_DENIED) for the WUDFHost LocalService account, so persistence
+// would need a different mechanism (MSI pre-creating the key with
+// permissive ACLs, or a ProgramData file). For now we revert: the
+// driver always starts with 3 monitors and the user adjusts at
+// runtime via SetMonitorCount, accepting that the count won't survive
+// the WUDFHost recycle that IddCxMonitorDeparture triggers.
+static constexpr DWORD kUxSpaceDefaultMonitorCount = 3;
 
-// Persists the desired monitor count across WUDFHost driver recycles.
-// HKLM is required because the driver runs as LocalService and HKCU
-// would point at the wrong user hive. The MSI does NOT pre-create this
-// key; if RegSetValueExW fails (ACCESS_DENIED in a constrained service
-// context), the next monitor-count request will log the error and the
-// count just won't survive recycles — non-fatal.
-inline constexpr wchar_t kDriverSettingsKey[]  = L"Software\\UxSpace\\Driver";
-inline constexpr wchar_t kMonitorCountValue[]  = L"MonitorCount";
-
-DWORD ReadDesiredMonitorCount()
-{
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kDriverSettingsKey, 0,
-                      KEY_READ, &key) != ERROR_SUCCESS) {
-        return kUxSpaceDefaultMonitorCount;
-    }
-    DWORD value = 0, size = sizeof(value), type = 0;
-    const LSTATUS s = RegQueryValueExW(key, kMonitorCountValue, nullptr, &type,
-                                       reinterpret_cast<LPBYTE>(&value), &size);
-    RegCloseKey(key);
-    if (s != ERROR_SUCCESS || type != REG_DWORD) {
-        return kUxSpaceDefaultMonitorCount;
-    }
-    if (value < 1)                       value = 1;
-    if (value > kUxSpaceMaxMonitors)     value = kUxSpaceMaxMonitors;
-    return value;
-}
-
-void WriteDesiredMonitorCount(DWORD count)
-{
-    if (count < 1)                       count = 1;
-    if (count > kUxSpaceMaxMonitors)     count = kUxSpaceMaxMonitors;
-    HKEY key = nullptr;
-    DWORD disp = 0;
-    const LSTATUS open = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kDriverSettingsKey,
-                                         0, nullptr, 0, KEY_WRITE, nullptr,
-                                         &key, &disp);
-    if (open != ERROR_SUCCESS) {
-        uxspace::log::warn("driver: RegCreateKeyExW(HKLM\\%ls) failed err=%ld",
-                           kDriverSettingsKey, static_cast<long>(open));
-        return;
-    }
-    const LSTATUS set = RegSetValueExW(key, kMonitorCountValue, 0, REG_DWORD,
-                                       reinterpret_cast<const BYTE*>(&count),
-                                       sizeof(count));
-    RegCloseKey(key);
-    if (set != ERROR_SUCCESS) {
-        uxspace::log::warn("driver: RegSetValueExW(%ls=%u) failed err=%ld",
-                           kMonitorCountValue, (unsigned) count,
-                           static_cast<long>(set));
-    } else {
-        uxspace::log::info("driver: persisted desired MonitorCount=%u to HKLM\\%ls",
-                           (unsigned) count, kDriverSettingsKey);
-    }
-}
+// Throttle for SetMonitorCount removals. A user clicking 3 -> 1 -> 2 ->
+// 1 in quick succession compounded the per-recycle instability and
+// hung the laptop (verified v2500 log timing). Reject any
+// SetMonitorCount that arrives within kRecycleCooldownMs of the
+// previous one — give WUDFHost time to fully recycle and re-initialise
+// before the next reduction.
+static constexpr DWORD kRecycleCooldownMs = 5000;
+inline std::atomic<DWORD> g_lastSetMonitorCountTick{ 0 };
 
 // UxSpace: ignore the upstream s_SampleMonitors EDIDs (Dell / Lenovo derived).
 // Every monitor is edid-less; the OS reports it under the INF DeviceName
@@ -276,7 +234,7 @@ void PipeServer::Start()
     // monitor change, so a CREATE_ALWAYS init would erase the previous
     // session's lines on every recycle (verified in v2300 logs).
     uxspace::log::init(L"C:\\Windows\\Temp\\UxSpace-driver.log", /*append=*/true);
-    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2500 ========");
+    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2600 ========");
 
     m_terminate.Attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     m_thread.Attach(CreateThread(nullptr, 0, &PipeServer::ThreadProc, this, 0, nullptr));
@@ -459,7 +417,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-2500";
+            static const char kBuildStamp[] = "v20260523-2600";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -510,6 +468,32 @@ void PipeServer::HandleClient(HANDLE pipe)
                 if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
+            // Throttle: a v2500 user reported a laptop hang after rapid
+            // 3->1->2->1 sequence. Each IddCxMonitorDeparture triggers a
+            // WUDFHost recycle, and back-to-back recycles compound until
+            // the display stack stalls. Reject if this request arrives
+            // within kRecycleCooldownMs of the previous one — Nack with
+            // DriverBusy so the client sees a clean rejection.
+            {
+                const DWORD nowTick = GetTickCount();
+                const DWORD lastTick = g_lastSetMonitorCountTick.load(std::memory_order_relaxed);
+                const DWORD elapsed = nowTick - lastTick;
+                if (lastTick != 0 && elapsed < kRecycleCooldownMs) {
+                    uxspace::log::warn("driver: req#%u SetMonitorCount throttled (last=%u ms ago, cooldown=%u ms)",
+                                       reqHdr.request_id, elapsed, kRecycleCooldownMs);
+                    char diag[124] = {};
+                    std::size_t pos = 0;
+                    DiagAppendStr(diag, sizeof(diag), pos, "throttled: ");
+                    DiagAppendUInt(diag, sizeof(diag), pos, elapsed);
+                    DiagAppendStr(diag, sizeof(diag), pos, " ms since last (min ");
+                    DiagAppendUInt(diag, sizeof(diag), pos, kRecycleCooldownMs);
+                    DiagAppendStr(diag, sizeof(diag), pos, " ms)");
+                    if (!sendNackMsg(ErrorCode::DriverBusy, reqHdr.request_id, diag)) return;
+                    break;
+                }
+                g_lastSetMonitorCountTick.store(nowTick, std::memory_order_relaxed);
+            }
+
             // RESPONSE BEFORE WORK — see v2200 commit. IddCxMonitorDeparture
             // tears down the pipe-server context mid-call; sending the Ack
             // first means the client always gets confirmation.
@@ -1062,11 +1046,6 @@ void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
     uxspace::log::info("driver: IndirectDeviceContext::SetMonitorCount target=%u (clamped to <=%u)",
                        (unsigned) targetCount, (unsigned) kUxSpaceMaxMonitors);
     if (targetCount > kUxSpaceMaxMonitors) targetCount = kUxSpaceMaxMonitors;
-    if (targetCount < 1)                   targetCount = 1;
-    // Persist BEFORE doing the IddCx work. WUDFHost recycles the driver
-    // mid-call on monitor removals; persisting first means the recycled
-    // instance comes back up with the new target count via the registry.
-    WriteDesiredMonitorCount(targetCount);
     NTSTATUS firstFailure = STATUS_SUCCESS;
     if (outDiag && outDiagBytes > 0) outDiag[0] = '\0';
 
@@ -1180,18 +1159,9 @@ NTSTATUS UxSpaceAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_
     auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
     if (NT_SUCCESS(pInArgs->AdapterInitStatus))
     {
-        // Number of monitors to bring up = whatever the user last
-        // requested via SetMonitorCount IPC (persisted to HKLM). On
-        // first boot the registry value is missing and we fall back to
-        // kUxSpaceDefaultMonitorCount (= 1). This is what makes the
-        // user's monitor-count choice survive the WUDFHost recycle
-        // that IddCxMonitorDeparture triggers — without persistence,
-        // every SetMonitorCount removal would bounce back to 3 the
-        // moment the next recycle fired (verified in v2400 logs).
-        const DWORD desired = ReadDesiredMonitorCount();
-        uxspace::log::info("driver: AdapterFinishInit creating %u monitor(s) (from HKLM)",
-                           (unsigned) desired);
-        for (DWORD i = 0; i < desired; i++)
+        uxspace::log::info("driver: AdapterFinishInit creating %u monitor(s) (default)",
+                           (unsigned) kUxSpaceDefaultMonitorCount);
+        for (DWORD i = 0; i < kUxSpaceDefaultMonitorCount; i++)
         {
             pDeviceContextWrapper->pContext->FinishInit(i);
         }
