@@ -41,16 +41,35 @@ inline void writeLine(const char* level, const char* msg) {
 
 } // namespace detail
 
-inline bool init(const wchar_t* filePath) {
+// `append=false` (default) truncates the file each init() — what :app
+// wants so each launch starts a clean log. `append=true` opens for
+// append, preserving previous content — what :driver wants because
+// WUDFHost recycles the driver context on monitor changes and a
+// CREATE_ALWAYS path would erase every prior session's diagnostics
+// between user actions (verified empirically: v2300 driver log only
+// ever contained the most recent PipeServer::Start line).
+inline bool init(const wchar_t* filePath, bool append = false) {
     if (detail::g_file != INVALID_HANDLE_VALUE) return true;
-    detail::g_file = CreateFileW(filePath, GENERIC_WRITE,
+    const DWORD disposition = append ? OPEN_ALWAYS : CREATE_ALWAYS;
+    detail::g_file = CreateFileW(filePath, FILE_APPEND_DATA | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (detail::g_file == INVALID_HANDLE_VALUE) return false;
-    // BOM so notepad opens it as UTF-8.
     DWORD wrote = 0;
-    constexpr unsigned char kBom[] = { 0xEF, 0xBB, 0xBF };
-    WriteFile(detail::g_file, kBom, sizeof(kBom), &wrote, nullptr);
+    if (append) {
+        // Seek to end so writes append. New file (size==0) still gets
+        // the BOM so notepad opens it as UTF-8.
+        const DWORD size = GetFileSize(detail::g_file, nullptr);
+        SetFilePointer(detail::g_file, 0, nullptr, FILE_END);
+        if (size == 0) {
+            constexpr unsigned char kBom[] = { 0xEF, 0xBB, 0xBF };
+            WriteFile(detail::g_file, kBom, sizeof(kBom), &wrote, nullptr);
+        }
+    } else {
+        // BOM so notepad opens it as UTF-8.
+        constexpr unsigned char kBom[] = { 0xEF, 0xBB, 0xBF };
+        WriteFile(detail::g_file, kBom, sizeof(kBom), &wrote, nullptr);
+    }
     return true;
 }
 
