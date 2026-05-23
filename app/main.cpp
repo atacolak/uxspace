@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
@@ -139,6 +140,27 @@ DirectX::XMFLOAT2 g_zoomFocusUV = { 0.5f, 0.5f };
 HHOOK            g_mouseHook    = nullptr;
 HHOOK            g_keyboardHook = nullptr;
 
+// --- W1.5: per-window pseudo-3D layering -------------------------------
+//
+// Back plane (Surface3D[0]) at kBackZ, identity uvRect. When pseudo-3D is
+// enabled AND we're not zoomed, additional Surface3Ds are appended for
+// each visible Win32 window whose rect intersects the UxSpace virtual
+// monitor; each window's uvRect samples just that window's pixels from
+// the same DDA texture. Z is staggered by focus-history index so the
+// most recently focused window sits closest to the camera. Painter's
+// algorithm: we push back-to-front so no depth buffer is needed.
+constexpr float kBackZ          = 2.0f;
+constexpr float kBackWorldW     = 2.4f;
+constexpr float kBackWorldH     = 1.35f;
+constexpr float kDepthStep      = 0.015f;  // 1.5 cm per W1.5 default
+constexpr int   kFocusHistoryCap = 32;
+constexpr int   kHotkeyTogglePseudo3D = 1;
+bool             g_pseudo3D     = false;
+HWINEVENTHOOK    g_winEventHook = nullptr;
+std::vector<HWND> g_focusHistory;
+// Last per-frame snapshot of the layered windows, for the dev UI.
+int              g_lastLayeredCount = 0;
+
 
 std::vector<sp::GlassesOutput::DetectedMonitor> g_lastSeenMonitors;
 
@@ -238,6 +260,182 @@ DirectX::XMFLOAT4 ComputeZoomUVRect() {
     return { uMin, vMin, uMin + 2 * half, vMin + 2 * half };
 }
 
+// --- W1.5 helpers ------------------------------------------------------
+
+bool RectsIntersect(const RECT& a, const RECT& b) {
+    return !(a.right <= b.left || a.left >= b.right ||
+             a.bottom <= b.top || a.top >= b.bottom);
+}
+
+void RememberFocusedWindow(HWND hwnd) {
+    if (!hwnd) return;
+    auto it = std::find(g_focusHistory.begin(), g_focusHistory.end(), hwnd);
+    if (it != g_focusHistory.end()) g_focusHistory.erase(it);
+    g_focusHistory.insert(g_focusHistory.begin(), hwnd);
+    if (g_focusHistory.size() > kFocusHistoryCap) g_focusHistory.resize(kFocusHistoryCap);
+}
+
+void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
+                           LONG idObject, LONG /*idChild*/,
+                           DWORD /*dwEventThread*/, DWORD /*dwmsEventTime*/) {
+    if (event != EVENT_SYSTEM_FOREGROUND) return;
+    if (idObject != OBJID_WINDOW) return;
+    RememberFocusedWindow(hwnd);
+}
+
+struct EnumeratedWindow {
+    HWND hwnd;
+    RECT rect; // screen coords
+};
+
+BOOL CALLBACK EnumUxSpaceWindowsProc(HWND hwnd, LPARAM lParam) {
+    auto* out = reinterpret_cast<std::vector<EnumeratedWindow>*>(lParam);
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+
+    const LONG_PTR style   = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (exStyle & WS_EX_TOOLWINDOW)       return TRUE;  // tray icons, dialog pickers
+    if (!(style & WS_VISIBLE))            return TRUE;
+    // Heuristic: real app windows have a caption or a sizing border. This
+    // filters out windowed popups, shell hidden surfaces, etc.
+    if (!(style & (WS_CAPTION | WS_SIZEBOX))) return TRUE;
+
+    // Prefer DWM's "extended frame bounds", which exclude the invisible
+    // drop-shadow border (~7 px each side on Win10/11). GetWindowRect
+    // alone includes that border, so the per-window quad would extend
+    // past the visible window edges and sample whatever is behind —
+    // typically the taskbar at the bottom.
+    RECT r{};
+    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
+        if (!GetWindowRect(hwnd, &r)) return TRUE;
+    }
+    if (r.right - r.left < 50 || r.bottom - r.top < 50) return TRUE;
+
+    const RECT ux = g_vscreen.desktopRect();
+    if (!RectsIntersect(r, ux)) return TRUE;
+
+    out->push_back({ hwnd, r });
+    return TRUE;
+}
+
+// Returns the work-area rect for the UxSpace virtual monitor — the
+// desktop rect minus the taskbar. Without this clip, a window whose
+// geometric rect extends through the taskbar overlay (Windows reports
+// `GetWindowRect` unaffected by the taskbar) would have its per-window
+// quad sample taskbar pixels at the bottom, painting the taskbar twice
+// in the 3D scene.
+RECT UxSpaceWorkArea() {
+    const RECT ux = g_vscreen.desktopRect();
+    HMONITOR mon = MonitorFromRect(&ux, MONITOR_DEFAULTTONULL);
+    MONITORINFO mi{ sizeof(mi) };
+    if (mon && GetMonitorInfoW(mon, &mi)) return mi.rcWork;
+    return ux;
+}
+
+RECT IntersectRects(const RECT& a, const RECT& b) {
+    RECT r;
+    r.left   = std::max(a.left,   b.left);
+    r.top    = std::max(a.top,    b.top);
+    r.right  = std::min(a.right,  b.right);
+    r.bottom = std::min(a.bottom, b.bottom);
+    return r;
+}
+
+// Sorts enumerated windows so the most-recently-focused window appears
+// first. Windows not yet seen in g_focusHistory go to the back in EnumWindows
+// order. Used by both UpdateScene (for depth ordering) and the dev UI's
+// focus-overlay (for eyeballing focus-history correctness).
+std::vector<EnumeratedWindow>
+OrderWindowsByFocusHistory(std::vector<EnumeratedWindow> windows) {
+    std::vector<EnumeratedWindow> ordered;
+    ordered.reserve(windows.size());
+    std::vector<bool> taken(windows.size(), false);
+    for (HWND f : g_focusHistory) {
+        for (size_t i = 0; i < windows.size(); ++i) {
+            if (!taken[i] && windows[i].hwnd == f) {
+                ordered.push_back(windows[i]);
+                taken[i] = true;
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (!taken[i]) ordered.push_back(windows[i]);
+    }
+    return ordered;
+}
+
+std::vector<EnumeratedWindow> EnumerateUxSpaceWindows() {
+    std::vector<EnumeratedWindow> r;
+    if (!g_vscreen.present()) return r;
+    EnumWindows(EnumUxSpaceWindowsProc, reinterpret_cast<LPARAM>(&r));
+    return r;
+}
+
+// Rebuilds g_scene.surfaces each frame.
+//
+// surfaces[0] is always the back plane (Surface3D occupying the whole
+// captured monitor at kBackZ). Its uvRect carries the zoom state. When
+// pseudo-3D is enabled and we're not zoomed, additional per-window quads
+// are appended (back-to-front) so the most-recently-focused window draws
+// last and sits closest to the camera.
+void UpdateScene() {
+    g_scene.surfaces.clear();
+
+    sp::Surface3D backPlane;
+    backPlane.position = { 0.0f, 0.0f, kBackZ };
+    backPlane.size     = { kBackWorldW, kBackWorldH };
+    backPlane.uvRect   = ComputeZoomUVRect();
+    backPlane.texture  = g_vscreen.srv();
+    g_scene.surfaces.push_back(backPlane);
+
+    const bool layered = g_pseudo3D
+                      && g_zoomLevel <= 1.0001f
+                      && g_vscreen.present();
+    if (!layered) { g_lastLayeredCount = 0; return; }
+
+    auto windows = EnumerateUxSpaceWindows();
+    if (windows.empty()) { g_lastLayeredCount = 0; return; }
+
+    auto ordered = OrderWindowsByFocusHistory(std::move(windows));
+
+    const RECT mon  = g_vscreen.desktopRect();
+    const RECT work = UxSpaceWorkArea();
+    const float mw  = float(std::max<LONG>(1, mon.right  - mon.left));
+    const float mh  = float(std::max<LONG>(1, mon.bottom - mon.top));
+    const int   N   = static_cast<int>(ordered.size());
+
+    // Painter's algorithm: push farthest-from-camera first. ordered[0] is
+    // most-recent (closest to camera, drawn last); ordered[N-1] is oldest
+    // (closest to back plane, drawn first).
+    for (int idx = N - 1; idx >= 0; --idx) {
+        const auto& w = ordered[idx];
+        // Clip to the work area so the per-window quad doesn't include
+        // the taskbar overlay region (which still gets drawn by the back
+        // plane underneath).
+        const RECT clipped = IntersectRects(w.rect, work);
+        if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) continue;
+        const float left   = std::clamp(float(clipped.left   - mon.left) / mw, 0.0f, 1.0f);
+        const float top    = std::clamp(float(clipped.top    - mon.top ) / mh, 0.0f, 1.0f);
+        const float right  = std::clamp(float(clipped.right  - mon.left) / mw, 0.0f, 1.0f);
+        const float bottom = std::clamp(float(clipped.bottom - mon.top ) / mh, 0.0f, 1.0f);
+        if (right <= left || bottom <= top) continue;
+
+        const float cx  = (left + right ) * 0.5f;
+        const float cy  = (top  + bottom) * 0.5f;
+        sp::Surface3D q;
+        q.position = { (cx  - 0.5f) * kBackWorldW,
+                       (0.5f - cy ) * kBackWorldH,
+                       kBackZ - kDepthStep * float(N - idx) };
+        q.size     = { (right - left) * kBackWorldW,
+                       (bottom - top) * kBackWorldH };
+        q.uvRect   = { left, top, right, bottom };
+        q.texture  = g_vscreen.srv();
+        g_scene.surfaces.push_back(q);
+    }
+    g_lastLayeredCount = N;
+}
+
 void TryOpenGlasses() {
     sp::GlassesOutput::DetectedMonitor m;
     if (!sp::GlassesOutput::find(kGlassesNameMatch, m, &g_lastSeenMonitors)) return;
@@ -282,6 +480,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Display topology changed (hotplug, mode change, etc.).
         RefreshGlassesState();
         return 0;
+    case WM_HOTKEY:
+        if (wp == kHotkeyTogglePseudo3D) {
+            g_pseudo3D = !g_pseudo3D;
+        }
+        return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -306,6 +509,170 @@ void RenderStereoTo(ID3D11RenderTargetView* rtv,
 void CycleScreenBand() {
     g_screenBandIndex = (g_screenBandIndex + 1) % static_cast<int>(std::size(sp::kScreenBandPresets));
     g_scene.screenBand = sp::kScreenBandPresets[g_screenBandIndex];
+}
+
+// --- Dev UI: Hotkeys panel ---------------------------------------------
+//
+// Single source of truth for the bindings the app responds to. Each new
+// hotkey added in later milestones (recenter in W2, view-mode toggle in
+// W4, etc.) means adding one row here.
+void DrawHotkeysWindow() {
+    ImGui::SetNextWindowPos(ImVec2(12, 482),  ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 150), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Hotkeys");
+
+    if (ImGui::BeginTable("hotkeys", 3,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Keys",   ImGuiTableColumnFlags_WidthFixed, 150);
+        ImGui::TableSetupColumn("Scope",  ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+
+        auto row = [](const char* keys, const char* scope, const char* action) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(keys);
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(scope);
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(action);
+        };
+        row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x).");
+        row("Win+Shift+Z",     "global", "Cycle screen band (0.80 / 0.85 / 0.90).");
+        row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
+// --- Dev UI: Display layout window -------------------------------------
+//
+// Top-down schematic of every monitor in its desktop coordinates. Colour-
+// codes the UxSpace virtual monitor and the detected Viture output so a
+// glance reveals which is which. Optional checkbox overlays the focus-
+// ordered window rects on top of the UxSpace monitor — useful for
+// debugging the W1.5 focus-history.
+
+struct EnumeratedMonitor {
+    RECT rect;
+    std::wstring deviceName;
+    UINT  width;
+    UINT  height;
+};
+
+BOOL CALLBACK EnumMonitorsProc_(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
+    auto* out = reinterpret_cast<std::vector<EnumeratedMonitor>*>(lParam);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(hMon, &mi)) {
+        out->push_back({
+            mi.rcMonitor,
+            mi.szDevice,
+            static_cast<UINT>(mi.rcMonitor.right  - mi.rcMonitor.left),
+            static_cast<UINT>(mi.rcMonitor.bottom - mi.rcMonitor.top),
+        });
+    }
+    return TRUE;
+}
+
+void DrawDisplayLayoutWindow() {
+    static bool s_showFocusOverlay = false;
+
+    ImGui::SetNextWindowPos(ImVec2(12, 642),  ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 240), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Display layout");
+
+    ImGui::Checkbox("Show focus-ordered windows on UxSpace", &s_showFocusOverlay);
+    ImGui::Separator();
+
+    std::vector<EnumeratedMonitor> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, EnumMonitorsProc_,
+                        reinterpret_cast<LPARAM>(&monitors));
+    if (monitors.empty()) { ImGui::Text("No monitors detected."); ImGui::End(); return; }
+
+    LONG minX = monitors[0].rect.left,   minY = monitors[0].rect.top;
+    LONG maxX = monitors[0].rect.right,  maxY = monitors[0].rect.bottom;
+    for (const auto& m : monitors) {
+        minX = std::min(minX, m.rect.left);
+        minY = std::min(minY, m.rect.top);
+        maxX = std::max(maxX, m.rect.right);
+        maxY = std::max(maxY, m.rect.bottom);
+    }
+    const float boxW = float(std::max<LONG>(1, maxX - minX));
+    const float boxH = float(std::max<LONG>(1, maxY - minY));
+
+    const ImVec2 avail  = ImGui::GetContentRegionAvail();
+    const float  scale  = std::min(avail.x / boxW, avail.y / boxH) * 0.95f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 panelOrigin{
+        origin.x + (avail.x - boxW * scale) * 0.5f,
+        origin.y + (avail.y - boxH * scale) * 0.5f,
+    };
+    auto toScreen = [&](LONG x, LONG y) {
+        return ImVec2(panelOrigin.x + (x - minX) * scale,
+                      panelOrigin.y + (y - minY) * scale);
+    };
+
+    const bool        haveUx     = g_vscreen.present();
+    const RECT        uxRect     = haveUx ? g_vscreen.desktopRect() : RECT{};
+    const std::wstring vitName    = g_glasses.opened() ? g_glasses.deviceName() : std::wstring{};
+    auto* draw = ImGui::GetWindowDrawList();
+
+    for (const auto& m : monitors) {
+        const bool isUx = haveUx
+            && m.rect.left == uxRect.left && m.rect.top == uxRect.top
+            && m.rect.right == uxRect.right && m.rect.bottom == uxRect.bottom;
+        const bool isViture = !vitName.empty() && m.deviceName == vitName;
+
+        ImU32 fill, edge;
+        if (isUx) {
+            fill = IM_COL32( 40, 100, 130, 220);
+            edge = IM_COL32(120, 200, 255, 255);
+        } else if (isViture) {
+            fill = IM_COL32(120,  80,  30, 220);
+            edge = IM_COL32(255, 180,  80, 255);
+        } else {
+            fill = IM_COL32( 55,  55,  55, 220);
+            edge = IM_COL32(160, 160, 160, 255);
+        }
+        const ImVec2 tl = toScreen(m.rect.left, m.rect.top);
+        const ImVec2 br = toScreen(m.rect.right, m.rect.bottom);
+        draw->AddRectFilled(tl, br, fill);
+        draw->AddRect(tl, br, edge, 0.0f, 0, 2.0f);
+
+        char nameUtf8[64];
+        WideCharToMultiByte(CP_UTF8, 0, m.deviceName.c_str(), -1,
+                            nameUtf8, sizeof(nameUtf8), nullptr, nullptr);
+        char label[128];
+        const char* tag = isUx ? " [UxSpace]" : (isViture ? " [Viture]" : "");
+        snprintf(label, sizeof(label), "%s%s\n%ux%u",
+                 nameUtf8, tag, m.width, m.height);
+        draw->AddText(ImVec2(tl.x + 5, tl.y + 5),
+                      IM_COL32(255, 255, 255, 255), label);
+    }
+
+    if (s_showFocusOverlay && haveUx) {
+        auto ordered = OrderWindowsByFocusHistory(EnumerateUxSpaceWindows());
+        const int N = static_cast<int>(ordered.size());
+        for (int i = 0; i < N; ++i) {
+            const ImVec2 tl = toScreen(ordered[i].rect.left,  ordered[i].rect.top);
+            const ImVec2 br = toScreen(ordered[i].rect.right, ordered[i].rect.bottom);
+            // Most recent = yellow; older = orange -> red.
+            const float t = (N > 1) ? float(i) / float(N - 1) : 0.0f;
+            const ImU32 col = IM_COL32(255, int(255 * (1.0f - t * 0.7f)), 0, 230);
+            draw->AddRect(tl, br, col, 0.0f, 0, 2.0f);
+            char rank[8]; snprintf(rank, sizeof(rank), "%d", i);
+            draw->AddText(ImVec2(tl.x + 3, tl.y + 3),
+                          IM_COL32(255, 255, 255, 255), rank);
+        }
+    }
+
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+        const ImVec2 c = toScreen(cursor.x, cursor.y);
+        draw->AddCircleFilled(c, 4.0f, IM_COL32(255,  80,  80, 255));
+        draw->AddCircle      (c, 5.0f, IM_COL32(  0,   0,   0, 255), 0, 1.5f);
+    }
+
+    ImGui::Dummy(ImVec2(avail.x, avail.y));
+    ImGui::End();
 }
 
 void DrawDevUI(HWND devWnd) {
@@ -397,6 +764,25 @@ void DrawDevUI(HWND devWnd) {
     }
     ImGui::Separator();
 
+    // Pseudo-3D layering (W1.5)
+    ImGui::Text("Pseudo-3D: %s", g_pseudo3D ? "ON" : "off");
+    ImGui::SameLine();
+    if (ImGui::Button(g_pseudo3D ? "Disable###p3d" : "Enable###p3d")) {
+        g_pseudo3D = !g_pseudo3D;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Win+Shift+D toggles globally");
+    if (g_pseudo3D) {
+        if (g_zoomLevel > 1.0001f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+                "Zoom active -> collapsed to single back plane.");
+        } else {
+            ImGui::TextDisabled("Layered windows: %d (focus history: %zu)",
+                                g_lastLayeredCount, g_focusHistory.size());
+        }
+    }
+    ImGui::Separator();
+
     ImGui::End();
 
     if (g_devPreview.srv) {
@@ -424,6 +810,9 @@ void DrawDevUI(HWND devWnd) {
         ImGui::Image(reinterpret_cast<ImTextureID>(g_vscreen.srv()), ImVec2(w, h));
         ImGui::End();
     }
+
+    DrawHotkeysWindow();
+    DrawDisplayLayoutWindow();
 
     ImGui::Render();
 
@@ -471,12 +860,9 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
     CreateDevPreview(g_d3d.device.Get(), kDevPreviewWidth, kDevPreviewHeight, g_devPreview);
 
-    // One surface for now: the captured virtual monitor, screen-locked
-    // straight ahead at 2 m. W3 expands this to ScreenLayout strategies.
-    sp::Surface3D screen;
-    screen.position = { 0.0f, 0.0f, 2.0f };
-    screen.size     = { 2.4f, 1.35f }; // 16:9, comfortably inside the FoV
-    g_scene.surfaces.push_back(screen);
+    // Surfaces are rebuilt every frame by UpdateScene(): back plane + (if
+    // pseudo-3D is on and we're not zoomed) per-window quads. Just seed
+    // the screen-band preset here.
     g_scene.screenBand = sp::kScreenBandPresets[g_screenBandIndex];
 
     // Try the glasses up-front; user can rescan via the UI later.
@@ -484,12 +870,24 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // Global low-level hooks for the zoom gestures:
     //   - Win+Shift+wheel over the UxSpace display: continuous zoom (mouse hook)
-    //   - Win+Shift+Z:                              cycle 1 -> 2 -> 3 -> 4 -> 1 (keyboard hook)
+    //   - Win+Shift+Z:                              cycle screen band (keyboard hook)
     // Both live for the lifetime of the app.
     g_mouseHook    = SetWindowsHookExW(WH_MOUSE_LL,    &LowLevelMouseProc,
                                        GetModuleHandleW(nullptr), 0);
     g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, &LowLevelKeyboardProc,
                                        GetModuleHandleW(nullptr), 0);
+
+    // W1.5: focus-history listener for per-window depth ordering, and
+    // Win+Shift+D global toggle for pseudo-3D layering. RegisterHotKey is
+    // cleaner than a low-level keyboard hook for a non-wheel chord — the
+    // OS delivers WM_HOTKEY to our window without the keystroke ever
+    // reaching another app.
+    g_winEventHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND,
+                                     EVENT_SYSTEM_FOREGROUND,
+                                     nullptr, &WinEventProc, 0, 0,
+                                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    RememberFocusedWindow(GetForegroundWindow()); // seed so first frame has order
+    RegisterHotKey(hwnd, kHotkeyTogglePseudo3D, MOD_WIN | MOD_SHIFT, 'D');
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -522,14 +920,15 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             g_pendingCenterCursorOnUxSpace = false;
         }
 
-        // Re-bind the live texture each frame: VirtualScreen recycles its
-        // SRV on ACCESS_LOST, so the pointer is only valid this frame.
-        // Also refresh the zoom focus from the cursor's current position
-        // (the hook only updates the focus on a wheel event; this keeps it
-        // tracking when the user moves the cursor around at a fixed zoom).
+        // Refresh the zoom focus from the cursor's current position; the
+        // wheel hook only updates the focus on a wheel event, so this keeps
+        // it tracking when the user moves the cursor around at a fixed
+        // zoom. Then rebuild the whole scene: back plane (with zoom-driven
+        // uvRect) + per-window quads if pseudo-3D is active. VirtualScreen
+        // recycles its SRV on ACCESS_LOST, so the pointer is only valid
+        // this frame.
         UpdateZoomFromCursor();
-        g_scene.surfaces.front().texture = g_vscreen.srv();
-        g_scene.surfaces.front().uvRect  = ComputeZoomUVRect();
+        UpdateScene();
 
         // Render to glasses (if open). Stereo or mono depending on whether
         // the framebuffer reports an SBS-aspect mode; see GlassesOutput.h.
@@ -545,6 +944,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         DrawDevUI(hwnd);
     }
 
+    UnregisterHotKey(hwnd, kHotkeyTogglePseudo3D);
+    if (g_winEventHook) { UnhookWinEvent(g_winEventHook);      g_winEventHook = nullptr; }
     if (g_mouseHook)    { UnhookWindowsHookEx(g_mouseHook);    g_mouseHook    = nullptr; }
     if (g_keyboardHook) { UnhookWindowsHookEx(g_keyboardHook); g_keyboardHook = nullptr; }
     g_glasses.close();
