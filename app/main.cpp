@@ -51,6 +51,19 @@ constexpr UINT kDevPreviewWidth  = 1280;
 constexpr UINT kDevPreviewHeight = 360;
 constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 
+// Hardcoded per release, mirrors the driver's kBuildStamp. Logged at
+// boot and after the IPC Ping handshake so a single grep of the log
+// file confirms which app + driver pair is actually loaded — handy
+// after MSI iterations where pnputil silently kept the previous driver
+// because Windows decided it was "the same version".
+constexpr const char kAppBuildStamp[] = "v20260523-1500";
+
+// Cached driver build stamp from the most-recent successful Pong.
+// Populated by the boot Ping and refreshed by the dev-UI Ping button;
+// surfaced in the dev-UI build line so the user can see what driver is
+// loaded without opening the log file.
+char g_lastDriverBuild[128] = {};
+
 struct D3D {
     ComPtr<ID3D11Device>           device;
     ComPtr<ID3D11DeviceContext>    context;
@@ -1136,6 +1149,8 @@ void DrawDevUI(HWND devWnd) {
     ImGui::Separator();
 
     ImGui::Text("W1 \xe2\x80\x94 stereo output to Viture + dev preview");
+    ImGui::Text("Build: app=%s driver=%s", kAppBuildStamp,
+                g_lastDriverBuild[0] ? g_lastDriverBuild : "(no Pong yet)");
     ImGui::Text("IPC protocol version: %u (max monitors: %u)",
                 uxspace::ipc::kProtocolVersion, uxspace::ipc::kMaxMonitors);
     ImGui::Separator();
@@ -1214,13 +1229,18 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SameLine();
     if (ImGui::SmallButton("Ping")) {
         const IpcResult r = IpcPing();
-        if (r.ok) uxspace::log::info("ipc: manual Ping -> Pong. Driver build = %s.",
-                                     r.pongPayload[0] ? r.pongPayload : "(unknown)");
-        else      uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s: %s).",
-                                     r.win32Error,
-                                     IpcMessageName(r.replyType),
-                                     IpcErrorName(r.nackCode),
-                                     r.nackMessage);
+        if (r.ok) {
+            uxspace::log::info("ipc: manual Ping -> Pong. Driver build = %s.",
+                               r.pongPayload[0] ? r.pongPayload : "(unknown)");
+            strncpy_s(g_lastDriverBuild, sizeof(g_lastDriverBuild),
+                      r.pongPayload, _TRUNCATE);
+        } else {
+            uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s: %s).",
+                               r.win32Error,
+                               IpcMessageName(r.replyType),
+                               IpcErrorName(r.nackCode),
+                               r.nackMessage);
+        }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Monitor count:");
@@ -1358,6 +1378,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         uxspace::log::info("UxSpace boot at %04u-%02u-%02u %02u:%02u:%02u.",
                            st.wYear, st.wMonth, st.wDay,
                            st.wHour, st.wMinute, st.wSecond);
+        uxspace::log::info("UxSpace app build = %s.", kAppBuildStamp);
         uxspace::log::info("Log file: %ls", logPath);
     }
 
@@ -1417,6 +1438,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         if (ping.ok && ping.replyType == uxspace::ipc::MessageType::Pong) {
             uxspace::log::info("ipc: driver pipe Ping OK. Driver build = %s",
                                ping.pongPayload[0] ? ping.pongPayload : "(unknown - pre-v1112)");
+            // Single-line banner so a log scan immediately confirms
+            // which app + driver pair is actually loaded.
+            uxspace::log::info("build: app=%s driver=%s",
+                               kAppBuildStamp,
+                               ping.pongPayload[0] ? ping.pongPayload : "(unknown)");
+            strncpy_s(g_lastDriverBuild, sizeof(g_lastDriverBuild),
+                      ping.pongPayload, _TRUNCATE);
         } else if (ping.win32Error != 0) {
             uxspace::log::warn("ipc: driver pipe Ping never came up after retries "
                                "(last err=%lu). Driver may be pre-W3 or the pipe "
