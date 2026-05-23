@@ -33,12 +33,12 @@ static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 1; // UxSpace W0: one monitor.
 // ("UxSpace Virtual Display") and uses s_SampleDefaultModes (1920x1080 preferred).
 static constexpr bool s_UxSpaceForceEdidless = true;
 
-// Default modes reported for edid-less monitors. The first mode is set as preferred
-static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultModes[] = 
+// UxSpace W0: expose exactly one mode so the OS has no room to pick a
+// smaller fallback (it ignored PreferredMonitorModeIdx=0 in practice on
+// this build). Multi-mode + runtime selection lands in W3 via :shared.
+static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultModes[] =
 {
     { 1920, 1080, 60 },
-    { 1600,  900, 60 },
-    { 1024,  768, 75 },
 };
 
 // FOR SAMPLE PURPOSES ONLY, Static info about monitors that will be reported to OS
@@ -564,7 +564,12 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
 
     MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    if (s_UxSpaceForceEdidless || ConnectorIndex >= ARRAYSIZE(s_SampleMonitors))
+    if constexpr (s_UxSpaceForceEdidless)
+    {
+        MonitorInfo.MonitorDescription.DataSize = 0;
+        MonitorInfo.MonitorDescription.pData = nullptr;
+    }
+    else if (ConnectorIndex >= ARRAYSIZE(s_SampleMonitors))
     {
         MonitorInfo.MonitorDescription.DataSize = 0;
         MonitorInfo.MonitorDescription.pData = nullptr;
