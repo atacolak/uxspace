@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-1600";
+constexpr const char kAppBuildStamp[] = "v20260523-1700";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -218,8 +218,8 @@ bool BuildLegendTexture(ID3D11Device* device) {
 
     struct Row { const wchar_t* k; const wchar_t* v; };
     const Row rows[] = {
-        { L"Wheel",  L"Zoom (cursor on UxSpace)" },
-        { L"+ / -",  L"Zoom in / out (keyboard)" },
+        { L"Wheel",  L"Zoom (PINNED only)" },
+        { L"+ / -",  L"Zoom in / out (PINNED only)" },
         { L"Z",      L"Screen size +0.1 (wraps)" },
         { L"D",      L"Pseudo-3D layering" },
         { L"X",      L"Toggle PINNED / FREE" },
@@ -460,6 +460,15 @@ bool WinAndShiftHeld() {
     return winDown && shiftDown;
 }
 
+// True when 6DoF head tracking is actually driving the camera (tracker
+// up AND user has chosen FREE). Zoom is disabled in this state — the
+// combination of a magnified back-plane plus head-tracked rotation is
+// disorienting and the user prefers to lean / look around instead.
+bool IsDofActive() {
+    return g_tracker.isConnected()
+        && g_viewMode == uxspace::tracking::ViewMode::FREE;
+}
+
 // Forward decls — definitions live alongside the dev-UI / tracker code.
 void CycleScreenBand();
 void AdjustZoom(float delta);
@@ -510,13 +519,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     return 1;
                 case VK_OEM_PLUS:
                 case VK_ADD:
-                    uxspace::log::info("hotkey: Win+Shift++ (zoom in).");
-                    AdjustZoom(+kZoomStep);
+                    if (IsDofActive()) {
+                        uxspace::log::info("hotkey: Win+Shift++ ignored — DOF active (zoom disabled).");
+                    } else {
+                        uxspace::log::info("hotkey: Win+Shift++ (zoom in).");
+                        AdjustZoom(+kZoomStep);
+                    }
                     return 1;
                 case VK_OEM_MINUS:
                 case VK_SUBTRACT:
-                    uxspace::log::info("hotkey: Win+Shift+- (zoom out).");
-                    AdjustZoom(-kZoomStep);
+                    if (IsDofActive()) {
+                        uxspace::log::info("hotkey: Win+Shift+- ignored — DOF active (zoom disabled).");
+                    } else {
+                        uxspace::log::info("hotkey: Win+Shift+- (zoom out).");
+                        AdjustZoom(-kZoomStep);
+                    }
                     return 1;
                 default: break;
                 }
@@ -532,6 +549,11 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
         const RECT  rect = g_vscreen.desktopRect();
         const bool  inside = g_vscreen.present() && CursorInRect(info->pt, rect);
         if (inside && WinAndShiftHeld()) {
+            if (IsDofActive()) {
+                // Don't consume — let the underlying app scroll. Zoom is
+                // intentionally inert while 6DoF is driving the camera.
+                return CallNextHookEx(nullptr, nCode, wParam, lParam);
+            }
             // wheel delta is in the high word of mouseData, signed.
             const SHORT delta = static_cast<SHORT>(HIWORD(info->mouseData));
             const float notches = static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA);
@@ -970,9 +992,9 @@ void DrawHotkeysWindow() {
             ImGui::TableNextColumn(); ImGui::TextUnformatted(scope);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(action);
         };
-        row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x).");
-        row("Win+Shift++",     "global", "Zoom in by 0.25x (keyboard alternative).");
-        row("Win+Shift+-",     "global", "Zoom out by 0.25x.");
+        row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x). PINNED only.");
+        row("Win+Shift++",     "global", "Zoom in by 0.25x (keyboard). PINNED only.");
+        row("Win+Shift+-",     "global", "Zoom out by 0.25x. PINNED only.");
         row("Win+Shift+Z",     "global", "Screen size +0.10 (0.70..2.00, wraps).");
         row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
         row("Win+Shift+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
@@ -1137,7 +1159,11 @@ void DrawDevUI(HWND devWnd) {
 
     // Zoom (Win+Shift+wheel over the UxSpace virtual monitor).
     ImGui::Text("Zoom: %.2fx", g_zoomLevel);
-    if (g_zoomLevel > 1.0001f) {
+    if (IsDofActive()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+                           "disabled (DOF active — toggle PINNED with Win+Shift+X to zoom)");
+    } else if (g_zoomLevel > 1.0001f) {
         ImGui::SameLine();
         ImGui::TextDisabled("focus (%.2f, %.2f)", g_zoomFocusUV.x, g_zoomFocusUV.y);
         ImGui::SameLine();
