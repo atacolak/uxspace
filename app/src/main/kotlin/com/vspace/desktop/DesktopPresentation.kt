@@ -23,6 +23,7 @@ import androidx.annotation.DrawableRes
 import com.vspace.R
 import com.vspace.spatial.VSpaceTheme
 import com.vspace.spatial.WorkspaceController
+import com.vspace.system.SystemStatus
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -43,9 +44,17 @@ class DesktopPresentation(
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var clock: TextView
     private lateinit var runningApps: LinearLayout
+    private lateinit var batteryText: TextView
+    private lateinit var volumeText: TextView
 
     /** Taskbar icons for the open app windows, keyed by package, in launch order. */
     private val runningIcons = LinkedHashMap<String, View>()
+
+    private val systemStatusListener = object : SystemStatus.Listener {
+        override fun onSystemStatusChanged() {
+            mainHandler.post { refreshStatusTray() }
+        }
+    }
 
     /** Refreshes the taskbar clock; re-posts itself while the desktop is shown. */
     private val clockTick = object : Runnable {
@@ -79,11 +88,25 @@ class DesktopPresentation(
         super.onStart()
         mainHandler.removeCallbacks(clockTick)
         clockTick.run()
+        SystemStatus.addListener(systemStatusListener)
+        refreshStatusTray()
     }
 
     override fun onStop() {
         mainHandler.removeCallbacks(clockTick)
+        SystemStatus.removeListener(systemStatusListener)
         super.onStop()
+    }
+
+    /** Re-render the status tray from the latest [SystemStatus] snapshot. */
+    private fun refreshStatusTray() {
+        if (::batteryText.isInitialized) {
+            val charging = if (SystemStatus.batteryCharging) "⚡ " else ""
+            batteryText.text = "$charging${SystemStatus.batteryPercent}%"
+        }
+        if (::volumeText.isInitialized) {
+            volumeText.text = "${(SystemStatus.volumeFraction * 100).toInt()}%"
+        }
     }
 
     private fun buildWallpaper(): View = ImageView(context).apply {
@@ -185,11 +208,13 @@ class DesktopPresentation(
     }
 
     /**
-     * Right cluster — DeX-style status / configuration tray. For now: just the clock.
-     * Battery, Wi-Fi, signal, volume, and the quick-settings panel come in follow-up
-     * commits (see the build order in docs/TASKBAR.md).
+     * Right cluster — DeX-style status / configuration tray: volume, battery, clock for
+     * now. Wi-Fi, signal, message indicator and the click-to-open quick-settings panel
+     * come in follow-up commits (see docs/TASKBAR.md).
      */
     private fun buildRightCluster(): View {
+        volumeText = statusValue()
+        batteryText = statusValue()
         clock = TextView(context).apply {
             setTextColor(VSpaceTheme.taskbarText)
             textSize = 12.5f
@@ -200,8 +225,41 @@ class DesktopPresentation(
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(clock, LinearLayout.LayoutParams(WRAP, WRAP))
+            addView(statusItem(R.drawable.ic_volume, volumeText, "Volume"))
+            addView(statusItem(R.drawable.ic_battery, batteryText, "Battery"))
+            addView(
+                clock,
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) },
+            )
         }
+    }
+
+    /** Right-tray cell: a small icon next to a tiny percentage label. */
+    private fun statusItem(
+        @DrawableRes icon: Int,
+        valueLabel: TextView,
+        description: String,
+    ): View = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = dp(12) }
+        contentDescription = description
+        addView(
+            ImageView(context).apply {
+                setImageResource(icon)
+                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            },
+        )
+        addView(
+            valueLabel,
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(4) },
+        )
+    }
+
+    private fun statusValue(): TextView = TextView(context).apply {
+        setTextColor(VSpaceTheme.taskbarText)
+        textSize = 11f
     }
 
     private fun taskbarButton(

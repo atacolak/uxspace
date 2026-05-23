@@ -5,6 +5,7 @@ import com.vspace.desktop.DesktopPresentation
 import com.vspace.desktop.DrawerPresentation
 import com.vspace.privileged.PrivilegedService
 import com.vspace.spatial.WorkspaceController
+import com.vspace.system.SystemStatus
 
 /**
  * Application entry point — initialises the privileged-helper orchestrator and wires the
@@ -19,6 +20,7 @@ class VSpaceApp : Application() {
         // launch — if pairing is needed or wireless debugging is off, the state machine
         // reflects it and MainActivity shows the setup card.
         PrivilegedService.ensureRunning()
+        SystemStatus.init(this)
 
         // Keeps the rendering layer free of the desktop UI and the privileged path.
         WorkspaceController.desktopContent = { context, display ->
