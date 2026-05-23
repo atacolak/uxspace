@@ -371,7 +371,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-2100";
+            static const char kBuildStamp[] = "v20260523-2200";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -406,6 +406,22 @@ void PipeServer::HandleClient(HANDLE pipe)
                 if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
+            // RESPONSE BEFORE WORK: v2100's client-side stage logging
+            // confirmed that every SetMonitorCount removal request
+            // returned ERROR_BROKEN_PIPE (109) to the client's ReadFile
+            // for the response header. The driver was processing the
+            // removal for ~2-3 seconds, during which the IddCx framework
+            // apparently recycled our pipe-server context (the next
+            // request succeeds, so it's a thread/context restart, not a
+            // full driver crash). By sending Ack BEFORE invoking
+            // SetMonitorCount + FlushFileBuffers, the client always
+            // sees a response. Actual completion is observable client-
+            // side via WM_DISPLAYCHANGE; we no longer report the
+            // IddCxMonitorDeparture NTSTATUS over the wire because the
+            // wire dies before we can write it anyway.
+            if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
+            FlushFileBuffers(pipe);
+
             char diag[124] = {};
             std::uint8_t before = 0, after = 0;
             NTSTATUS rmStatus = STATUS_SUCCESS;
@@ -414,38 +430,8 @@ void PipeServer::HandleClient(HANDLE pipe)
                 ownerOk = true;
                 m_owner->SetMonitorCount(payload.count, &before, &after, &rmStatus, diag, sizeof(diag));
             }
-            if (!NT_SUCCESS(rmStatus))
-            {
-                // v1500's "Nack/Internal:" (empty diag) wouldn't tell us
-                // whether the synthetic fallback ran, whether DiagAppend
-                // wrote anything, or whether sendNackMsg's copy survived.
-                // So we now unconditionally build a fresh synthesised
-                // message into a separate buffer with a build-tag prefix
-                // ("v18 ..."), then layer the upstream IddCx-specific
-                // string after it when present. If the user sees "v18 "
-                // in the log the synthetic path ran; if they see nothing,
-                // the issue is downstream of this code (sendNackMsg copy
-                // or wire transfer).
-                char synth[124] = {};
-                std::size_t pos = 0;
-                DiagAppendStr(synth, sizeof(synth), pos, "v18 SetMonitorCount(");
-                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) payload.count);
-                DiagAppendStr(synth, sizeof(synth), pos, ") b=");
-                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) before);
-                DiagAppendStr(synth, sizeof(synth), pos, " a=");
-                DiagAppendUInt(synth, sizeof(synth), pos, (unsigned) after);
-                DiagAppendStr(synth, sizeof(synth), pos, " rm=");
-                DiagAppendHex32(synth, sizeof(synth), pos, (unsigned) rmStatus);
-                DiagAppendStr(synth, sizeof(synth), pos, " owner=");
-                DiagAppendUInt(synth, sizeof(synth), pos, ownerOk ? 1u : 0u);
-                if (diag[0] != '\0') {
-                    DiagAppendStr(synth, sizeof(synth), pos, " | ");
-                    DiagAppendStr(synth, sizeof(synth), pos, diag);
-                }
-                if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, synth)) return;
-                break;
-            }
-            if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
+            // Status discarded — Ack already sent, can't surface failure.
+            (void) before; (void) after; (void) rmStatus; (void) ownerOk;
             break;
         }
 
