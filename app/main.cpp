@@ -132,6 +132,19 @@ uxspace::viture::VitureTracker g_tracker;
 uxspace::tracking::ViewMode    g_viewMode = uxspace::tracking::ViewMode::PINNED;
 uxspace::spatial::layouts::Single g_layout;     // W3 will swap this for layout cycling
 constexpr int                  kHotkeyRecenter = 2;
+
+// App-side anchor: stores the head pose at the moment of Win+Shift+C.
+// All subsequent poses are reported as pose * inverse(anchor) so the
+// wearer's current physical direction becomes "facing forward" without
+// touching the SDK's tracking origin (unlike Win+Shift+R, which calls
+// xr_device_provider_reset_origin_carina). Useful for "form up around
+// me" semantics in multi-monitor layouts (W3 stage E).
+uxspace::tracking::HeadPose g_anchorPose;  // identity by default
+
+// Set when Win+Shift is held (no other modifiers required) — used to
+// show the key-legend overlay so the wearer can discover bindings in
+// situ. Recomputed each frame from GetAsyncKeyState; cheap enough.
+bool g_winShiftHeld = false;
 int                  g_screenBandIndex = 2;            // index into kScreenBandPresets (default = 0.90)
 
 // --- Zoom (Win+Shift+wheel over the UxSpace virtual monitor) -------------
@@ -330,13 +343,16 @@ void CycleScreenBand();
 void AdjustZoom(float delta);
 void ToggleViewMode();
 void RecenterTracker();
+void AnchorAtCurrentPose();
 
 // Global hotkeys, all gated on Win+Shift held + a key press transition:
-//   Z       → cycle screen-band preset (0.80 / 0.85 / 0.90)
+//   Z       → cycle screen-band preset (0.80 / 0.85 / 0.90 / 1.00 / 1.20 / 1.30)
 //   + / =   → zoom in by kZoomStep (covers both shifted and unshifted)
 //   - / _   → zoom out by kZoomStep
 //   X       → toggle view mode (PINNED ↔ FREE — "tracking on/off")
-//   R       → recenter: wearer's current physical pose becomes the new origin
+//   R       → recenter: SDK-level reset_origin (Carina) — full tracking reset
+//   C       → centre displays: app-side anchor at current pose (no SDK call;
+//            "form up around me" without touching the tracking origin)
 //
 // The hook consumes the keystroke when it acts, so the focused app
 // doesn't receive a stray character.
@@ -363,8 +379,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     ToggleViewMode();
                     return 1;
                 case 'R':
-                    uxspace::log::info("hotkey: Win+Shift+R (recenter).");
+                    uxspace::log::info("hotkey: Win+Shift+R (SDK recenter).");
                     RecenterTracker();
+                    return 1;
+                case 'C':
+                    uxspace::log::info("hotkey: Win+Shift+C (anchor at current pose).");
+                    AnchorAtCurrentPose();
                     return 1;
                 case VK_OEM_PLUS:
                 case VK_ADD:
@@ -458,6 +478,19 @@ void ToggleViewMode() {
 
 void RecenterTracker() {
     g_tracker.recenter();
+}
+
+void AnchorAtCurrentPose() {
+    // Snapshot the tracker's current pose; subsequent latestPose() returns
+    // are reported relative to it in the render loop. Cheap, reversible —
+    // pressing again re-snapshots; resetting g_anchorPose to identity
+    // undoes the anchor entirely (no UI for that yet).
+    const uxspace::tracking::HeadPose now = g_tracker.latestPose();
+    g_anchorPose = now;
+    uxspace::log::info("anchor: pose pos=[%+.3f %+.3f %+.3f] q=[%+.3f %+.3f %+.3f %+.3f] valid=%d",
+                       now.position.x, now.position.y, now.position.z,
+                       now.orientation.x, now.orientation.y, now.orientation.z, now.orientation.w,
+                       now.valid ? 1 : 0);
 }
 
 DirectX::XMFLOAT4 ComputeZoomUVRect() {
@@ -763,7 +796,8 @@ void DrawHotkeysWindow() {
         row("Win+Shift+Z",     "global", "Cycle screen band (0.80 / 0.85 / 0.90).");
         row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
         row("Win+Shift+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
-        row("Win+Shift+R",     "global", "Recenter: wearer's current physical pose becomes the new origin.");
+        row("Win+Shift+R",     "global", "Recenter: SDK reset_origin (hard reset of tracking).");
+        row("Win+Shift+C",     "global", "Centre displays: app-side anchor at current pose (no SDK call).");
         ImGui::EndTable();
     }
     ImGui::End();
@@ -1098,6 +1132,37 @@ void DrawDevUI(HWND devWnd) {
     DrawHotkeysWindow();
     DrawDisplayLayoutWindow();
 
+    // Key legend — visible while Win+Shift is held. MVP: dev-window
+    // floating panel; the glasses-framebuffer version of the same
+    // panel is the next iteration (needs GDI-text-to-texture or a
+    // second ImGui context).
+    if (g_winShiftHeld) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const ImVec2 pos { vp->WorkPos.x + 12,
+                           vp->WorkPos.y + vp->WorkSize.y - 220 };
+        ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.90f);
+        ImGui::Begin("##keylegend", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav      | ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Win+Shift+...");
+        ImGui::Separator();
+        auto kv = [](const char* k, const char* v) {
+            ImGui::TextUnformatted(k);
+            ImGui::SameLine(180);
+            ImGui::TextUnformatted(v);
+        };
+        kv("Wheel",         "Zoom in/out (cursor on UxSpace)");
+        kv("+ / -",         "Zoom in/out (keyboard)");
+        kv("Z",             "Cycle screen size");
+        kv("D",             "Pseudo-3D layering");
+        kv("X",             "Toggle PINNED / FREE");
+        kv("R",             "SDK recenter");
+        kv("C",             "Anchor at current pose");
+        ImGui::End();
+    }
+
     ImGui::Render();
 
     const float clear[4] = { 0.07f, 0.08f, 0.10f, 1.0f };
@@ -1275,14 +1340,33 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // recycles its SRV on ACCESS_LOST, so the pointer is only valid
         // this frame.
         UpdateZoomFromCursor();
+        g_winShiftHeld = WinAndShiftHeld();
 
         // Push the tracker's latest head pose into the camera. If the
         // user has requested FREE but the tracker isn't producing,
         // render PINNED anyway — the user's intent stays sticky, the
         // visible behaviour falls back gracefully.
+        //
+        // The pose is reported relative to g_anchorPose (set by
+        // Win+Shift+C). For an identity anchor (default), relative ==
+        // absolute. For a captured anchor: relativePos = absPos - anchorPos
+        // and relativeRot = absRot * conj(anchorRot).
         {
             using uxspace::tracking::ViewMode;
-            g_camera.headPose = g_tracker.latestPose();
+            const auto abs = g_tracker.latestPose();
+            uxspace::tracking::HeadPose rel = abs;
+            if (g_anchorPose.valid) {
+                const DirectX::XMVECTOR qAbs    = DirectX::XMLoadFloat4(&abs.orientation);
+                const DirectX::XMVECTOR qAnchor = DirectX::XMLoadFloat4(&g_anchorPose.orientation);
+                const DirectX::XMVECTOR qRel    = DirectX::XMQuaternionMultiply(
+                                                       qAbs,
+                                                       DirectX::XMQuaternionConjugate(qAnchor));
+                DirectX::XMStoreFloat4(&rel.orientation, qRel);
+                rel.position.x = abs.position.x - g_anchorPose.position.x;
+                rel.position.y = abs.position.y - g_anchorPose.position.y;
+                rel.position.z = abs.position.z - g_anchorPose.position.z;
+            }
+            g_camera.headPose = rel;
             g_camera.mode     = (g_viewMode == ViewMode::FREE && g_tracker.isConnected())
                                 ? ViewMode::FREE : ViewMode::PINNED;
         }

@@ -319,7 +319,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1135";
+            static const char kBuildStamp[] = "v20260523-1240";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
@@ -331,10 +331,12 @@ void PipeServer::HandleClient(HANDLE pipe)
         {
             if (reqHdr.payload_bytes != sizeof(SetMonitorCountPayload))
             {
-                char diag[124];
+                char diag[124] = {};
+                // %zu fails silently in this UMDF runtime; use %u with a
+                // cast so the message always renders.
                 _snprintf_s(diag, sizeof(diag), _TRUNCATE,
-                            "SetMonitorCount payload expected %zu bytes, got %u",
-                            sizeof(SetMonitorCountPayload),
+                            "SetMonitorCount payload expected %u bytes, got %u",
+                            (unsigned) sizeof(SetMonitorCountPayload),
                             (unsigned) reqHdr.payload_bytes);
                 if (!drain(reqHdr.payload_bytes)) return;
                 if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
@@ -344,16 +346,29 @@ void PipeServer::HandleClient(HANDLE pipe)
             if (!ReadExact(pipe, &payload, sizeof(payload))) return;
             if (payload.count > kMaxMonitors)
             {
-                char diag[124];
+                char diag[124] = {};
                 _snprintf_s(diag, sizeof(diag), _TRUNCATE,
                             "count=%u > max=%u",
                             (unsigned) payload.count, (unsigned) kMaxMonitors);
                 if (!sendNackMsg(ErrorCode::TooManyMonitors, reqHdr.request_id, diag)) return;
                 break;
             }
-            std::uint8_t actual = 0;
-            if (m_owner) actual = m_owner->SetMonitorCount(payload.count);
-            (void) actual;
+            char diag[124] = {};
+            std::uint8_t before = 0, after = 0;
+            NTSTATUS rmStatus = STATUS_SUCCESS;
+            if (m_owner) {
+                m_owner->SetMonitorCount(payload.count, &before, &after, &rmStatus, diag, sizeof(diag));
+            }
+            if (!NT_SUCCESS(rmStatus))
+            {
+                if (diag[0] == '\0') {
+                    _snprintf_s(diag, sizeof(diag), _TRUNCATE,
+                                "SetMonitorCount(%u): before=%u after=%u rmStatus=0x%08X",
+                                (unsigned) payload.count, before, after, (unsigned) rmStatus);
+                }
+                if (!sendNackMsg(ErrorCode::Internal, reqHdr.request_id, diag)) return;
+                break;
+            }
             if (!sendHeader(MessageType::Ack, 0, reqHdr.request_id)) return;
             break;
         }
@@ -868,9 +883,16 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
     }
 }
 
-std::uint8_t IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount)
+void IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount,
+                                            std::uint8_t* outBefore,
+                                            std::uint8_t* outAfter,
+                                            NTSTATUS*     outStatus,
+                                            char*         outDiag,
+                                            std::size_t   outDiagBytes)
 {
     if (targetCount > kUxSpaceMaxMonitors) targetCount = kUxSpaceMaxMonitors;
+    NTSTATUS firstFailure = STATUS_SUCCESS;
+    if (outDiag && outDiagBytes > 0) outDiag[0] = '\0';
 
     std::vector<IDDCX_MONITOR> toRemove;
     std::uint8_t currentCount = 0;
@@ -885,12 +907,23 @@ std::uint8_t IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount)
             m_Monitors.pop_back();
         }
     }
+    if (outBefore) *outBefore = currentCount;
 
     // Detach excess monitors outside the lock so we don't hold it
-    // across IddCx framework calls.
+    // across IddCx framework calls. Capture the first NTSTATUS failure
+    // so the IPC caller can see *why* removal failed rather than just
+    // "Internal".
     for (IDDCX_MONITOR mon : toRemove)
     {
-        IddCxMonitorDeparture(mon);
+        NTSTATUS s = IddCxMonitorDeparture(mon);
+        if (!NT_SUCCESS(s) && NT_SUCCESS(firstFailure)) {
+            firstFailure = s;
+            if (outDiag && outDiagBytes > 0) {
+                _snprintf_s(outDiag, outDiagBytes, _TRUNCATE,
+                            "IddCxMonitorDeparture failed: hr=0x%08X",
+                            (unsigned) s);
+            }
+        }
         WdfObjectDelete(mon);
     }
 
@@ -900,8 +933,11 @@ std::uint8_t IndirectDeviceContext::SetMonitorCount(std::uint8_t targetCount)
         FinishInit(nextConnectorIndex++);
     }
 
-    std::lock_guard<std::mutex> lk(m_MonitorsMutex);
-    return static_cast<std::uint8_t>(m_Monitors.size());
+    {
+        std::lock_guard<std::mutex> lk(m_MonitorsMutex);
+        if (outAfter) *outAfter = static_cast<std::uint8_t>(m_Monitors.size());
+    }
+    if (outStatus) *outStatus = firstFailure;
 }
 
 IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :

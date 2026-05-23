@@ -107,11 +107,18 @@ namespace UxSpace
             void FinishInit(UINT ConnectorIndex);
 
             // W3 stage C: adjust the number of attached monitors at
-            // runtime. Returns the actual count after the change
-            // (clamped to [0, kUxSpaceMaxMonitors] driver-side). Safe
-            // to call from any thread; the IddCx API itself is
-            // serialised by the framework.
-            std::uint8_t SetMonitorCount(std::uint8_t targetCount);
+            // runtime. targetCount is clamped to [0, kUxSpaceMaxMonitors]
+            // driver-side. Optional output parameters record before /
+            // after counts, the first IddCx NTSTATUS failure (or
+            // STATUS_SUCCESS), and an ASCII diagnostic — so the IPC
+            // server can surface specific failures to :app instead of
+            // an opaque "Internal".
+            void SetMonitorCount(std::uint8_t targetCount,
+                                 std::uint8_t* outBefore = nullptr,
+                                 std::uint8_t* outAfter  = nullptr,
+                                 NTSTATUS*     outStatus = nullptr,
+                                 char*         outDiag   = nullptr,
+                                 std::size_t   outDiagBytes = 0);
 
         protected:
             WDFDEVICE m_WdfDevice;

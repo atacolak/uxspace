@@ -16,19 +16,30 @@ namespace {
 // the Android counterpart so the perceived screen size matches across
 // platforms.
 D3D11_VIEWPORT bandViewport(UINT originX, UINT availW, UINT availH, float band) {
-    band = std::clamp(band, kScreenBandMin, 1.0f);
-    UINT areaH = static_cast<UINT>(availH * band);
-    UINT areaW = areaH * 16u / 9u;
-    if (areaW > availW) {
-        areaW = availW;
-        areaH = areaW * 9u / 16u;
+    // Clamp to [min, max]. Above 1.0 the rendered area is larger than
+    // the framebuffer half; the central crop is what the wearer sees,
+    // which appears closer / bigger. D3D handles viewports extending
+    // beyond the framebuffer correctly (no error, content clipped at
+    // the framebuffer boundary).
+    band = std::clamp(band, kScreenBandMin, kScreenBandMax);
+    const int areaH_i = static_cast<int>(availH * band);
+    int areaH = areaH_i;
+    int areaW = areaH * 16 / 9;
+    // Cap by aspect only when band <= 1.0 (we want the 16:9 region to
+    // fit inside the per-eye half-framebuffer width). When band > 1.0
+    // we deliberately overflow.
+    if (band <= 1.0f && areaW > static_cast<int>(availW)) {
+        areaW = static_cast<int>(availW);
+        areaH = areaW * 9 / 16;
     }
-    areaW = std::max<UINT>(areaW, 1u);
-    areaH = std::max<UINT>(areaH, 1u);
+    areaW = std::max(areaW, 1);
+    areaH = std::max(areaH, 1);
 
     D3D11_VIEWPORT vp{};
-    vp.TopLeftX = static_cast<FLOAT>(originX + (availW - areaW) / 2);
-    vp.TopLeftY = static_cast<FLOAT>((availH - areaH) / 2);
+    // Negative top-left is valid for D3D11; content outside framebuffer
+    // is clipped during rasterisation.
+    vp.TopLeftX = static_cast<FLOAT>(static_cast<int>(originX) + (static_cast<int>(availW) - areaW) / 2);
+    vp.TopLeftY = static_cast<FLOAT>((static_cast<int>(availH) - areaH) / 2);
     vp.Width    = static_cast<FLOAT>(areaW);
     vp.Height   = static_cast<FLOAT>(areaH);
     vp.MinDepth = 0.0f;
