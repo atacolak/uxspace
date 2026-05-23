@@ -290,9 +290,21 @@ void PipeServer::HandleClient(HANDLE pipe)
         switch (reqHdr.type)
         {
         case MessageType::Ping:
+        {
             if (!drain(reqHdr.payload_bytes)) return;
-            if (!sendHeader(MessageType::Pong, 0, reqHdr.request_id)) return;
+            // Pong carries the driver's build tag as a bare ASCII
+            // payload (no NUL on the wire — app caps at payload_bytes).
+            // Lets :app's log say which driver is actually responding.
+            // Hardcoded per release because the driver toolchain
+            // strips __DATE__/__TIME__ for deterministic builds; bump
+            // this string with each driver-MSI rebuild.
+            static const char kBuildStamp[] = "v20260523-1122";
+            const std::uint32_t buildBytes =
+                static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
+            if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
+            if (buildBytes > 0 && !WriteAll(pipe, kBuildStamp, buildBytes)) return;
             break;
+        }
 
         case MessageType::SetMonitorCount:
         {

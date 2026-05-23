@@ -41,6 +41,31 @@ Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\Root' |
 Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
 Log "Cert imported into Root + TrustedPublisher."
 
+# Self-heal: scrub any prior install before staging the new one. This
+# matters because MajorUpgrade between two driver MSIs leaves the old
+# OEM-published .inf in the driver store and the running .dll loaded
+# in WUDFHost — installing the new MSI's files alone doesn't force a
+# rebind to the new binary. Removing the devnode + deleting the prior
+# OEM-published .inf forces Windows to load the freshly staged driver
+# when we re-add it below.
+$devcon = Join-Path $here 'devcon.exe'
+if (Test-Path $devcon) {
+    & $devcon remove 'Root\UxSpaceDriver' 2>&1 | ForEach-Object { Log "[scrub-devcon] $_" }
+}
+$enum = pnputil /enum-drivers 2>&1
+$currentPub = $null
+foreach ($line in $enum) {
+    if ($line -match '^Published Name:\s+(\S+)') {
+        $currentPub = $matches[1]
+    } elseif ($line -match '^Original Name:\s+(\S+)') {
+        if ($matches[1] -ieq 'UxSpaceDriver.inf' -and $currentPub) {
+            Log "Scrubbing prior OEM-published $currentPub from driver store."
+            pnputil /delete-driver $currentPub /uninstall /force 2>&1 | ForEach-Object { Log "[scrub-pnputil] $_" }
+        }
+    }
+}
+Start-Sleep -Milliseconds 500
+
 # Stage driver into the driver store. pnputil's stdout names the
 # OEM-renamed inf and reports success/failure; capture it in the log so
 # we can see what the OS thinks happened.
@@ -59,7 +84,7 @@ Log "pnputil add-driver done (exit=$LASTEXITCODE)."
 
 # Create the root devnode that materialises the IddCx adapter. Without
 # this the driver is staged but no virtual monitor appears.
-$devcon = Join-Path $here 'devcon.exe'
+# ($devcon was set above during the scrub block.)
 $devOut = & $devcon install $inf 'Root\UxSpaceDriver' 2>&1 | Out-String
 Log "devcon output:"
 $devOut -split "`r?`n" | ForEach-Object { Log "  $_" }

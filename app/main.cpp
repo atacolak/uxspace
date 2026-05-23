@@ -190,6 +190,7 @@ struct IpcResult {
     uxspace::ipc::ErrorCode  nackCode     = uxspace::ipc::ErrorCode::Internal;
     DWORD                    win32Error   = 0;
     char                     nackMessage[128] = {};  // ASCII diagnostic from driver
+    char                     pongPayload[128] = {};  // driver build stamp (Pong only)
 };
 
 IpcResult IpcRequest(uxspace::ipc::MessageType type,
@@ -248,6 +249,13 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
         std::memcpy(r.nackMessage, np.message,
                     std::min(sizeof(r.nackMessage) - 1, sizeof(np.message)));
         r.nackMessage[sizeof(r.nackMessage) - 1] = '\0';
+    } else if (rsp.type == MessageType::Pong && rsp.payload_bytes > 0
+               && rsp.payload_bytes < sizeof(r.pongPayload)) {
+        // Pong payload is the driver's __DATE__ __TIME__ build stamp,
+        // ASCII without a trailing NUL on the wire.
+        ReadFile(pipe, r.pongPayload, rsp.payload_bytes, &read, nullptr);
+        r.pongPayload[std::min<DWORD>(rsp.payload_bytes,
+                                      sizeof(r.pongPayload) - 1)] = '\0';
     } else if (rsp.payload_bytes > 0) {
         std::vector<BYTE> scratch(rsp.payload_bytes);
         ReadFile(pipe, scratch.data(), rsp.payload_bytes, &read, nullptr);
@@ -1013,7 +1021,8 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SameLine();
     if (ImGui::SmallButton("Ping")) {
         const IpcResult r = IpcPing();
-        if (r.ok) uxspace::log::info("ipc: manual Ping -> %s.", IpcMessageName(r.replyType));
+        if (r.ok) uxspace::log::info("ipc: manual Ping -> Pong. Driver build = %s.",
+                                     r.pongPayload[0] ? r.pongPayload : "(unknown)");
         else      uxspace::log::warn("ipc: manual Ping failed (win32=%lu, type=%s/%s: %s).",
                                      r.win32Error,
                                      IpcMessageName(r.replyType),
@@ -1173,7 +1182,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             Sleep(250);
         }
         if (ping.ok && ping.replyType == uxspace::ipc::MessageType::Pong) {
-            uxspace::log::info("ipc: driver pipe Ping OK (Pong received).");
+            uxspace::log::info("ipc: driver pipe Ping OK. Driver build = %s",
+                               ping.pongPayload[0] ? ping.pongPayload : "(unknown - pre-v1112)");
         } else if (ping.win32Error != 0) {
             uxspace::log::warn("ipc: driver pipe Ping never came up after retries "
                                "(last err=%lu). Driver may be pre-W3 or the pipe "
