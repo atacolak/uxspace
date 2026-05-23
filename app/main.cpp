@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-1900";
+constexpr const char kAppBuildStamp[] = "v20260523-2000";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -477,24 +477,30 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
     }
     r.replyType = rsp.type;
 
-    if (rsp.payload_bytes == sizeof(NackPayload) && rsp.type == MessageType::Nack) {
+    if (rsp.type == MessageType::Nack) {
+        // v1900's "ipc: NackPayload read=..." never fired even though
+        // Nack/Internal kept showing up. That meant rsp.payload_bytes
+        // didn't equal sizeof(NackPayload) and the original sized-match
+        // condition skipped the read. Read whatever payload_bytes worth
+        // of bytes are actually on the wire (clipped to our struct),
+        // and unconditionally log enough to classify the failure.
         NackPayload np{};
-        const BOOL  ok = ReadFile(pipe, &np, sizeof(np), &read, nullptr);
-        const DWORD err = ok ? 0 : GetLastError();
+        const DWORD wantedBytes = std::min<DWORD>(rsp.payload_bytes,
+                                                  static_cast<DWORD>(sizeof(np)));
+        BOOL  readOk = TRUE;
+        DWORD readErr = 0;
+        if (wantedBytes > 0) {
+            readOk  = ReadFile(pipe, &np, wantedBytes, &read, nullptr);
+            readErr = readOk ? 0 : GetLastError();
+        } else {
+            read = 0;
+        }
         r.nackCode = np.code;
-        // Defensive copy + NUL-terminate so we can pass to %s without
-        // worrying about driver-side termination.
         std::memcpy(r.nackMessage, np.message,
                     std::min(sizeof(r.nackMessage) - 1, sizeof(np.message)));
         r.nackMessage[sizeof(r.nackMessage) - 1] = '\0';
-        // Diagnostic: log how many bytes ReadFile actually delivered and
-        // the first 16 bytes of np.message as hex. v1500..v1800 all
-        // shipped with empty Nack diags even after every driver fix; if
-        // ReadFile is returning < 128 here we know the message bytes
-        // never reached the pipe and the problem is server-side; if it
-        // returns 128 and the bytes are all zero, the bytes were written
-        // but blanked somewhere downstream.
-        char hex[64] = {};
+
+        char hex[80] = {};
         std::size_t hp = 0;
         for (int i = 0; i < 16 && hp + 3 < sizeof(hex); ++i) {
             const unsigned char b = static_cast<unsigned char>(np.message[i]);
@@ -504,10 +510,14 @@ IpcResult IpcRequest(uxspace::ipc::MessageType type,
             hex[hp++] = ' ';
         }
         hex[hp] = '\0';
-        uxspace::log::info("ipc: NackPayload read=%lu ok=%d err=%lu hex16=%s",
+        uxspace::log::info("ipc: Nack rsp.payload_bytes=%u sizeof(NackPayload)=%zu wanted=%lu read=%lu ok=%d err=%lu code=%u hex16=%s",
+                           rsp.payload_bytes,
+                           sizeof(NackPayload),
+                           static_cast<unsigned long>(wantedBytes),
                            static_cast<unsigned long>(read),
-                           ok ? 1 : 0,
-                           static_cast<unsigned long>(err),
+                           readOk ? 1 : 0,
+                           static_cast<unsigned long>(readErr),
+                           static_cast<unsigned>(np.code),
                            hex);
     } else if (rsp.type == MessageType::Pong && rsp.payload_bytes > 0
                && rsp.payload_bytes < sizeof(r.pongPayload)) {
