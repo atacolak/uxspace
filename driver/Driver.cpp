@@ -234,7 +234,7 @@ void PipeServer::Start()
     // monitor change, so a CREATE_ALWAYS init would erase the previous
     // session's lines on every recycle (verified in v2300 logs).
     uxspace::log::init(L"C:\\Windows\\Temp\\UxSpace-driver.log", /*append=*/true);
-    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2600 ========");
+    uxspace::log::info("======== driver: PipeServer::Start build=v20260523-2700 ========");
 
     m_terminate.Attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     m_thread.Attach(CreateThread(nullptr, 0, &PipeServer::ThreadProc, this, 0, nullptr));
@@ -417,7 +417,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-2600";
+            static const char kBuildStamp[] = "v20260523-2700";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;

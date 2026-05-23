@@ -56,7 +56,7 @@ constexpr wchar_t kGlassesNameMatch[] = L"VITURE";
 // file confirms which app + driver pair is actually loaded — handy
 // after MSI iterations where pnputil silently kept the previous driver
 // because Windows decided it was "the same version".
-constexpr const char kAppBuildStamp[] = "v20260523-2600";
+constexpr const char kAppBuildStamp[] = "v20260523-2700";
 
 // Cached driver build stamp from the most-recent successful Pong.
 // Populated by the boot Ping and refreshed by the dev-UI Ping button;
@@ -1507,11 +1507,28 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SameLine();
     ImGui::TextDisabled("Monitor count:");
     // v2500 user report: rapid 3->1->2->1 sequence hung the laptop.
-    // The driver now enforces a 5 s cooldown between SetMonitorCount
-    // calls (Nack/DriverBusy if violated). Surface that here so the
-    // user isn't surprised when a quick second press is rejected.
-    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
-        "Warning: each press triggers a WUDFHost driver recycle. Wait ~5 s between presses; rapid changes can hang the display.");
+    // The driver enforces a 5 s cooldown server-side (Nack/DriverBusy
+    // if violated). The UI also greys the buttons during that window so
+    // the user can't fire a request that's about to be rejected. The
+    // app's cooldown clock is set on every successful Ack; if the user
+    // restarts only :app, the buttons start enabled and the driver-side
+    // check still backs us up.
+    static DWORD s_lastAcceptedTick = 0;
+    constexpr DWORD kUiCooldownMs = 5000;
+    const DWORD nowTick = GetTickCount();
+    const DWORD elapsedMs = (s_lastAcceptedTick == 0) ? kUiCooldownMs
+                                                      : nowTick - s_lastAcceptedTick;
+    const bool inCooldown = elapsedMs < kUiCooldownMs;
+    const DWORD remainingMs = inCooldown ? (kUiCooldownMs - elapsedMs) : 0;
+    if (inCooldown) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+            "Driver recycling — buttons re-enabled in %.1f s.",
+            remainingMs / 1000.0f);
+    } else {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+            "Each press triggers a WUDFHost driver recycle; 5 s cooldown enforced.");
+    }
+    ImGui::BeginDisabled(inCooldown);
     for (std::uint8_t n = 1; n <= uxspace::ipc::kMaxMonitors; ++n) {
         ImGui::SameLine();
         char label[16]; snprintf(label, sizeof(label), "%u##mcount", n);
@@ -1527,9 +1544,11 @@ void DrawDevUI(HWND devWnd) {
             } else {
                 uxspace::log::info("ipc: SetMonitorCount(%u) -> %s.", n,
                                    IpcMessageName(r.replyType));
+                s_lastAcceptedTick = GetTickCount();
             }
         }
     }
+    ImGui::EndDisabled();
     ImGui::Separator();
 
     // Pseudo-3D layering (W1.5)
