@@ -20,6 +20,7 @@ These rules come from the docs and must hold across all future code:
 - **Graceful degradation is mandatory.** If `xr_device_provider_is_product_support_native_dof()` returns 0, `Camera.FREE` uses rotation only and the UI hides translation controls. With no tracker at all, FREE is hidden entirely — PINNED + multi-monitor + stereo output must keep working. ([§8](docs/ARCHITECTURE.md))
 - **`:driver` owns its own lifecycle.** `:app` is a client of an already-loaded driver instance over a named pipe defined in `:shared`. Do not couple driver init to app startup. ([§6, §11](docs/ARCHITECTURE.md))
 - **Windows is the desktop.** Do not rebuild UI that the OS provides — no cursor overlay, no app-launcher, no "desktop". The only user-facing UI is the ImGui settings overlay rendered into the 3D scene. ([§1, §5](docs/ARCHITECTURE.md))
+- **Cursor-glide onto IddCx outputs can be transiently blocked by a long-running DDA consumer on that output.** Symptom: physical mouse refuses to cross from a real display onto UxSpace; `SetCursorPos`/`Win+Shift+arrow` still work. Verified by `SendInput` clamping at the boundary while `:app` was running and DDA-capturing the output; restarting `:app` cleared it. Mechanism not yet pinned down (suspected: long-lived `IDXGIOutputDuplication` interacts badly with cursor routing). Workaround: restart the DDA consumer. Real fix likely needs the app to recycle the duplication periodically (or unduplicate when no rendering is happening); follow up when this resurfaces.
 
 ## Stack and build layout
 

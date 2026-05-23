@@ -125,6 +125,16 @@ bool FindUxSpaceOutput(IDXGIOutput** out, std::wstring& friendlyName) {
     return false;
 }
 
+void ResetCapture(Capture& c) {
+    c.duplication.Reset();
+    c.dst.Reset();
+    c.srv.Reset();
+    c.width  = 0;
+    c.height = 0;
+    c.present = false;
+    // monitorName + frameCount preserved for UI continuity.
+}
+
 bool InitCapture(D3D& d, Capture& c) {
     ComPtr<IDXGIOutput> output;
     if (!FindUxSpaceOutput(&output, c.monitorName)) {
@@ -157,16 +167,39 @@ bool InitCapture(D3D& d, Capture& c) {
     if (FAILED(d.device->CreateShaderResourceView(c.dst.Get(), nullptr, &c.srv))) {
         c.lastError = E_FAIL; return false;
     }
-    c.present = true;
+    c.lastError = S_OK;
+    c.present   = true;
     return true;
 }
 
 void TickCapture(D3D& d, Capture& c) {
-    if (!c.duplication) return;
+    // Recover from a torn-down state (first launch / topology change / no UxSpace yet).
+    // Throttle re-init attempts so the EnumDisplayDevices + DXGI walk doesn't hammer
+    // every frame when no UxSpace monitor exists.
+    if (!c.duplication) {
+        static int s_retryCountdown = 0;
+        if (s_retryCountdown > 0) { --s_retryCountdown; return; }
+        if (!InitCapture(d, c)) {
+            s_retryCountdown = 60; // ~1s @60Hz before next attempt
+        }
+        return;
+    }
+
     DXGI_OUTDUPL_FRAME_INFO info{};
     ComPtr<IDXGIResource> res;
     HRESULT hr = c.duplication->AcquireNextFrame(0, &info, &res);
+
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) return; // no new frame this tick
+
+    // Layout / mode change invalidates the duplication: tear down so the next
+    // tick re-acquires. Holding a stale duplication wedges cursor routing
+    // (the OS still considers the output "claimed"), which manifests as
+    // mouse-glide being blocked at the boundary.
+    if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
+        c.lastError = hr;
+        ResetCapture(c);
+        return;
+    }
     if (FAILED(hr)) { c.lastError = hr; return; }
 
     ComPtr<ID3D11Texture2D> srcTex;
