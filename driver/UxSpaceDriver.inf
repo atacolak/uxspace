@@ -1,0 +1,74 @@
+;
+; UxSpaceDriver.inf
+;
+; UxSpace virtual display driver (IddCx UMDF2).
+;
+
+[Version]
+PnpLockDown = 1
+Signature   = "$Windows NT$"
+ClassGUID   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Class       = Display
+ClassVer    = 2.0
+Provider    = %ManufacturerName%
+CatalogFile = UxSpaceDriver.cat
+DriverVer   =                ; set by stampinf
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...22000
+
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceName% = UxSpaceDriver_Install, Root\UxSpaceDriver
+%DeviceName% = UxSpaceDriver_Install, UxSpaceDriver
+
+[SourceDisksFiles]
+UxSpaceDriver.dll = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+; =================== UMDF Device ====================
+
+[UxSpaceDriver_Install.NT]
+Include    = WUDFRD.inf
+Needs      = WUDFRD.NT
+CopyFiles  = UMDriverCopy
+
+[UxSpaceDriver_Install.NT.hw]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.HW
+AddReg  = UxSpaceDriver_HardwareDeviceSettings
+
+[UxSpaceDriver_HardwareDeviceSettings]
+HKR,,        "UpperFilters",      %REG_MULTI_SZ%, "IndirectKmd"
+HKR, "WUDF", "DeviceGroupId",     %REG_SZ%,       "UxSpaceDriverGroup"
+
+[UxSpaceDriver_Install.NT.Services]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.Services
+
+[UxSpaceDriver_Install.NT.Wdf]
+UmdfService                   = UxSpaceDriver, UxSpaceDriver_UmdfInstall
+UmdfServiceOrder              = UxSpaceDriver
+UmdfKernelModeClientPolicy    = AllowKernelModeClients
+
+[UxSpaceDriver_UmdfInstall]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary      = %12%\UMDF\UxSpaceDriver.dll
+UmdfExtensions     = IddCx0102
+
+[DestinationDirs]
+UMDriverCopy = 12, UMDF   ; -> %SystemRoot%\System32\drivers\UMDF
+
+[UMDriverCopy]
+UxSpaceDriver.dll
+
+; =================== Generic =========================
+
+[Strings]
+ManufacturerName = "DVladi"
+DiskName         = "UxSpace Virtual Display Installation Disk"
+DeviceName       = "UxSpace Virtual Display"
+
+REG_MULTI_SZ = 0x00010000
+REG_SZ       = 0x00000000

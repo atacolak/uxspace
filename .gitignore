@@ -1,0 +1,53 @@
+# Build output
+build/
+out/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.ipch
+ipch/
+
+# Visual Studio / CMake cache
+.vs/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+Testing/
+*.cmake.lock
+
+# CMake-generated project files at top level (not the hand-written :driver one)
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+!driver/**/*.vcxproj
+!driver/**/*.vcxproj.filters
+
+# Driver build artifacts
+driver/**/Debug/
+driver/**/Release/
+driver/**/x64/
+driver/**/ARM64/
+*.cer
+*.pfx
+
+# Vendored proprietary Viture SDK (per docs/ARCHITECTURE.md §7)
+viture/sdk/
+vendor/viture/
+
+# Local SQLite history scratch
+history.db
+history.db-shm
+history.db-wal
+
+# Dear ImGui runtime state (window positions etc.)
+imgui.ini
+
+# OS junk
+Thumbs.db
+desktop.ini
