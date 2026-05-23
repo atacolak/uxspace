@@ -144,6 +144,15 @@ constexpr int                  kHotkeyRecenter = 2;
 // me" semantics in multi-monitor layouts (W3 stage E).
 uxspace::tracking::HeadPose g_anchorPose;  // identity by default
 
+// Exponentially-smoothed pose. Carina pumps raw IMU samples at high
+// frequency with visible high-frequency noise; piping them straight to
+// the camera produces shimmer/jitter that's uncomfortable at any zoom.
+// Per-frame: smoothed := lerp(smoothed, latest, kPoseSmoothAlpha) (slerp
+// for the quaternion). Lower alpha = smoother but laggier; 0.30 is the
+// sweet spot empirically — drops the jitter without feeling sluggish.
+uxspace::tracking::HeadPose g_smoothedPose;       // tracks latest, valid==false until first sample
+constexpr float             kPoseSmoothAlpha = 0.30f;
+
 // Set when Win+Shift is held (no other modifiers required) — used to
 // show the key-legend overlay so the wearer can discover bindings in
 // situ. Recomputed each frame from GetAsyncKeyState; cheap enough.
@@ -798,6 +807,20 @@ void TryOpenGlasses() {
     if (g_glasses.open(g_d3d.device.Get(), m)) {
         g_pendingCenterCursorOnUxSpace = true;
         uxspace::log::info("glasses: TryOpenGlasses — opened, will centre cursor on UxSpace on next vscreen tick.");
+
+        // When the glasses appear, the Carina USB device is enumerable
+        // too. If the tracker wasn't connected (typical first-boot case
+        // when glasses were plugged in *after* :app started), retry the
+        // SDK start so the user doesn't have to toggle Connect/Stop in
+        // the dev UI to get tracking going.
+        if (!g_tracker.isConnected()) {
+            uxspace::log::info("glasses: tracker not connected — retrying tracker.start().");
+            const bool ok = g_tracker.start();
+            uxspace::log::info("glasses: deferred tracker.start() returned %s; connected=%d.",
+                               ok ? "true" : "false",
+                               g_tracker.isConnected() ? 1 : 0);
+            if (ok) g_viewMode = uxspace::tracking::ViewMode::FREE;
+        }
     } else {
         uxspace::log::warn("glasses: TryOpenGlasses — match found but open() returned false.");
     }
@@ -879,11 +902,11 @@ void RenderLegendOverlay(ID3D11RenderTargetView* rtv,
     legendScene.screenBand = g_scene.screenBand;
 
     sp::Surface3D s;
-    // Bottom-left in the wearer's view. Aspect is the source bitmap's
-    // 480:220 (~2.18:1); size in metres at z=1m is comfortable to read
-    // without dominating the FoV.
-    s.position = { -0.45f, -0.30f, 1.00f };
-    s.size     = { 0.30f, 0.30f * 220.0f / 480.0f };
+    // Centred in the wearer's view, twice the original size — bottom-left
+    // placement was hard to spot inside the comfortable FoV band of the
+    // Viture optics. Aspect is the source bitmap's 480:220 (~2.18:1).
+    s.position = { 0.0f, 0.0f, 1.00f };
+    s.size     = { 0.60f, 0.60f * 220.0f / 480.0f };
     s.uvRect   = { 0.0f, 0.0f, 1.0f, 1.0f };
     s.texture  = g_legend.srv.Get();
     legendScene.surfaces.push_back(s);
@@ -1492,13 +1515,36 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // render PINNED anyway — the user's intent stays sticky, the
         // visible behaviour falls back gracefully.
         //
-        // The pose is reported relative to g_anchorPose (set by
-        // Win+Shift+C). For an identity anchor (default), relative ==
-        // absolute. For a captured anchor: relativePos = absPos - anchorPos
-        // and relativeRot = absRot * conj(anchorRot).
+        // Low-pass smoothing is applied to the raw sample before the
+        // anchor transform so the smoothing constant has the same meaning
+        // regardless of anchor state. The pose is then reported relative
+        // to g_anchorPose (set by Win+Shift+C). For an identity anchor
+        // (default), relative == absolute. For a captured anchor:
+        // relativePos = absPos - anchorPos and relativeRot = absRot *
+        // conj(anchorRot).
         {
             using uxspace::tracking::ViewMode;
-            const auto abs = g_tracker.latestPose();
+            const auto latest = g_tracker.latestPose();
+
+            uxspace::tracking::HeadPose abs;
+            if (latest.valid) {
+                if (!g_smoothedPose.valid) {
+                    g_smoothedPose = latest;     // seed on first sample
+                } else {
+                    const float a = kPoseSmoothAlpha;
+                    g_smoothedPose.position.x = g_smoothedPose.position.x * (1.0f - a) + latest.position.x * a;
+                    g_smoothedPose.position.y = g_smoothedPose.position.y * (1.0f - a) + latest.position.y * a;
+                    g_smoothedPose.position.z = g_smoothedPose.position.z * (1.0f - a) + latest.position.z * a;
+                    const DirectX::XMVECTOR qPrev = DirectX::XMLoadFloat4(&g_smoothedPose.orientation);
+                    const DirectX::XMVECTOR qCur  = DirectX::XMLoadFloat4(&latest.orientation);
+                    DirectX::XMStoreFloat4(&g_smoothedPose.orientation,
+                                           DirectX::XMQuaternionSlerp(qPrev, qCur, a));
+                }
+                abs = g_smoothedPose;
+            } else {
+                abs = latest;  // invalid -> identity passthrough
+            }
+
             uxspace::tracking::HeadPose rel = abs;
             if (g_anchorPose.valid) {
                 const DirectX::XMVECTOR qAbs    = DirectX::XMLoadFloat4(&abs.orientation);

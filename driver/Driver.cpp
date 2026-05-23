@@ -314,8 +314,15 @@ void PipeServer::HandleClient(HANDLE pipe)
         NackPayload np{};
         np.code = code;
         if (msg) {
-            // strncpy is fine for fixed-size char arrays; ensure NUL-termination.
-            strncpy_s(np.message, sizeof(np.message), msg, _TRUNCATE);
+            // strncpy_s is the same CRT family as _snprintf_s; the UMDF
+            // runtime drops it silently on this machine (verified
+            // empirically — v1300 left np.message zeroed even though the
+            // source buffer was filled). Byte-by-byte copy bypasses the
+            // CRT entirely and is bounds-safe by construction.
+            std::size_t i = 0;
+            const std::size_t cap = sizeof(np.message) - 1;
+            while (i < cap && msg[i] != '\0') { np.message[i] = msg[i]; ++i; }
+            np.message[i] = '\0';
         }
         return WriteAll(pipe, &np, sizeof(np));
     };
@@ -352,7 +359,7 @@ void PipeServer::HandleClient(HANDLE pipe)
             // Hardcoded per release because the driver toolchain
             // strips __DATE__/__TIME__ for deterministic builds; bump
             // this string with each driver-MSI rebuild.
-            static const char kBuildStamp[] = "v20260523-1300";
+            static const char kBuildStamp[] = "v20260523-1400";
             const std::uint32_t buildBytes =
                 static_cast<std::uint32_t>(sizeof(kBuildStamp) - 1);  // drop NUL
             if (!sendHeader(MessageType::Pong, buildBytes, reqHdr.request_id)) return;
