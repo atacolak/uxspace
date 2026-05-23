@@ -26,7 +26,12 @@ using namespace Microsoft::WRL;
 
 #pragma region SampleMonitors
 
-static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 1; // UxSpace W0: one monitor. Grows to 3 in W3 via the :shared IPC channel.
+// W3 stage A: advertise up to 3 virtual monitors and bring all of them
+// up at adapter-init time. Runtime count selection over the :shared
+// named-pipe channel lands in the next W3 stage; for now each monitor
+// comes up edid-less at the single 1920x1080 default mode.
+static constexpr DWORD kUxSpaceMaxMonitors      = 3;
+static constexpr DWORD kUxSpaceDefaultMonitorCount = 3;
 
 // UxSpace: ignore the upstream s_SampleMonitors EDIDs (Dell / Lenovo derived).
 // Every monitor is edid-less; the OS reports it under the INF DeviceName
@@ -502,7 +507,7 @@ void IndirectDeviceContext::InitAdapter()
     AdapterCaps.Size = sizeof(AdapterCaps);
 
     // Declare basic feature support for the adapter (required)
-    AdapterCaps.MaxMonitorsSupported = IDD_SAMPLE_MONITOR_COUNT;
+    AdapterCaps.MaxMonitorsSupported = kUxSpaceMaxMonitors;
     AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
     AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
     AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
@@ -657,7 +662,7 @@ NTSTATUS UxSpaceAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_
     auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
     if (NT_SUCCESS(pInArgs->AdapterInitStatus))
     {
-        for (DWORD i = 0; i < IDD_SAMPLE_MONITOR_COUNT; i++)
+        for (DWORD i = 0; i < kUxSpaceDefaultMonitorCount; i++)
         {
             pDeviceContextWrapper->pContext->FinishInit(i);
         }
