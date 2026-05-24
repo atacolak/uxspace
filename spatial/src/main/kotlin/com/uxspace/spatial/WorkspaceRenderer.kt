@@ -255,6 +255,10 @@ class WorkspaceRenderer(
         // Each mode keeps its own (zoom, tx, ty); rebuild the projection so the new
         // mode's saved zoom takes effect immediately on swap.
         bandDirty = true
+        // Announce the new mode's zoom so the trackpad HUD reflects the *current*
+        // mode's value — otherwise it lingers on the previous mode's last zoom number
+        // and reads as if the modes share a zoom level (they don't).
+        mainHandler.post { WorkspaceController.notifyZoomChanged(activeZoom()) }
         Log.i(
             TAG,
             "setViewMode $mode — zoom=${"%.3f".format(activeZoom())} " +
@@ -286,7 +290,8 @@ class WorkspaceRenderer(
      */
     fun applyLayout(next: Layout) {
         glTasks.add {
-            // Save the outgoing layout's slot→app allocation so cycling back to it
+            val layoutChanged = layout != next
+            // Save the outgoing layout's screen→app allocation so cycling back to it
             // restores those apps onto the same screens. Filter out entries whose
             // VirtualDisplay no longer has an activity (user backed out of the app),
             // so a relaunch on return doesn't bring back something the user already
@@ -317,6 +322,17 @@ class WorkspaceRenderer(
             layout = next
             val screens = next.screens
             Log.i(TAG, "applyLayout ${next.displayName} screens=${screens.size}")
+            // Reset the projection anchors when the layout actually changes — old NDC
+            // tx/ty values were computed against the previous layout's screen geometry
+            // (or by setViewMode's anchorPinnedOnProminentScreen using the outgoing
+            // layout). Reapplying them to a new layout shifts the new screens off
+            // centre — e.g. lock from VHV → SINGLE leaves the single screen pushed
+            // off-screen unless we zero the anchor here.
+            if (layoutChanged) {
+                freeTx = 0f; freeTy = 0f
+                pinnedTx = 0f; pinnedTy = 0f
+                bandDirty = true
+            }
             // Bring the screen list up to the layout's screen count — screen 0 reuses
             // the primary `desktop`, screens 1..N-1 are independent UiScreens.
             syncScreens(screens.size)
