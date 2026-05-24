@@ -5,7 +5,7 @@ cluster, the running-app strip in the middle, and a right system-status tray.
 
 ## Current state
 
-[`DesktopPresentation`](../app/src/main/kotlin/com/vspace/desktop/DesktopPresentation.kt)
+[`DesktopPresentation`](../app/src/main/kotlin/com/uxspace/desktop/DesktopPresentation.kt)
 draws a full-width bar flush with the bottom edge holding three things: an app-drawer
 button, a centred strip of one icon per open window (`runningIcons`), and a clock pinned
 right. It is a real Android view hierarchy on `Theme.DeviceDefault`, so on a Samsung
@@ -37,8 +37,8 @@ desktop**, **Optometry**, **Search**.
 | Item | Action |
 |---|---|
 | App drawer (`ic_apps`, exists) | Toggles the drawer overlay — `WorkspaceController.setDrawerOpen`. Already wired; just moved to the far left. |
-| Divider | A 1dp-wide view at `VSpaceTheme` divider colour, with vertical margins, separating the launcher from the buttons. |
-| Recent apps | A panel of apps recently opened **in the workspace** — Android's system recents API is not available to apps, so "recent" means VSpace's own launch history. Needs a small most-recently-used list in `WorkspaceController` (`launchApp` pushes onto it). The panel reuses the drawer's overlay surface or is a small popup. |
+| Divider | A 1dp-wide view at `UxSpaceTheme` divider colour, with vertical margins, separating the launcher from the buttons. |
+| Recent apps | A panel of apps recently opened **in the workspace** — Android's system recents API is not available to apps, so "recent" means UxSpace's own launch history. Needs a small most-recently-used list in `WorkspaceController` (`launchApp` pushes onto it). The panel reuses the drawer's overlay surface or is a small popup. |
 | Show desktop | Minimises every open window; a second tap restores them. Each `AppWindow` already has a `minimized` flag — add `WorkspaceController.toggleShowDesktop()` that sets/clears it on all windows. |
 | Optometry | Opens the [optometry pseudo-app](OPTOMETRY.md) — a Snellen-style chart overlay for dialling in the VITURE focus wheels. |
 | Search | Opens the drawer with its search field focused — `DrawerPresentation` already has the field; add a way to open the drawer *and* request focus on it. |
@@ -60,7 +60,7 @@ later refinement: highlight the icon of the front-most (focused) window.
 
 DeX's right edge isn't a passive readout; it's a clickable surface that opens a quick
 settings / notifications panel — wifi toggle, bluetooth, mobile data, volume slider,
-brightness slider, the notification list. VSpace mirrors that.
+brightness slider, the notification list. UxSpace mirrors that.
 
 ### Always-visible row
 
@@ -89,7 +89,7 @@ dismissed by tapping outside or by a `×`. Layout, top to bottom:
 - **Volume slider** — `AudioManager.setStreamVolume(STREAM_MUSIC, ...)`. No permission.
 - **Quick toggles row** — Wi-Fi, Bluetooth, Mobile data, Aeroplane, Auto-rotate, Torch.
   Implemented through the privileged helper (`cmd wifi enabled`, `svc bluetooth enable`,
-  `svc data enable`, etc.) so VSpace doesn't need each toggle's own permission. State is
+  `svc data enable`, etc.) so UxSpace doesn't need each toggle's own permission. State is
   read normally (no permission needed for read).
 - **Notifications list** — scrollable. `NotificationListenerService` mirrors current
   notifications; tap dispatches the notification's content intent; long-press = dismiss.
@@ -112,6 +112,28 @@ tree (same `Theme.DeviceDefault` styling as the taskbar), shown/hidden via
 `View.VISIBLE` — no extra `UiScreen` or virtual display needed.
 
 ---
+
+## Multi-screen placement
+
+With multi-screen layouts (Two SBS, Three SBS, V/H/V) the user picks where the
+taskbar lives:
+
+- **Main-screen only** — one taskbar on the layout's designated central screen (the
+  H screen in V/H/V, the middle slot in Three SBS, slot 0 in Two SBS / Single Wide).
+  Cleanest visual; only one bar to scan; the side screens are app-only.
+- **Spanned across screens** — one continuous bar that visually crosses the screen
+  boundaries. Either rendered as a GL-drawn overlay sitting on top of the screen
+  meshes, or as width-portioned per-screen pieces that line up at the world edges
+  where adjacent screens butt-join. Reads as "one giant monitor" with apps grouped
+  by screen.
+- **Per-screen** (default today) — each screen's own `DesktopPresentation`
+  renders its own taskbar, sized to the screen's pixel width (narrow on V screens,
+  full on H). Per-screen filter means each bar only lists apps actually launched on
+  that screen.
+
+Choice is exposed in the [settings screen](SETTINGS.md) with a per-layout default
+(Single / SBS → main-only, V/H/V → main-on-H, etc.) overridable globally. Stored in
+`WorkspaceController`; overrides `Screen.showTaskbar` at render time.
 
 ## Auto-hide / always-show
 

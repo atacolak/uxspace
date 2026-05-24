@@ -165,6 +165,17 @@
                 android:src="@drawable/ic_screen_height" />
 
             <ImageButton
+                android:id="@+id/alignHorizonButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="Align screens to head"
+                android:padding="14dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_align_horizon" />
+
+            <ImageButton
                 android:id="@+id/keyboardButton"
                 android:layout_width="0dp"
                 android:layout_height="56dp"
@@ -176,14 +187,33 @@
                 android:src="@drawable/ic_keyboard" />
         </LinearLayout>
 
-        <com.vspace.input.TrackpadView
-            android:id="@+id/trackpad"
+        <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
             android:layout_marginHorizontal="16dp"
-            android:layout_marginBottom="16dp"
-            android:background="@color/surface" />
+            android:layout_marginBottom="16dp">
+
+            <com.uxspace.input.TrackpadView
+                android:id="@+id/trackpad"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@color/surface" />
+
+            <!-- HUD overlay that briefly shows the current zoom level on pinch. -->
+            <TextView
+                android:id="@+id/zoomHud"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:background="#80000000"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="6dp"
+                android:textColor="@color/text"
+                android:textSize="28sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+        </FrameLayout>
 
         <!-- Raised by the keyboard toolbar button; the system IME types into it. -->
         <EditText

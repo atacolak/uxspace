@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.vspace.spatial"
+    namespace = "com.uxspace.spatial"
     compileSdk = 36
 
     defaultConfig {

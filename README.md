@@ -1,4 +1,4 @@
-# VSpace
+# UxSpace
 
 An Android app that turns VITURE glasses (or any external display) into a **DeX-style
 spatial workspace** — a desktop with a taskbar and an app drawer, floating in front of you,
@@ -9,7 +9,7 @@ driven with the phone as a trackpad.
 
 ## How it works
 
-The glasses are a USB-C external display. VSpace owns that display with a `Presentation`
+The glasses are a USB-C external display. UxSpace owns that display with a `Presentation`
 hosting an OpenGL scene:
 
 ```
@@ -34,10 +34,10 @@ external display.
 A stock, non-rooted Android app, which bounds what is possible:
 
 - **Launching third-party apps needs shell-uid privilege** — placing an app on a virtual
-  display is not allowed for normal apps. VSpace activates its own shell-uid helper on
+  display is not allowed for normal apps. UxSpace activates its own shell-uid helper on
   first run through Android 11's Wireless Debugging (`docs/PRIVILEGE.md`): the user enables
-  Wireless Debugging once, types the 6-digit pairing code into VSpace, and from then on
-  VSpace starts its helper itself on every launch — no separate app required.
+  Wireless Debugging once, types the 6-digit pairing code into UxSpace, and from then on
+  UxSpace starts its helper itself on every launch — no separate app required.
 - **The phone is the input device** — a trackpad (one finger moves the cursor, two fingers
   scroll, a tap clicks) and, later, a keyboard. A Bluetooth mouse/keyboard also works.
 
@@ -66,7 +66,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layered design and ro
 The native VITURE SDK (`.so` + C headers, proprietary) is **not** committed. Vendor it
 locally into `glasses/src/main/jniLibs` and `glasses/src/main/cpp/include` (both
 git-ignored) for the native build. It is needed only for head tracking — without it,
-VSpace still runs on any external display.
+UxSpace still runs on any external display.
 
 ## Requirements
 
@@ -85,15 +85,15 @@ VSpace still runs on any external display.
 
 ## Acknowledgements
 
-VSpace stands on the shoulders of the **[Shizuku](https://shizuku.rikka.app/)** project by
+UxSpace stands on the shoulders of the **[Shizuku](https://shizuku.rikka.app/)** project by
 [RikkaApps](https://github.com/RikkaApps). Shizuku pioneered the mechanism that makes apps
 like this one possible on a stock, non-rooted Android phone: borrow ADB-shell privilege at
 runtime, bootstrapped from the device itself over Wireless Debugging — no PC, no root.
-VSpace shipped on top of the Shizuku app first; the in-app pairing flow now built into
-VSpace is modelled directly on Shizuku's. **Thank you.**
+UxSpace shipped on top of the Shizuku app first; the in-app pairing flow now built into
+UxSpace is modelled directly on Shizuku's. **Thank you.**
 
 Thanks also to **[libadb-android](https://github.com/MuntashirAkon/libadb-android)** by
-Muntashir Al-Islam — the embedded ADB client that lets VSpace pair and connect to its own
+Muntashir Al-Islam — the embedded ADB client that lets UxSpace pair and connect to its own
 device's wireless-debugging service without a separate Shizuku install.
 
 ## License
