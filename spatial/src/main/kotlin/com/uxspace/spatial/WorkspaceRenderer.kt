@@ -1060,12 +1060,13 @@ class WorkspaceRenderer(
                 WorkspaceController.settingsOnScreen == screenIdx
             )
         val inTaskbar = px[1] > screen.contentHeightPx - TASKBAR_HEIGHT_PX
-        if ((anyModalOpen || inTaskbar) && ui != null) {
+        val inChrome = px[1] < CHROME_HEIGHT_PX
+        if ((anyModalOpen || inTaskbar || inChrome) && ui != null) {
             mainHandler.post { ui.dispatchTap(px[0], px[1]) }
             Log.d(
                 TAG,
                 "handleClick → Presentation slot=$screenIdx px=(${px[0].toInt()},${px[1].toInt()}) " +
-                    "modal=$anyModalOpen taskbar=$inTaskbar",
+                    "modal=$anyModalOpen taskbar=$inTaskbar chrome=$inChrome",
             )
         } else {
             WorkspaceController.appTap?.invoke(displayId, px[0].toInt(), px[1].toInt())
@@ -1097,7 +1098,8 @@ class WorkspaceRenderer(
                 WorkspaceController.settingsOnScreen == screenIdx
             )
         val inTaskbar = px[1] > screen.contentHeightPx - TASKBAR_HEIGHT_PX
-        if ((anyModalOpen || inTaskbar) && ui != null) {
+        val inChrome = px[1] < CHROME_HEIGHT_PX
+        if ((anyModalOpen || inTaskbar || inChrome) && ui != null) {
             mainHandler.post { ui.dispatchScroll(px[0], px[1], vScroll) }
         } else {
             WorkspaceController.appScroll?.invoke(
@@ -1706,6 +1708,14 @@ class WorkspaceRenderer(
          * extra px so a click on the top edge of the bar still hits a button.
          */
         const val TASKBAR_HEIGHT_PX = 80
+
+        /**
+         * Mirrors DesktopPresentation.CHROME_HEIGHT_DP (= 36 dp) at the slot's density
+         * (200): 36 × 200 / 160 = 45 px, +5 px slack so a click on the bar's bottom
+         * edge still hits a button. Clicks in this top band route to the Presentation's
+         * view tree so the chrome's close / minimise / maximise buttons fire.
+         */
+        const val CHROME_HEIGHT_PX = 50
 
         const val ARROW_STRIDE_BYTES = 2 * 4
 

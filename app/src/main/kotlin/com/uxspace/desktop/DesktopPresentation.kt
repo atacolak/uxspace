@@ -71,6 +71,25 @@ class DesktopPresentation(
     /** Taskbar icons for the open app windows, keyed by package, in launch order. */
     private val runningIcons = LinkedHashMap<String, View>()
 
+    /** Display label per running package — for the window-chrome title text. */
+    private val runningLabels = HashMap<String, String>()
+
+    private val chromeListener = object : WindowChromeView.Listener {
+        override fun onMinimize(packageName: String) {
+            // No "minimised" state in the per-slot model yet; for now close — same
+            // behavior as the close button. TODO: actual minimise (hide the activity
+            // but keep its task alive, restore from the taskbar icon).
+            WorkspaceController.closeAppByPackage(packageName)
+        }
+        override fun onMaximize(packageName: String) {
+            // No "windowed" state to toggle yet — activities currently fill the slot.
+            // No-op until freeform launch bounds are wired.
+        }
+        override fun onClose(packageName: String) {
+            WorkspaceController.closeAppByPackage(packageName)
+        }
+    }
+
     private val systemStatusListener = object : SystemStatus.Listener {
         override fun onSystemStatusChanged() {
             mainHandler.post { refreshStatusTray() }
@@ -112,6 +131,16 @@ class DesktopPresentation(
 
     /** Settings panel embedded alongside the drawer — same modal model. */
     private lateinit var settings: SettingsView
+
+    /**
+     * Window chrome — a thin title bar pinned to the top of the slot, visible only while
+     * an app is running on this slot. Carries the foreground app's icon + name plus
+     * minimize / maximize / close buttons. The chrome is part of the slot Presentation's
+     * view tree, so its button clicks are routed by WorkspaceRenderer via
+     * `UiScreen.dispatchTap` (the Presentation is FLAG_NOT_TOUCHABLE for the system
+     * dispatcher).
+     */
+    private lateinit var chrome: WindowChromeView
 
     /**
      * Transparent click-catcher sized to the whole screen. Shown on *every* slot
@@ -198,6 +227,17 @@ class DesktopPresentation(
             }
         }
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        // Window chrome is a thin strip pinned to the top of the slot. Hidden until an
+        // app is running on this slot — refreshChrome() flips its visibility from
+        // addRunningApp / removeRunningApp.
+        chrome = WindowChromeView(context).apply {
+            visibility = View.GONE
+            setListener(chromeListener)
+        }
+        root.addView(
+            chrome,
+            FrameLayout.LayoutParams(MATCH, dp(CHROME_HEIGHT_DP), Gravity.TOP),
+        )
         if (showTaskbar) root.addView(buildTaskbar())
         root.addView(buildVersionLabel())
         // Drawer goes last so it sits on top of wallpaper + taskbar in the view tree.
@@ -516,11 +556,13 @@ class DesktopPresentation(
             true
         }
         runningIcons[packageName] = icon
+        runningLabels[packageName] = label
         runningApps.addView(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },
         )
         refreshWallpaperVisibility()
+        refreshChrome()
     }
 
     private fun appIcon(packageName: String): Drawable? = runCatching {
@@ -531,7 +573,26 @@ class DesktopPresentation(
     private fun removeRunningApp(packageName: String) {
         if (!::runningApps.isInitialized) return
         runningIcons.remove(packageName)?.let { runningApps.removeView(it) }
+        runningLabels.remove(packageName)
         refreshWallpaperVisibility()
+        refreshChrome()
+    }
+
+    /**
+     * Sync the window-chrome bar to the slot's foreground app — the most recently
+     * launched (last entry in the [runningIcons] LinkedHashMap). Hidden when no app is
+     * running on this slot.
+     */
+    private fun refreshChrome() {
+        if (!::chrome.isInitialized) return
+        val top = runningIcons.keys.lastOrNull()
+        if (top == null) {
+            chrome.visibility = View.GONE
+            chrome.bind(null, null, null)
+            return
+        }
+        chrome.bind(top, runningLabels[top], appIcon(top))
+        chrome.visibility = View.VISIBLE
     }
 
     /**
@@ -556,6 +617,13 @@ class DesktopPresentation(
 
         const val VOID_COLOR = 0xFF0E1018.toInt()
         const val CLOCK_INTERVAL_MS = 20_000L
+
+        /**
+         * Height of the window-chrome bar in dp. Mirrored on the renderer side as
+         * `CHROME_HEIGHT_PX` (computed with the slot Presentation's density 200) so the
+         * cursor-region check picks the same band on the slot's surface texture.
+         */
+        const val CHROME_HEIGHT_DP = 36
 
         /** Translucent white for the left-cluster divider — a quarter-strength rule line. */
         const val DIVIDER_COLOR = 0x40FFFFFF

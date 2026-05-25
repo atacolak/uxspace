@@ -89,6 +89,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // EXPERIMENT: keep this activity from becoming the system's top-focused display
+        // when the trackpad is touched. Otherwise the moment the user taps the touchpad,
+        // the WindowManager updates topFocusedDisplay = 0 (this activity's display),
+        // which yanks focus away from whatever per-app secondary display hosts a launched
+        // activity — and Samsung One UI's GameBooster reacts by pausing the foreground
+        // task and destroying its input channel. FLAG_NOT_FOCUSABLE still lets the window
+        // receive touches; it just doesn't take input focus.
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
