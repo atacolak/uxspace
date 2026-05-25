@@ -7,6 +7,7 @@ import com.uxspace.apps.AppCache
 import com.uxspace.desktop.DesktopPresentation
 import com.uxspace.privileged.PrivilegedService
 import com.uxspace.spatial.WorkspaceController
+import com.uxspace.spatial.WorkspaceController.ToolbarIcons
 import com.uxspace.system.SystemStatus
 
 private const val TAP_DOWN_UP_GAP_MS = 40L
@@ -62,5 +63,16 @@ class UxSpaceApp : Application() {
         WorkspaceController.displayHasActivity = { displayId ->
             PrivilegedService.displayHasActivity(displayId)
         }
+        // In-view toolbar icon resources — the renderer turns these into GL textures
+        // when its surface comes up. Same Material-Symbols set the taskbar uses, so
+        // both toolbars read identically.
+        WorkspaceController.toolbarIcons = ToolbarIcons(
+            lock = R.drawable.ic_pin,
+            unlock = R.drawable.ic_pin_off,
+            zoom = R.drawable.ic_zoom_in,
+            recenter = R.drawable.ic_recenter,
+            layout = R.drawable.ic_layout,
+            settings = R.drawable.ic_settings,
+        )
     }
 }

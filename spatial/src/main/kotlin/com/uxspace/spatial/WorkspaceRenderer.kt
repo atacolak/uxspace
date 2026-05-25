@@ -2,9 +2,11 @@ package com.uxspace.spatial
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.os.Handler
 import android.util.Log
@@ -113,6 +115,15 @@ class WorkspaceRenderer(
     private var cursorUCenter = 0
     private var cursorUHalfSize = 0
     private var cursorUColor = 0
+
+    // HUD-icon program: textured quads in NDC space, used for the in-view toolbar.
+    private var hudProgram = 0
+    private var hudAPosition = 0
+    private var hudATexCoord = 0
+    private var hudUCenter = 0
+    private var hudUHalfSize = 0
+    private var hudUColor = 0
+    private var hudUTexture = 0
     @Volatile private var cursorX = 0f
     @Volatile private var cursorY = 0f
     @Volatile private var cursorClickPending = false
@@ -129,44 +140,70 @@ class WorkspaceRenderer(
     @Volatile private var toolbarExpanded = false
     @Volatile private var toolbarLastShownMs = 0L
 
-    /** One in-view toolbar button — NDC centre x, half-width, RGBA, and click action. */
+    /**
+     * One in-view toolbar button. The icon resource is looked up per-frame via
+     * [iconResIdProvider] so state-dependent buttons (e.g. lock ↔ unlock follows
+     * [viewMode]) swap their pixels without us having to rebuild the array.
+     */
     private data class HudButton(
         val label: String,
         val cx: Float,
         val halfW: Float,
-        val color: FloatArray,
+        val iconResIdProvider: () -> Int,
         val action: () -> Unit,
     )
 
     private val toolbarButtons: Array<HudButton> by lazy {
         arrayOf(
             HudButton(
-                "lock", cx = -0.30f, halfW = 0.075f,
-                color = floatArrayOf(0.24f, 0.73f, 0.85f, 0.92f),
+                "lock", cx = -0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                iconResIdProvider = {
+                    val icons = WorkspaceController.toolbarIcons
+                    if (icons == null) 0
+                    else if (viewMode == ViewMode.PINNED) icons.lock else icons.unlock
+                },
             ) {
                 val next = if (viewMode == ViewMode.PINNED) ViewMode.FREE else ViewMode.PINNED
                 WorkspaceController.setViewMode(next)
             },
             HudButton(
-                "zoom", cx = -0.10f, halfW = 0.075f,
-                color = floatArrayOf(0.49f, 0.85f, 0.34f, 0.92f),
+                "zoom", cx = -0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                iconResIdProvider = { WorkspaceController.toolbarIcons?.zoom ?: 0 },
             ) {
                 WorkspaceController.cycleScreenBand()
             },
             HudButton(
-                "recenter", cx = 0.10f, halfW = 0.075f,
-                color = floatArrayOf(0.96f, 0.64f, 0.38f, 0.92f),
+                "recenter", cx = 0.00f, halfW = TOOLBAR_BUTTON_HALF_W,
+                iconResIdProvider = { WorkspaceController.toolbarIcons?.recenter ?: 0 },
             ) {
                 WorkspaceController.alignVerticalToHead()
             },
             HudButton(
-                "layout", cx = 0.30f, halfW = 0.075f,
-                color = floatArrayOf(0.65f, 0.55f, 0.98f, 0.92f),
+                "layout", cx = 0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                iconResIdProvider = { WorkspaceController.toolbarIcons?.layout ?: 0 },
             ) {
                 if (viewMode == ViewMode.FREE) WorkspaceController.cycleLayout()
             },
+            HudButton(
+                "settings", cx = 0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                iconResIdProvider = { WorkspaceController.toolbarIcons?.settings ?: 0 },
+            ) {
+                // Open the settings panel on whichever screen the cursor is over;
+                // mirrors the per-slot semantics of the in-Presentation taskbar's
+                // settings button. Toggle off when this slot already owns the panel.
+                val slot = screenIndexUnderCursor() ?: 0
+                val openHere = WorkspaceController.isSettingsOpen &&
+                    WorkspaceController.settingsOnScreen == slot
+                WorkspaceController.setSettingsOpen(!openHere, slot)
+            },
         )
     }
+
+    /**
+     * GL texture cache — drawable resource id → texture object name. Populated lazily
+     * on the GL thread from [drawToolbar]; the renderer's [release] frees them.
+     */
+    private val iconTextures = HashMap<Int, Int>()
 
     /**
      * Active multi-screen layout. New windows pick a screen from this layout on
@@ -211,6 +248,7 @@ class WorkspaceRenderer(
     private lateinit var screenQuad: FloatBuffer
     private lateinit var cursorArrow: FloatBuffer
     private lateinit var scrimQuad: FloatBuffer
+    private lateinit var hudQuad: FloatBuffer
 
     private val projection = FloatArray(16)
     private val viewMatrix = FloatArray(16)
@@ -545,9 +583,20 @@ class WorkspaceRenderer(
         cursorUHalfSize = GLES20.glGetUniformLocation(cursorProgram, "uHalfSize")
         cursorUColor = GLES20.glGetUniformLocation(cursorProgram, "uColor")
 
+        hudProgram = buildProgram(HUD_VERTEX_SHADER, HUD_FRAGMENT_SHADER)
+        hudAPosition = GLES20.glGetAttribLocation(hudProgram, "aPosition")
+        hudATexCoord = GLES20.glGetAttribLocation(hudProgram, "aTexCoord")
+        hudUCenter = GLES20.glGetUniformLocation(hudProgram, "uCenter")
+        hudUHalfSize = GLES20.glGetUniformLocation(hudProgram, "uHalfSize")
+        hudUColor = GLES20.glGetUniformLocation(hudProgram, "uColor")
+        hudUTexture = GLES20.glGetUniformLocation(hudProgram, "uTexture")
+
         screenQuad = directBufferOf(SCREEN_QUAD_VERTICES)
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
         scrimQuad = directBufferOf(SCRIM_QUAD_VERTICES)
+        hudQuad = directBufferOf(HUD_QUAD_VERTICES)
+        // GL context just came up — any cached icon texture ids are stale.
+        iconTextures.clear()
 
         // Screens are built later by syncScreens (triggered by the queued
         // applyLayout task from WorkspaceController.register) — screen 0 included, so
@@ -1137,33 +1186,100 @@ class WorkspaceRenderer(
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        GLES20.glUseProgram(cursorProgram)
-        scrimQuad.position(0)
-        GLES20.glVertexAttribPointer(
-            cursorAPosition, 2, GLES20.GL_FLOAT, false, ARROW_STRIDE_BYTES, scrimQuad,
-        )
-        GLES20.glEnableVertexAttribArray(cursorAPosition)
+
         if (toolbarExpanded) {
-            // Translucent background bar behind the buttons.
+            // Translucent background bar behind the buttons — same cursor program as before.
+            GLES20.glUseProgram(cursorProgram)
+            scrimQuad.position(0)
+            GLES20.glVertexAttribPointer(
+                cursorAPosition, 2, GLES20.GL_FLOAT, false, ARROW_STRIDE_BYTES, scrimQuad,
+            )
+            GLES20.glEnableVertexAttribArray(cursorAPosition)
             GLES20.glUniform2f(cursorUCenter, 0f, TOOLBAR_Y)
             GLES20.glUniform2f(cursorUHalfSize, TOOLBAR_HALF_W, TOOLBAR_HALF_H)
-            GLES20.glUniform4f(cursorUColor, 0f, 0f, 0f, 0.45f)
+            GLES20.glUniform4f(cursorUColor, 0f, 0f, 0f, 0.55f)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
-            // Each button as a coloured quad on top of the background.
+            GLES20.glDisableVertexAttribArray(cursorAPosition)
+
+            // Icon textures on top, drawn with the HUD program. Buttons whose action is
+            // a no-op in the current view mode (layout in PINNED) render dimmed so the
+            // toolbar reads correctly without an extra disabled state.
+            GLES20.glUseProgram(hudProgram)
+            hudQuad.position(0)
+            GLES20.glVertexAttribPointer(
+                hudAPosition, 2, GLES20.GL_FLOAT, false, HUD_STRIDE_BYTES, hudQuad,
+            )
+            hudQuad.position(2)
+            GLES20.glVertexAttribPointer(
+                hudATexCoord, 2, GLES20.GL_FLOAT, false, HUD_STRIDE_BYTES, hudQuad,
+            )
+            GLES20.glEnableVertexAttribArray(hudAPosition)
+            GLES20.glEnableVertexAttribArray(hudATexCoord)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glUniform1i(hudUTexture, 0)
             for (b in toolbarButtons) {
-                GLES20.glUniform2f(cursorUCenter, b.cx, TOOLBAR_Y)
-                GLES20.glUniform2f(cursorUHalfSize, b.halfW, TOOLBAR_HALF_H * 0.78f)
-                GLES20.glUniform4f(cursorUColor, b.color[0], b.color[1], b.color[2], b.color[3])
+                val texId = iconTextureFor(b.iconResIdProvider()) ?: continue
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+                GLES20.glUniform2f(hudUCenter, b.cx, TOOLBAR_Y)
+                GLES20.glUniform2f(hudUHalfSize, b.halfW, b.halfW * (surfaceAspect))
+                val alpha = if (b.label == "layout" && viewMode == ViewMode.PINNED) 0.35f
+                else 1.0f
+                GLES20.glUniform4f(hudUColor, 1f, 1f, 1f, alpha)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
             }
+            GLES20.glDisableVertexAttribArray(hudAPosition)
+            GLES20.glDisableVertexAttribArray(hudATexCoord)
         } else {
             // Peek handle — a short bright line at the bottom centre.
+            GLES20.glUseProgram(cursorProgram)
+            scrimQuad.position(0)
+            GLES20.glVertexAttribPointer(
+                cursorAPosition, 2, GLES20.GL_FLOAT, false, ARROW_STRIDE_BYTES, scrimQuad,
+            )
+            GLES20.glEnableVertexAttribArray(cursorAPosition)
             GLES20.glUniform2f(cursorUCenter, 0f, PEEK_Y)
             GLES20.glUniform2f(cursorUHalfSize, PEEK_HALF_W, PEEK_HALF_H)
             GLES20.glUniform4f(cursorUColor, 1f, 1f, 1f, 0.55f)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
+            GLES20.glDisableVertexAttribArray(cursorAPosition)
         }
         GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    /**
+     * GL texture for the given drawable, lazily uploaded the first time it's needed.
+     * Returns null when no icon set has been registered or the resource resolves to
+     * 0. Call on the GL thread.
+     */
+    private fun iconTextureFor(resId: Int): Int? {
+        if (resId == 0) return null
+        iconTextures[resId]?.let { return it }
+        val drawable = runCatching { context.getDrawable(resId) }.getOrNull() ?: return null
+        val size = TOOLBAR_ICON_TEXTURE_PX
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        val texId = ids[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR,
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR,
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE,
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE,
+        )
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        bitmap.recycle()
+        iconTextures[resId] = texId
+        return texId
     }
 
     /** Toolbar button whose NDC rect contains the cursor, or null. */
@@ -1453,6 +1569,11 @@ class WorkspaceRenderer(
         const val TOOLBAR_HALF_W = 0.42f
         const val TOOLBAR_HALF_H = 0.06f
 
+        /** Icon NDC half-width — picked so 5 buttons fit inside `2 * TOOLBAR_HALF_W`. */
+        const val TOOLBAR_BUTTON_HALF_W = 0.055f
+        /** Rasterised bitmap size for vector-drawable icon textures (pixels). */
+        const val TOOLBAR_ICON_TEXTURE_PX = 96
+
         /** How long the expanded toolbar lingers after the last hover or click. */
         const val TOOLBAR_AUTOHIDE_MS = 3000L
 
@@ -1495,6 +1616,9 @@ class WorkspaceRenderer(
         const val SCROLL_SENSITIVITY = 12f
 
         const val ARROW_STRIDE_BYTES = 2 * 4
+
+        /** HUD icon quad: x, y, u, v = 4 floats per vertex = 16 bytes. */
+        const val HUD_STRIDE_BYTES = 4 * 4
         const val CURSOR_ARROW_VERTEX_COUNT = 3
 
         /** A pointer arrowhead as one triangle (x, y) — tip at the origin, pointing up-left. */
@@ -1571,6 +1695,44 @@ class WorkspaceRenderer(
                 gl_FragColor = uColor;
             }
         """
+
+        // HUD icon: textured NDC quad. Sampled texture is multiplied by uColor so the
+        // same white-on-transparent material-symbols bitmap can be tinted per state
+        // (full opacity for active buttons, faded for disabled like 'layout' in PINNED).
+        const val HUD_VERTEX_SHADER = """
+            uniform vec2 uCenter;
+            uniform vec2 uHalfSize;
+            attribute vec4 aPosition;
+            attribute vec2 aTexCoord;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_Position = vec4(aPosition.xy * uHalfSize + uCenter, 0.0, 1.0);
+                vTexCoord = aTexCoord;
+            }
+        """
+
+        const val HUD_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform sampler2D uTexture;
+            uniform vec4 uColor;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vTexCoord) * uColor;
+            }
+        """
+
+        /**
+         * HUD icon quad — `(x, y, u, v)` per vertex. Triangle-strip order. Texture v is
+         * inverted from the SCREEN_QUAD convention because the bitmap we upload (drawn
+         * from a vector drawable through Canvas) has y=0 at the top, whereas
+         * SCREEN_QUAD's v=0 is at the bottom of the framebuffer.
+         */
+        val HUD_QUAD_VERTICES = floatArrayOf(
+            -1f, -1f, 0f, 1f,
+            1f, -1f, 1f, 1f,
+            -1f, 1f, 0f, 0f,
+            1f, 1f, 1f, 0f,
+        )
 
         fun directBufferOf(data: FloatArray): FloatBuffer =
             ByteBuffer.allocateDirect(data.size * 4)

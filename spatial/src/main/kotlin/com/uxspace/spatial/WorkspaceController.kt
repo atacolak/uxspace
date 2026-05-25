@@ -195,6 +195,23 @@ object WorkspaceController {
     /** Whether a workspace is currently shown on the glasses. */
     val isRunning: Boolean get() = renderer != null
 
+    /**
+     * Drawable resource ids for the in-view toolbar buttons. The spatial module has no
+     * own `res/`, so the app wires these at startup (alongside [appLauncher] etc.) and
+     * the renderer dereferences via its host [android.content.Context]. Null until set.
+     */
+    data class ToolbarIcons(
+        val lock: Int,
+        val unlock: Int,
+        val zoom: Int,
+        val recenter: Int,
+        val layout: Int,
+        val settings: Int,
+    )
+
+    @Volatile
+    var toolbarIcons: ToolbarIcons? = null
+
     /** Whether the app drawer is currently open. */
     val isDrawerOpen: Boolean get() = drawerOpenState
 
