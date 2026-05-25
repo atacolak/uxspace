@@ -458,8 +458,12 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
     companion object {
         private const val TAG = "UxSpace/Privileged"
 
-        // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK
-        private const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
+        // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK |
+        // FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS — last bit keeps the task off the phone's
+        // Overview screen, so an app launched into UxSpace never appears on the phone's
+        // own Recents list. (Apps that set excludeFromRecents="false" in their manifest
+        // can override this — accepted edge case.)
+        private const val FLAG_NEW_TASK_MULTIPLE = "0x18800000"
 
         /** Frame spacing for the pinch interpolation in [pinchOnDisplay]. */
         private const val PINCH_STEP_MS = 16

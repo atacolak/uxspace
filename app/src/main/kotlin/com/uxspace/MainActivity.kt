@@ -315,6 +315,7 @@ class MainActivity : ComponentActivity() {
         displayManager().unregisterDisplayListener(displayListener)
         presentation?.dismiss()
         presentation = null
+        setWorkspaceServiceRunning(false)
         PrivilegedService.removeListener(privilegeListener)
         WorkspaceController.removeZoomListener(zoomHudListener)
         super.onDestroy()
@@ -356,11 +357,23 @@ class MainActivity : ComponentActivity() {
                     null
                 }
             }
+            // Foreground service brackets the glasses session — its onDestroy is the
+            // safety net that force-stops launched apps if the activity is taken away
+            // without the presentation's own dismiss cleanup running first.
+            setWorkspaceServiceRunning(presentation != null)
         } else {
             presentation?.dismiss()
             presentation = null
+            setWorkspaceServiceRunning(false)
         }
         renderStatus()
+    }
+
+    private var workspaceServiceRunning = false
+    private fun setWorkspaceServiceRunning(running: Boolean) {
+        if (running == workspaceServiceRunning) return
+        workspaceServiceRunning = running
+        if (running) WorkspaceService.start(this) else WorkspaceService.stop(this)
     }
 
     /**

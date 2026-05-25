@@ -23,6 +23,16 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!--
+      WorkspaceService is a foreground service tied to the glasses USB session — it lets
+      UxSpace keep the workspace + launched apps alive while the phone screen is off, and
+      its onDestroy is the cleanup anchor that force-stops launched apps when the glasses
+      disconnect. `connectedDevice` is the Android 14+ FGS type for "driven by an external
+      device connection".
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!--
       UxSpace lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->
@@ -91,6 +101,17 @@
                 <action android:name="com.uxspace.privileged.SUBMIT_PAIRING_CODE" />
             </intent-filter>
         </receiver>
+
+        <!--
+          Workspace lifecycle anchor. Started by MainActivity when the glasses display
+          comes up; stopped when it goes away (or when the activity is destroyed). Its
+          onDestroy force-stops every app UxSpace launched into the workspace, so a
+          launched app never outlives the glasses session.
+        -->
+        <service
+            android:name=".WorkspaceService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!--
           Accessibility service — subscribes to focus events so we can open the phone
