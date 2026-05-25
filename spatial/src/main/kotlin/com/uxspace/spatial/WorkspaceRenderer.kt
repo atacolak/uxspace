@@ -1217,11 +1217,15 @@ class WorkspaceRenderer(
             GLES20.glEnableVertexAttribArray(hudATexCoord)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glUniform1i(hudUTexture, 0)
+            // Icons render square in pixels — compute halfW from a fixed halfH so the
+            // toolbar's height drives the icon size, not the (wider) hit region.
+            val iconHalfH = TOOLBAR_HALF_H * TOOLBAR_ICON_HEIGHT_FRACTION
+            val iconHalfW = iconHalfH / surfaceAspect
             for (b in toolbarButtons) {
                 val texId = iconTextureFor(b.iconResIdProvider()) ?: continue
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
                 GLES20.glUniform2f(hudUCenter, b.cx, TOOLBAR_Y)
-                GLES20.glUniform2f(hudUHalfSize, b.halfW, b.halfW * (surfaceAspect))
+                GLES20.glUniform2f(hudUHalfSize, iconHalfW, iconHalfH)
                 val alpha = if (b.label == "layout" && viewMode == ViewMode.PINNED) 0.35f
                 else 1.0f
                 GLES20.glUniform4f(hudUColor, 1f, 1f, 1f, alpha)
@@ -1569,8 +1573,14 @@ class WorkspaceRenderer(
         const val TOOLBAR_HALF_W = 0.42f
         const val TOOLBAR_HALF_H = 0.06f
 
-        /** Icon NDC half-width — picked so 5 buttons fit inside `2 * TOOLBAR_HALF_W`. */
+        /**
+         * NDC half-width of a button's *hit region* — wider than the icon so the cursor
+         * can land near an icon and still register. Picked so 5 buttons + gaps fill the
+         * `2 * TOOLBAR_HALF_W` bar.
+         */
         const val TOOLBAR_BUTTON_HALF_W = 0.055f
+        /** Icon visual fills this much of the bar's height (the rest is vertical padding). */
+        const val TOOLBAR_ICON_HEIGHT_FRACTION = 0.78f
         /** Rasterised bitmap size for vector-drawable icon textures (pixels). */
         const val TOOLBAR_ICON_TEXTURE_PX = 96
 
