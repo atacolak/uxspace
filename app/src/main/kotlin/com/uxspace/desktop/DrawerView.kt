@@ -1,16 +1,13 @@
 package com.uxspace.desktop
 
-import android.app.Presentation
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
-import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -26,83 +23,39 @@ import com.uxspace.apps.InstalledApp
 import com.uxspace.spatial.WorkspaceController
 
 /**
- * UxSpace's app drawer — the Samsung DeX drawer panel: Personal / Work tabs, an 8-column app
- * grid, and a search bar.
+ * UxSpace's app drawer panel — a regular Android view (not a Presentation), embedded
+ * as a child of each screen's [DesktopPresentation]. The screen's surface texture
+ * therefore contains everything for that screen (wallpaper, taskbar, drawer when
+ * visible, launched apps on top), so the renderer just samples one surface per
+ * screen — no special drawer geometry, no scrim quad, sizing always matches the
+ * host screen by construction.
  *
- * It is its own [Presentation] on a dedicated `UiScreen`, so [com.uxspace.spatial.WorkspaceRenderer]
- * can draw it as an overlay *in front of* the app windows — behind a dimming scrim — instead
- * of behind them. The panel fills the whole surface; the renderer gives it its place in the
- * scene and the scrim. Tapping an app launches it and closes the drawer.
+ * Visibility is driven by the screen's `DesktopPresentation` via a
+ * [WorkspaceController.addDrawerStateListener] filter on its own screen index.
  */
-class DrawerPresentation(
-    outerContext: Context,
-    display: Display,
-) : Presentation(outerContext, display, android.R.style.Theme_DeviceDefault_NoActionBar) {
+class DrawerView(context: Context) : LinearLayout(context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
-    private lateinit var search: EditText
-    private lateinit var allAppsTab: TextView
-    private lateinit var recentTab: TextView
+    private val search: EditText
+    private val allAppsTab: TextView
+    private val recentTab: TextView
+
+    private val searchQueryListener: (String) -> Unit = { q ->
+        mainHandler.post { setSearchText(q) }
+    }
+    private val modeChangedListener: (WorkspaceController.DrawerMode) -> Unit = { m ->
+        mainHandler.post { applyMode(m) }
+    }
 
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(buildPanel())
-        loadApps()
-        // The phone control panel forwards keyboard text in here — typing on the phone's
-        // IME-backed field filters the app grid, since the drawer's own EditText can't
-        // receive a system IME on a secondary display.
-        WorkspaceController.onDrawerSearchQuery = { query ->
-            mainHandler.post { setSearchText(query) }
-        }
-        // Two ways the drawer changes mode: this hook (from the taskbar's All apps /
-        // Recent buttons) and the in-drawer tab labels themselves.
-        WorkspaceController.onDrawerModeChanged = { mode ->
-            mainHandler.post { applyMode(mode) }
-        }
-        applyMode(WorkspaceController.drawerMode)
-    }
+    init {
+        orientation = VERTICAL
+        setBackgroundColor(PANEL_COLOR)
+        setPadding(dp(22), dp(22), dp(22), dp(20))
 
-    override fun onStop() {
-        if (WorkspaceController.onDrawerSearchQuery != null) {
-            WorkspaceController.onDrawerSearchQuery = null
-        }
-        if (WorkspaceController.onDrawerModeChanged != null) {
-            WorkspaceController.onDrawerModeChanged = null
-        }
-        super.onStop()
-    }
-
-    /** Reflect the controller's drawer mode in the tab styling and the adapter's filter. */
-    private fun applyMode(mode: WorkspaceController.DrawerMode) {
-        if (::allAppsTab.isInitialized) styleTab(allAppsTab, mode == WorkspaceController.DrawerMode.ALL)
-        if (::recentTab.isInitialized) styleTab(recentTab, mode == WorkspaceController.DrawerMode.RECENT)
-        adapter.setMode(mode, WorkspaceController.recentApps)
-    }
-
-    private fun styleTab(tab: TextView, active: Boolean) {
-        if (active) {
-            tab.setTextColor(TAB_ACTIVE)
-            tab.typeface = Typeface.DEFAULT_BOLD
-        } else {
-            tab.setTextColor(TAB_INACTIVE)
-            tab.typeface = Typeface.DEFAULT
-        }
-    }
-
-    /** Mirror externally-typed text into the search box without re-triggering its watcher. */
-    private fun setSearchText(query: String) {
-        if (!::search.isInitialized) return
-        if (search.text.toString() == query) return
-        search.setText(query)
-        search.setSelection(query.length)
-    }
-
-    /** The panel fills the surface — the renderer positions and scrims it in the scene. */
-    private fun buildPanel(): View {
         allAppsTab = tabLabel("All apps") {
             WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
         }
@@ -110,12 +63,12 @@ class DrawerPresentation(
             WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.RECENT)
         }
         val tabs = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = HORIZONTAL
             gravity = Gravity.CENTER
             addView(allAppsTab)
             addView(
                 recentTab,
-                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(36) },
+                LayoutParams(WRAP, WRAP).apply { marginStart = dp(36) },
             )
         }
 
@@ -124,9 +77,9 @@ class DrawerPresentation(
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
             verticalSpacing = dp(8)
             isVerticalScrollBarEnabled = false
-            adapter = this@DrawerPresentation.adapter
+            adapter = this@DrawerView.adapter
             setOnItemClickListener { _, _, position, _ ->
-                (this@DrawerPresentation.adapter.getItem(position) as? InstalledApp)?.let(::launch)
+                (this@DrawerView.adapter.getItem(position) as? InstalledApp)?.let(::launch)
             }
         }
 
@@ -152,14 +105,59 @@ class DrawerPresentation(
             })
         }
 
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(PANEL_COLOR)
-            setPadding(dp(22), dp(22), dp(22), dp(20))
-            addView(tabs, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
-            addView(grid, LinearLayout.LayoutParams(MATCH, 0, 1f))
-            addView(search, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+        addView(tabs, LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        addView(grid, LayoutParams(MATCH, 0, 1f))
+        addView(search, LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
+
+        applyMode(WorkspaceController.drawerMode)
+        loadApps()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        WorkspaceController.onDrawerSearchQuery = searchQueryListener
+        WorkspaceController.addDrawerModeListener(modeChangedListener)
+    }
+
+    override fun onDetachedFromWindow() {
+        if (WorkspaceController.onDrawerSearchQuery === searchQueryListener) {
+            WorkspaceController.onDrawerSearchQuery = null
         }
+        WorkspaceController.removeDrawerModeListener(modeChangedListener)
+        super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        // Re-sync to the controller's current mode whenever this drawer becomes visible.
+        // Defensive: ensures the tab + grid reflect the mode the App-drawer button just
+        // set, even if our listener was lost or this DrawerView was constructed while
+        // the controller held a different (stale) mode.
+        if (changedView === this && visibility == VISIBLE) {
+            applyMode(WorkspaceController.drawerMode)
+        }
+    }
+
+    private fun applyMode(mode: WorkspaceController.DrawerMode) {
+        styleTab(allAppsTab, mode == WorkspaceController.DrawerMode.ALL)
+        styleTab(recentTab, mode == WorkspaceController.DrawerMode.RECENT)
+        adapter.setMode(mode, WorkspaceController.recentApps)
+    }
+
+    private fun styleTab(tab: TextView, active: Boolean) {
+        if (active) {
+            tab.setTextColor(TAB_ACTIVE)
+            tab.typeface = Typeface.DEFAULT_BOLD
+        } else {
+            tab.setTextColor(TAB_INACTIVE)
+            tab.typeface = Typeface.DEFAULT
+        }
+    }
+
+    private fun setSearchText(query: String) {
+        if (search.text.toString() == query) return
+        search.setText(query)
+        search.setSelection(query.length)
     }
 
     private fun tabLabel(text: String, onClick: () -> Unit): TextView = TextView(context).apply {
@@ -176,14 +174,15 @@ class DrawerPresentation(
     }
 
     private fun loadApps() {
-        // Synchronous if [AppCache] has already finished its app-start preload (typical
-        // case); otherwise the callback fires on the loader thread when it's ready.
         AppCache.whenReady { list ->
+            android.util.Log.i(
+                "UxSpace/Drawer",
+                "DrawerView whenReady got ${list.size} apps; mode=${WorkspaceController.drawerMode}",
+            )
             mainHandler.post { adapter.submit(list) }
         }
     }
 
-    /** Grid adapter — one icon-over-label cell per installed app, with mode + search filtering. */
     private inner class AppGridAdapter : BaseAdapter() {
         private val full = ArrayList<InstalledApp>()
         private val items = ArrayList<InstalledApp>()
@@ -195,6 +194,10 @@ class DrawerPresentation(
             full.clear()
             full.addAll(apps)
             recompute()
+            android.util.Log.i(
+                "UxSpace/Drawer",
+                "AppGridAdapter.submit: full=${full.size} items=${items.size} mode=$mode",
+            )
         }
 
         fun setQuery(text: String) {
@@ -237,10 +240,10 @@ class DrawerPresentation(
         }
 
         private fun newCell(): LinearLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(6), dp(10), dp(6), dp(10))
-            addView(ImageView(context), LinearLayout.LayoutParams(dp(52), dp(52)))
+            addView(ImageView(context), LayoutParams(dp(52), dp(52)))
             addView(
                 TextView(context).apply {
                     setTextColor(LABEL_COLOR)
@@ -249,7 +252,7 @@ class DrawerPresentation(
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 },
-                LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) },
+                LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) },
             )
         }
     }

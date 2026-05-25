@@ -75,8 +75,6 @@ class WorkspaceRenderer(
      */
     private val extraScreens = mutableListOf<UiScreen>()
 
-    /** The app-drawer overlay — drawn in front of the windows, behind a scrim, while open. */
-    private var drawer: UiScreen? = null
 
     // Head-orientation quaternion (w, x, y, z); identity means looking straight ahead.
     @Volatile private var headW = 1f
@@ -184,7 +182,6 @@ class WorkspaceRenderer(
     @Volatile private var recording = false
     private var recordingFrameCounter = 0
     @Volatile private var pendingScroll = 0f
-    @Volatile private var drawerOpen = false
 
     private var surfaceWidth = 0
     private var surfaceHeight = 0
@@ -486,14 +483,6 @@ class WorkspaceRenderer(
         noteInput()
     }
 
-    /**
-     * Lift the app windows out of the way while the app drawer is open. The drawer lives on
-     * the desktop plane behind the windows, so it would otherwise be occluded by them.
-     */
-    fun setDrawerOpen(open: Boolean) {
-        drawerOpen = open
-    }
-
     /** Move the cursor by a fraction of the touchpad's width. Safe to call from any thread. */
     fun moveCursor(dxFraction: Float, dyFraction: Float) {
         cursorX = (cursorX + dxFraction * CURSOR_SENSITIVITY).coerceIn(-1f, 1f)
@@ -534,8 +523,6 @@ class WorkspaceRenderer(
         desktop = null
         extraScreens.forEach { it.release() }
         extraScreens.clear()
-        drawer?.release()
-        drawer = null
         currentScreenApps.clear()
     }
 
@@ -562,19 +549,11 @@ class WorkspaceRenderer(
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
         scrimQuad = directBufferOf(SCRIM_QUAD_VERTICES)
 
-        // Slot desktops are built later by syncScreens (triggered by the queued
+        // Screens are built later by syncScreens (triggered by the queued
         // applyLayout task from WorkspaceController.register) — screen 0 included, so
-        // each per-screen Presentation gets its own showTaskbar config baked in.
-
-        // The app-drawer overlay — its own UI surface, drawn in front of the windows.
-        WorkspaceController.drawerContent?.let { drawerFactory ->
-            val du = UiScreen(
-                createExternalTexture(), DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX, mainHandler,
-                "uxspace-drawer",
-            )
-            drawer = du
-            mainHandler.post { du.start(context, drawerFactory) }
-        }
+        // each per-screen Presentation gets its own showTaskbar config baked in. The
+        // drawer is a child view of each screen's DesktopPresentation (not a separate
+        // VirtualDisplay), so the renderer doesn't initialise or own one.
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -666,12 +645,6 @@ class WorkspaceRenderer(
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
                 drawExternalQuad(d.textureId, d.textureMatrix)
             }
-        }
-
-        // The app drawer — a dimming scrim over everything, then the drawer panel on top.
-        if (drawerOpen) {
-            drawScrim()
-            drawDrawerPanel()
         }
 
         if (cursorClickPending) {
@@ -986,25 +959,12 @@ class WorkspaceRenderer(
                 return
             }
         }
-        // While the drawer is open it is modal: a tap on the panel goes to the drawer, a tap
-        // on the scrim outside it closes the drawer.
-        if (drawerOpen) {
-            val px = drawer?.let {
-                val r = drawerWorld()
-                cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
-            }
-            if (px != null) {
-                val d = drawer
-                if (d != null) mainHandler.post { d.dispatchTap(px[0], px[1]) }
-            } else {
-                WorkspaceController.setDrawerOpen(false)
-            }
-            return
-        }
-        // Per-screen routing: find which screen the cursor is over, compute screen-local pixel
-        // coords, inject the tap via the privileged helper. Same path reaches both the
-        // per-screen Presentation (when no app is launched there) and any activity stacked
-        // on top — the input dispatcher routes to the topmost window on that display.
+        // Per-screen routing: find which screen the cursor is over, compute screen-local
+        // pixel coords, inject the tap via the privileged helper. Same path reaches the
+        // per-screen Presentation (wallpaper, taskbar, drawer view when visible) and any
+        // activity stacked on top — the display's input dispatcher routes to the topmost
+        // window. No drawer special-case needed: the drawer is just a child view of the
+        // host screen's Presentation now.
         val screenIdx = screenIndexUnderCursor() ?: return
         val screen = layout.screens[screenIdx]
         val displayId = screenDisplayId(screenIdx) ?: return
@@ -1017,24 +977,12 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Dispatch an accumulated scroll delta. The drawer overlay is modal — when it's open,
-     * scroll goes to its panel (or nowhere on the scrim), never to the windows behind it.
-     * Otherwise: topmost non-minimised app window's content first (injected through the
-     * privileged helper as a touch-swipe, since shell `input` doesn't expose a wheel
-     * scroll), then the desktop.
+     * Dispatch an accumulated scroll delta into the screen under the cursor. The drawer
+     * (when open) is a child view inside that screen's Presentation, so its `GridView`
+     * gets the scroll naturally via the same input-injection path — no special case.
      */
     private fun handleScroll(dyFraction: Float) {
         val vScroll = dyFraction * SCROLL_SENSITIVITY
-        if (drawerOpen) {
-            val d = drawer ?: return
-            val r = drawerWorld()
-            val px = cursorToRectPx(r[0], r[1], r[2], r[3], r[4], DRAWER_WIDTH_PX, DRAWER_HEIGHT_PX)
-                ?: return
-            mainHandler.post { d.dispatchScroll(px[0], px[1], vScroll) }
-            return
-        }
-        // Same per-screen routing as handleClick: find screen under cursor, inject the scroll
-        // into its display via the privileged helper.
         val screenIdx = screenIndexUnderCursor() ?: return
         val screen = layout.screens[screenIdx]
         val displayId = screenDisplayId(screenIdx) ?: return
@@ -1043,18 +991,13 @@ class WorkspaceRenderer(
     }
 
     /**
-     * Dispatch an accumulated pinch into the topmost app window under the cursor. Each
-     * call sends one discrete two-finger pinch through the privileged helper; held
-     * pinches show up as a sequence of small zooms, which Photos / Maps / browsers
-     * handle gracefully.
+     * Dispatch an accumulated pinch. The drawer is a window-level overlay that doesn't
+     * handle pinch, so the input bubbles down past it to the virtual-space zoom (same
+     * model as a standard view hierarchy — if the focused widget doesn't consume the
+     * gesture, its parent gets a shot).
      */
     private fun handlePinch(scale: Float) {
         if (scale == 1f) return
-        // Drawer is modal — pinch over it doesn't reach the windows behind.
-        if (drawerOpen) {
-            Log.i(TAG, "pinch ignored — drawer open")
-            return
-        }
         when (viewMode) {
             ViewMode.FREE, ViewMode.PINNED -> applyCursorAnchoredZoom(scale)
         }
@@ -1170,14 +1113,6 @@ class WorkspaceRenderer(
         )
     }
 
-    /** World rect (centre x, y, z and size w, h) of the app-drawer panel — centred. */
-    private fun drawerWorld(): FloatArray {
-        val w = 2f * desktopHalfWidth * DRAWER_WIDTH_FRACTION
-        val h = w * DRAWER_HEIGHT_PX / DRAWER_WIDTH_PX
-        return floatArrayOf(0f, 0f, -Screen.SCREEN_DISTANCE, w, h)
-    }
-
-    /** Draw the dimming scrim behind the drawer — a flat, blended, full-screen quad. */
     /**
      * Render the in-view toolbar. Idle = a 5-px peek line at bottom centre; when the
      * cursor is over the peek (or over the expanded toolbar, or within
@@ -1237,33 +1172,6 @@ class WorkspaceRenderer(
         return toolbarButtons.firstOrNull {
             cursorX in (it.cx - it.halfW)..(it.cx + it.halfW)
         }
-    }
-
-    private fun drawScrim() {
-        GLES20.glUseProgram(cursorProgram)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        scrimQuad.position(0)
-        GLES20.glVertexAttribPointer(
-            cursorAPosition, 2, GLES20.GL_FLOAT, false, ARROW_STRIDE_BYTES, scrimQuad,
-        )
-        GLES20.glEnableVertexAttribArray(cursorAPosition)
-        GLES20.glUniform2f(cursorUCenter, 0f, 0f)
-        GLES20.glUniform2f(cursorUHalfSize, 1f, 1f)
-        GLES20.glUniform4f(cursorUColor, 0f, 0f, 0f, SCRIM_ALPHA)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
-        GLES20.glDisable(GLES20.GL_BLEND)
-    }
-
-    /** Draw the app-drawer panel quad, in front of the windows. */
-    private fun drawDrawerPanel() {
-        val d = drawer ?: return
-        d.updateTexture()
-        val r = drawerWorld()
-        GLES20.glUseProgram(screenProgram)
-        buildModelRect(modelMatrix, r[0], r[1], r[2], r[3], r[4])
-        Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
-        drawExternalQuad(d.textureId, d.textureMatrix)
     }
 
     /** World (x, y) where the cursor ray meets the plane z = [planeZ]; null if it misses. */
@@ -1515,16 +1423,6 @@ class WorkspaceRenderer(
 
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f
-
-        /** Pixel resolution of the app-drawer panel surface. */
-        const val DRAWER_WIDTH_PX = 1400
-        const val DRAWER_HEIGHT_PX = 920
-
-        /** The drawer panel's width, as a fraction of the desktop width. */
-        const val DRAWER_WIDTH_FRACTION = 0.62f
-
-        /** Opacity of the dimming scrim drawn behind the open drawer. */
-        const val SCRIM_ALPHA = 0.55f
 
         /** Default render band — the glasses' top/bottom edges are uncomfortable to view. */
         const val DEFAULT_SCREEN_BAND = 0.83f

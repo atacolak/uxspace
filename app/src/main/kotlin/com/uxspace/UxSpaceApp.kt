@@ -5,7 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import com.uxspace.apps.AppCache
 import com.uxspace.desktop.DesktopPresentation
-import com.uxspace.desktop.DrawerPresentation
 import com.uxspace.privileged.PrivilegedService
 import com.uxspace.spatial.WorkspaceController
 import com.uxspace.system.SystemStatus
@@ -34,9 +33,6 @@ class UxSpaceApp : Application() {
         // Keeps the rendering layer free of the desktop UI and the privileged path.
         WorkspaceController.desktopContent = { context, display, slotIdx, showTaskbar ->
             DesktopPresentation(context, display, slotIdx, showTaskbar)
-        }
-        WorkspaceController.drawerContent = { context, display ->
-            DrawerPresentation(context, display)
         }
         WorkspaceController.createVirtualDisplay = { name, width, height, dpi, surface ->
             PrivilegedService.createVirtualDisplay(name, width, height, dpi, surface)

@@ -90,21 +90,91 @@ class DesktopPresentation(
         mainHandler.post { removeRunningApp(packageName) }
     }
 
+    /** Drawer view embedded as a child of the root; visibility driven by the controller. */
+    private lateinit var drawer: DrawerView
+
+    /**
+     * Transparent click-catcher sized to the whole screen. Shown on *every* slot
+     * whenever a drawer is open anywhere, so a click on any monitor's wallpaper —
+     * including a different monitor from the one hosting the drawer — closes it.
+     * The taskbar is added above the scrim in z-order, so taskbar buttons still
+     * receive their clicks; the drawer itself sits above the scrim too, so taps
+     * inside the drawer don't dismiss it.
+     */
+    private lateinit var scrim: View
+
+    private val drawerStateListener: (Boolean, Int) -> Unit = { open, screenIdx ->
+        mainHandler.post {
+            val showDrawerHere = open && screenIdx == slotIdx
+            if (::drawer.isInitialized) {
+                drawer.visibility = if (showDrawerHere) View.VISIBLE else View.GONE
+            }
+            if (::scrim.isInitialized) {
+                scrim.visibility = if (open) View.VISIBLE else View.GONE
+            }
+            android.util.Log.i(
+                "UxSpace/Drawer",
+                "screen=$slotIdx listener fired open=$open targetScreen=$screenIdx " +
+                    "showDrawerHere=$showDrawerHere",
+            )
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = FrameLayout(context)
         root.addView(buildWallpaper())
+        // Scrim sits between wallpaper and taskbar/drawer so a click on bare
+        // wallpaper closes the drawer, but taskbar buttons + the drawer itself
+        // still receive their own clicks (they're above the scrim in z-order).
+        scrim = View(context).apply {
+            visibility = View.GONE
+            setOnClickListener { WorkspaceController.setDrawerOpen(false, slotIdx) }
+        }
+        root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
         if (showTaskbar) root.addView(buildTaskbar())
         root.addView(buildVersionLabel())
+        // Drawer goes last so it sits on top of wallpaper + taskbar in the view tree.
+        // Insets from screen edges so it doesn't cover the whole surface; tap outside
+        // would land on the wallpaper (no close-on-outside yet — drawer closes when an
+        // app is launched or on lock/unlock).
+        // Drawer size: aspect-preserved fit inside 60% of the host screen's pixel
+        // dims, with both the baseline cap and the aspect transposed to portrait on
+        // a V slot. Without the transpose, a V slot (1080×1920) clamps effectiveH
+        // to the landscape baseline H (1080) and keeps the landscape 1400×920
+        // aspect, producing a stubby horizontal drawer in the middle of a tall
+        // screen. Cap rule unchanged: ultrawide / panoramic screens still get the
+        // *same* drawer as a single 1920×1080 screen.
+        val metrics = android.util.DisplayMetrics()
+        display.getRealMetrics(metrics)
+        val portraitHost = metrics.heightPixels > metrics.widthPixels
+        val baselineW = if (portraitHost) DRAWER_BASELINE_SCREEN_H else DRAWER_BASELINE_SCREEN_W
+        val baselineH = if (portraitHost) DRAWER_BASELINE_SCREEN_W else DRAWER_BASELINE_SCREEN_H
+        val effectiveW = minOf(metrics.widthPixels, baselineW)
+        val effectiveH = minOf(metrics.heightPixels, baselineH)
+        val maxW = (effectiveW * DRAWER_SCREEN_FRACTION).toInt()
+        val maxH = (effectiveH * DRAWER_SCREEN_FRACTION).toInt()
+        val aspect = if (portraitHost) DRAWER_ASPECT_H / DRAWER_ASPECT_W
+        else DRAWER_ASPECT_W / DRAWER_ASPECT_H
+        var dw = maxW
+        var dh = (maxW / aspect).toInt()
+        if (dh > maxH) { dh = maxH; dw = (maxH * aspect).toInt() }
+        drawer = DrawerView(context).apply {
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(dw, dh, Gravity.CENTER)
+        }
+        root.addView(drawer)
         setContentView(root)
-        // Per-slot taskbar — only react to launches on this slot.
+        // Per-screen taskbar — only react to launches on this screen.
         WorkspaceController.addAppLaunchedListener(appLaunchedListener)
         WorkspaceController.addAppClosedListener(appClosedListener)
+        WorkspaceController.addDrawerStateListener(drawerStateListener)
     }
 
     override fun onDetachedFromWindow() {
         WorkspaceController.removeAppLaunchedListener(appLaunchedListener)
         WorkspaceController.removeAppClosedListener(appClosedListener)
+        WorkspaceController.removeDrawerStateListener(drawerStateListener)
         super.onDetachedFromWindow()
     }
 
@@ -201,15 +271,25 @@ class DesktopPresentation(
         gravity = Gravity.CENTER_VERTICAL
         addView(
             taskbarButton(R.drawable.ic_apps, "App drawer") {
+                // Toggle is local to *this* slot — if the drawer is open on another
+                // monitor, one click moves it here instead of taking two (close-then-
+                // open). Only close when the drawer is already on this slot.
+                val openHere = WorkspaceController.isDrawerOpen &&
+                    WorkspaceController.drawerOnScreen == slotIdx
+                android.util.Log.i(
+                    "UxSpace/Drawer",
+                    "screen=$slotIdx drawer button clicked, openOn=" +
+                        "${WorkspaceController.drawerOnScreen} openHere=$openHere",
+                )
                 WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
-                WorkspaceController.setDrawerOpen(!WorkspaceController.isDrawerOpen)
+                WorkspaceController.setDrawerOpen(!openHere, slotIdx)
             },
         )
         addView(buildDivider())
         addView(
             taskbarButton(R.drawable.ic_recent, "Recent apps") {
                 WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.RECENT)
-                WorkspaceController.setDrawerOpen(true)
+                WorkspaceController.setDrawerOpen(true, slotIdx)
             },
         )
         addView(
@@ -226,7 +306,7 @@ class DesktopPresentation(
             taskbarButton(R.drawable.ic_search, "Search") {
                 // Search reaches all installed apps — not just the recent subset.
                 WorkspaceController.setDrawerMode(WorkspaceController.DrawerMode.ALL)
-                WorkspaceController.setDrawerOpen(true)
+                WorkspaceController.setDrawerOpen(true, slotIdx)
             },
         )
     }
@@ -381,5 +461,15 @@ class DesktopPresentation(
 
         /** Translucent white for the left-cluster divider — a quarter-strength rule line. */
         const val DIVIDER_COLOR = 0x40FFFFFF
+
+        // Drawer sizing. The effective screen is min(host px, baseline), then 60 % cap
+        // per dim, aspect-preserved. So ultrawide / wider-than-baseline screens get
+        // the same drawer as a single 1920×1080 screen — UI doesn't scale with extra
+        // real estate, per the design rule. Aspect 1400×920 ≈ 1.52:1.
+        const val DRAWER_BASELINE_SCREEN_W = 1920
+        const val DRAWER_BASELINE_SCREEN_H = 1080
+        const val DRAWER_SCREEN_FRACTION = 0.6f
+        const val DRAWER_ASPECT_W = 1400f
+        const val DRAWER_ASPECT_H = 920f
     }
 }

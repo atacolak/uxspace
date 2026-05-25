@@ -48,10 +48,6 @@ object WorkspaceController {
         (Context, Display, screenIdx: Int, showTaskbar: Boolean) -> Presentation
     )? = null
 
-    /** Builds the app-drawer overlay shown in front of the windows. Set by the app at startup. */
-    @Volatile
-    var drawerContent: ((Context, Display) -> Presentation)? = null
-
     /** Launches an app onto a virtual display. Set by the app at startup. */
     @Volatile
     var appLauncher: ((displayId: Int, packageName: String, activityName: String) -> Unit)? = null
@@ -173,9 +169,22 @@ object WorkspaceController {
     var drawerMode: DrawerMode = DrawerMode.ALL
         private set
 
-    /** Notified (on the main thread) when the drawer mode changes — the drawer re-filters. */
-    @Volatile
-    var onDrawerModeChanged: ((DrawerMode) -> Unit)? = null
+    /**
+     * Notified (on the main thread) when the drawer mode changes — every DrawerView
+     * registers one, so all per-screen drawers re-style their tabs and re-filter the
+     * grid in sync. Multi-listener (not a single var) because V/H/V has three
+     * DrawerViews and the single-slot version would leave two of them stale.
+     */
+    private val drawerModeListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(DrawerMode) -> Unit>()
+
+    fun addDrawerModeListener(listener: (DrawerMode) -> Unit) {
+        drawerModeListeners.add(listener)
+    }
+
+    fun removeDrawerModeListener(listener: (DrawerMode) -> Unit) {
+        drawerModeListeners.remove(listener)
+    }
 
     /** Most-recent-first package names of apps launched into the workspace. */
     private val recentAppsList = ArrayList<String>()
@@ -189,11 +198,16 @@ object WorkspaceController {
     /** Whether the app drawer is currently open. */
     val isDrawerOpen: Boolean get() = drawerOpenState
 
-    /** Set the drawer's filter mode; idempotent. The drawer re-filters via the hook. */
+    /**
+     * Set the drawer's filter mode. Always notifies listeners — even if the stored
+     * mode is unchanged — so the App-drawer button's "force to ALL" semantics can't
+     * be defeated by a stale tab state on a DrawerView that was constructed while
+     * the mode was something else (e.g. RECENT left over from a prior unlocked
+     * session).
+     */
     fun setDrawerMode(mode: DrawerMode) {
-        if (drawerMode == mode) return
         drawerMode = mode
-        onDrawerModeChanged?.invoke(mode)
+        drawerModeListeners.forEach { runCatching { it(mode) } }
     }
 
     /** The current view mode — pinned to the head, or free in the world. */
@@ -257,10 +271,38 @@ object WorkspaceController {
         appClosedListeners.forEach { runCatching { it(packageName) } }
     }
 
-    /** Open or close the app-drawer overlay. */
-    fun setDrawerOpen(open: Boolean) {
+    /**
+     * Open or close the app-drawer. `screenIdx` is the index of the screen whose
+     * drawer button triggered this — the drawer is a view embedded in *that* screen's
+     * [com.uxspace.desktop.DesktopPresentation], not a separate 3D quad. Closing
+     * ignores `screenIdx` (every drawer view hides). Fires every registered
+     * [drawerStateListeners] entry on the main thread.
+     */
+    fun setDrawerOpen(open: Boolean, screenIdx: Int = 0) {
         drawerOpenState = open
-        renderer?.setDrawerOpen(open)
+        drawerOnScreen = if (open) screenIdx else -1
+        drawerStateListeners.forEach { runCatching { it(open, screenIdx) } }
+    }
+
+    /** Index of the screen that owns the currently-open drawer, or −1 when closed. */
+    @Volatile
+    var drawerOnScreen: Int = -1
+        private set
+
+    /**
+     * Listeners notified (main thread) when the drawer opens/closes. Each per-screen
+     * DesktopPresentation registers one and toggles its embedded DrawerView's
+     * visibility iff `screenIdx == own slotIdx` (open) or unconditionally (close).
+     */
+    private val drawerStateListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(open: Boolean, screenIdx: Int) -> Unit>()
+
+    fun addDrawerStateListener(listener: (open: Boolean, screenIdx: Int) -> Unit) {
+        drawerStateListeners.add(listener)
+    }
+
+    fun removeDrawerStateListener(listener: (open: Boolean, screenIdx: Int) -> Unit) {
+        drawerStateListeners.remove(listener)
     }
 
     /**
@@ -293,10 +335,13 @@ object WorkspaceController {
     /**
      * Switch how the screen tracks the head, and reshape the workspace to match. PINNED
      * always shows a single display (focus mode); FREE restores the user's chosen layout.
+     * Closes the drawer if it was open — switching modes makes the previous drawer's
+     * anchor screen meaningless.
      */
     fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
         if (viewMode == mode) return
         viewMode = mode
+        if (drawerOpenState) setDrawerOpen(false)
         renderer?.setViewMode(mode)
         renderer?.applyLayout(effectiveLayout())
     }
