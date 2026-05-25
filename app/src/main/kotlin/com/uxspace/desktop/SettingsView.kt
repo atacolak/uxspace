@@ -38,6 +38,7 @@ class SettingsView(context: Context) : LinearLayout(context) {
     private lateinit var zoomLabel: TextView
     private lateinit var bandValue: TextView
     private lateinit var bandSeek: SeekBar
+    private lateinit var recordingButton: TextView
 
     /** Pulled from the controller every time the panel becomes visible. */
     private val zoomListener: (Float) -> Unit = { z -> mainHandler.post { renderZoom(z) } }
@@ -74,6 +75,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
         body.addView(spacer(dp(20)))
         body.addView(buildScreenBandSection())
         body.addView(spacer(dp(20)))
+        body.addView(buildCaptureSection())
+        body.addView(spacer(dp(20)))
         body.addView(buildAboutSection())
     }
 
@@ -101,6 +104,7 @@ class SettingsView(context: Context) : LinearLayout(context) {
         renderLayout(WorkspaceController.layout)
         renderZoom(WorkspaceController.currentZoom())
         renderScreenBand(WorkspaceController.currentScreenBand())
+        renderRecording(WorkspaceController.isRecording)
     }
 
     // region View mode
@@ -229,6 +233,32 @@ class SettingsView(context: Context) : LinearLayout(context) {
     private fun bandProgressFromFraction(fraction: Float): Int {
         val clamped = fraction.coerceIn(BAND_MIN, BAND_MAX)
         return (((clamped - BAND_MIN) / (BAND_MAX - BAND_MIN)) * BAND_SEEK_MAX).toInt()
+    }
+
+    // endregion
+
+    // region Capture / recording
+
+    private fun buildCaptureSection(): View {
+        val captureBtn = pillButton("Capture") {
+            WorkspaceController.capture()
+        }
+        recordingButton = pillButton("Record") {
+            val nowRecording = WorkspaceController.toggleRecording()
+            renderRecording(nowRecording)
+        }
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            addView(captureBtn, LayoutParams(0, WRAP, 1f).apply { marginEnd = dp(8) })
+            addView(recordingButton, LayoutParams(0, WRAP, 1f))
+        }
+        return sectionBlock("Capture", row)
+    }
+
+    private fun renderRecording(recording: Boolean) {
+        if (!::recordingButton.isInitialized) return
+        recordingButton.text = if (recording) "Stop recording" else "Record"
+        stylePill(recordingButton, recording)
     }
 
     // endregion
