@@ -237,7 +237,7 @@ class WorkspaceRenderer(
     @Volatile private var freeZoom = DEFAULT_WORKSPACE_ZOOM
     @Volatile private var freeTx = 0f
     @Volatile private var freeTy = 0f
-    @Volatile private var pinnedZoom = DEFAULT_WORKSPACE_ZOOM
+    @Volatile private var pinnedZoom = DEFAULT_PINNED_ZOOM
     @Volatile private var pinnedTx = 0f
     @Volatile private var pinnedTy = 0f
 
@@ -264,6 +264,10 @@ class WorkspaceRenderer(
     /** Queue an app to be opened in a window. Safe to call from any thread. */
     fun requestApp(packageName: String, activityName: String, label: String) {
         pendingApps.add(AppRequest(packageName, activityName, label))
+        Log.i(
+            "UxSpace/Launch",
+            "3) renderer.requestApp pkg=$packageName enqueued (pending=${pendingApps.size})",
+        )
     }
 
     /** Feed a head-orientation quaternion for the camera. Safe to call from any thread. */
@@ -826,10 +830,16 @@ class WorkspaceRenderer(
         // VirtualDisplay (created by syncScreens). The screen's own Presentation
         // (wallpaper + taskbar) sits underneath the launched activity. The launch
         // target screen is either explicit (layout-restore) or the screen under the cursor.
-        val targetIdx = request.screenIdx?.coerceIn(0, layout.screens.size - 1)
+        val hint = request.screenIdx
+        val targetIdx = hint?.coerceIn(0, layout.screens.size - 1)
             ?: screenIndexUnderCursor()
             ?: 0
         val targetUi = if (targetIdx == 0) desktop else extraScreens.getOrNull(targetIdx - 1)
+        Log.i(
+            "UxSpace/Launch",
+            "4) addWindow GL pkg=${request.packageName} hint=$hint pickedSlot=$targetIdx " +
+                "targetUi=${if (targetUi == null) "null" else "ready"}",
+        )
         if (targetUi == null) {
             Log.w(TAG, "addWindow: screen $targetIdx not ready yet — dropping launch of ${request.packageName}")
             return
@@ -844,6 +854,10 @@ class WorkspaceRenderer(
         currentScreenApps[targetIdx] = request.copy(screenIdx = targetIdx)
         mainHandler.post {
             val screenDisplayId = targetUi.displayId
+            Log.i(
+                "UxSpace/Launch",
+                "5) addWindow main pkg=${request.packageName} slot=$targetIdx displayId=$screenDisplayId",
+            )
             if (screenDisplayId == null) {
                 // Slot display still spinning up (it's posted async to the main thread
                 // from syncScreens). Re-queue with a short delay; addWindow drains
@@ -856,6 +870,11 @@ class WorkspaceRenderer(
                 return@post
             }
             WorkspaceController.registerUxSpaceDisplay(screenDisplayId)
+            Log.i(
+                "UxSpace/Launch",
+                "6) registerUxSpaceDisplay display=$screenDisplayId, " +
+                    "invoking appLauncher",
+            )
             launch(screenDisplayId, request.packageName, request.activityName)
             // Per-screen taskbar filter — fire onAppLaunched now that we know the screen,
             // so only the target screen's DesktopPresentation adds this app to its bar.
@@ -863,8 +882,9 @@ class WorkspaceRenderer(
                 request.packageName, request.label, targetIdx,
             )
             Log.i(
-                TAG,
-                "addWindow: launched ${request.packageName} on screen $targetIdx display=$screenDisplayId",
+                "UxSpace/Launch",
+                "10) notifyAppLaunchedOnScreen pkg=${request.packageName} slot=$targetIdx — " +
+                    "taskbar add fires on the per-slot listener",
             )
         }
     }
@@ -1008,21 +1028,53 @@ class WorkspaceRenderer(
                 return
             }
         }
-        // Per-screen routing: find which screen the cursor is over, compute screen-local
-        // pixel coords, inject the tap via the privileged helper. Same path reaches the
-        // per-screen Presentation (wallpaper, taskbar, drawer view when visible) and any
-        // activity stacked on top — the display's input dispatcher routes to the topmost
-        // window. No drawer special-case needed: the drawer is just a child view of the
-        // host screen's Presentation now.
         val screenIdx = screenIndexUnderCursor() ?: return
         val screen = layout.screens[screenIdx]
         val displayId = screenDisplayId(screenIdx) ?: return
         val px = cursorToRectPx(screen) ?: return
-        WorkspaceController.appTap?.invoke(displayId, px[0].toInt(), px[1].toInt())
-        Log.d(
-            TAG,
-            "handleClick screen=$screenIdx display=$displayId px=(${px[0].toInt()},${px[1].toInt()})",
-        )
+        routeClickOnSlot(screenIdx, screen, displayId, px)
+    }
+
+    /**
+     * Decide whether a click on a slot should go into the slot's [DesktopPresentation]'s
+     * own view tree (taskbar, drawer/settings modal, scrim) or into the activity
+     * stacked behind the Presentation on the same trusted display. The Presentation
+     * holds FLAG_NOT_TOUCHABLE so the system input dispatcher never delivers display-
+     * injected events to it — that lets `appTap`'s injected MotionEvent reach the
+     * activity directly. UxSpace's own UI doesn't go through the system dispatcher
+     * either: we call [UiScreen.dispatchTap] which fires the click into the view tree
+     * from inside our process, bypassing the not-touchable flag.
+     */
+    private fun routeClickOnSlot(
+        screenIdx: Int,
+        screen: Screen,
+        displayId: Int,
+        px: FloatArray,
+    ) {
+        val ui = if (screenIdx == 0) desktop else extraScreens.getOrNull(screenIdx - 1)
+        val anyModalOpen = (
+            WorkspaceController.isDrawerOpen &&
+                WorkspaceController.drawerOnScreen == screenIdx
+            ) || (
+            WorkspaceController.isSettingsOpen &&
+                WorkspaceController.settingsOnScreen == screenIdx
+            )
+        val inTaskbar = px[1] > screen.contentHeightPx - TASKBAR_HEIGHT_PX
+        if ((anyModalOpen || inTaskbar) && ui != null) {
+            mainHandler.post { ui.dispatchTap(px[0], px[1]) }
+            Log.d(
+                TAG,
+                "handleClick → Presentation slot=$screenIdx px=(${px[0].toInt()},${px[1].toInt()}) " +
+                    "modal=$anyModalOpen taskbar=$inTaskbar",
+            )
+        } else {
+            WorkspaceController.appTap?.invoke(displayId, px[0].toInt(), px[1].toInt())
+            Log.d(
+                TAG,
+                "handleClick → activity screen=$screenIdx display=$displayId " +
+                    "px=(${px[0].toInt()},${px[1].toInt()})",
+            )
+        }
     }
 
     /**
@@ -1036,7 +1088,22 @@ class WorkspaceRenderer(
         val screen = layout.screens[screenIdx]
         val displayId = screenDisplayId(screenIdx) ?: return
         val px = cursorToRectPx(screen) ?: return
-        WorkspaceController.appScroll?.invoke(displayId, px[0].toInt(), px[1].toInt(), vScroll)
+        val ui = if (screenIdx == 0) desktop else extraScreens.getOrNull(screenIdx - 1)
+        val anyModalOpen = (
+            WorkspaceController.isDrawerOpen &&
+                WorkspaceController.drawerOnScreen == screenIdx
+            ) || (
+            WorkspaceController.isSettingsOpen &&
+                WorkspaceController.settingsOnScreen == screenIdx
+            )
+        val inTaskbar = px[1] > screen.contentHeightPx - TASKBAR_HEIGHT_PX
+        if ((anyModalOpen || inTaskbar) && ui != null) {
+            mainHandler.post { ui.dispatchScroll(px[0], px[1], vScroll) }
+        } else {
+            WorkspaceController.appScroll?.invoke(
+                displayId, px[0].toInt(), px[1].toInt(), vScroll,
+            )
+        }
     }
 
     /**
@@ -1564,6 +1631,9 @@ class WorkspaceRenderer(
         /** Initial workspace zoom for both PINNED and FREE modes — 120% on startup. */
         const val DEFAULT_WORKSPACE_ZOOM = 1.2f
 
+        /** Locked (PINNED) mode starts at 1.0× — neutral baseline for the focus view. */
+        const val DEFAULT_PINNED_ZOOM = 1.0f
+
         // In-view toolbar HUD — NDC layout. Peek = a small bright line at bottom centre;
         // when the cursor is over it (or the expanded toolbar), the toolbar expands.
         const val PEEK_Y = -0.97f
@@ -1624,6 +1694,18 @@ class WorkspaceRenderer(
 
         /** Scroll units (AXIS_VSCROLL) per full touchpad-height of two-finger drag. */
         const val SCROLL_SENSITIVITY = 12f
+
+        /**
+         * Vertical pixel band along the bottom of a slot reserved for the
+         * DesktopPresentation's taskbar. Clicks landing in this band route to the
+         * Presentation's view tree (taskbar buttons fire); everything above the band
+         * routes to the activity stacked on the slot's trusted display.
+         *
+         * The taskbar in DesktopPresentation is `dp(58)` tall, rendered at the slot
+         * Presentation's density (DENSITY_DPI = 200): 58 × 200 / 160 ≈ 73 px. A few
+         * extra px so a click on the top edge of the bar still hits a button.
+         */
+        const val TASKBAR_HEIGHT_PX = 80
 
         const val ARROW_STRIDE_BYTES = 2 * 4
 

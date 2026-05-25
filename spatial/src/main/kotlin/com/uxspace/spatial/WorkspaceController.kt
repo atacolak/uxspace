@@ -256,7 +256,12 @@ object WorkspaceController {
      * @return `true` if a workspace was running, `false` if the glasses are not connected.
      */
     fun launchApp(packageName: String, activityName: String, label: String): Boolean {
-        val current = renderer ?: return false
+        val current = renderer
+        android.util.Log.i(
+            "UxSpace/Launch",
+            "2) controller.launchApp pkg=$packageName running=${current != null}",
+        )
+        if (current == null) return false
         current.requestApp(packageName, activityName, label)
         synchronized(recentAppsList) {
             recentAppsList.remove(packageName)

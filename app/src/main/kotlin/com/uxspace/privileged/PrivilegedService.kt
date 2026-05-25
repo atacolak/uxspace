@@ -281,6 +281,10 @@ object PrivilegedService {
     // region Privileged-call surface (mirrors ShizukuManager so UxSpaceApp swaps cleanly)
 
     fun launchApp(displayId: Int, packageName: String, activityName: String) {
+        Log.i(
+            "UxSpace/Launch",
+            "7) PrivilegedService.launchApp pkg=$packageName display=$displayId state=$state",
+        )
         val helper = service
         if (helper == null) {
             Log.w(TAG, "launchApp ignored — not READY (state=$state)")
@@ -288,8 +292,15 @@ object PrivilegedService {
         }
         worker.execute {
             runCatching {
+                Log.i(
+                    "UxSpace/Launch",
+                    "8) helper.launchOnDisplay AIDL pkg=$packageName display=$displayId",
+                )
                 val ok = helper.launchOnDisplay(displayId, packageName, activityName)
-                Log.i(TAG, "launch $packageName/$activityName display=$displayId ok=$ok")
+                Log.i(
+                    "UxSpace/Launch",
+                    "9) helper returned ok=$ok pkg=$packageName display=$displayId",
+                )
             }.onFailure { Log.e(TAG, "launchApp failed", it) }
         }
     }

@@ -89,7 +89,19 @@ class UiScreen(
      * Create the backing display via the *privileged* path (TRUSTED flag) so apps can
      * also be launched onto it — slot desktops use this so the same display hosts both
      * the per-slot UxSpace home Presentation and any apps the user launches there.
-     * Falls back to the standard untrusted [start] path if no privileged creator wired.
+     *
+     * If a privileged creator is wired but the helper isn't READY yet (typical on a
+     * cold start — the helper bootstrap over wireless-debugging ADB takes a second or
+     * two), the call retries with backoff up to [MAX_TRUSTED_ATTEMPTS] times. We do
+     * **not** silently fall back to an untrusted display: a launched activity on a
+     * non-TRUSTED secondary display owned by the calling process renders, but its
+     * composited frames are redacted by SurfaceFlinger before reaching the owner's
+     * SurfaceTexture (a security feature to prevent screen-snooping). That redaction
+     * is exactly the "icon in taskbar but no window" symptom — Android logs `Displayed
+     * pkg/Activity` and `visible=true`, yet our GL sample only ever sees wallpaper.
+     * Falls back to the untrusted [start] path only when no privileged creator is
+     * registered at all (e.g. a dev build without the helper plumbing).
+     *
      * Call on the main thread.
      */
     fun startTrusted(context: Context, presentationFor: (Context, Display) -> Presentation) {
@@ -100,10 +112,35 @@ class UiScreen(
             start(context, presentationFor)
             return
         }
+        attemptTrustedStart(context, presentationFor, attempt = 1)
+    }
+
+    private fun attemptTrustedStart(
+        context: Context,
+        presentationFor: (Context, Display) -> Presentation,
+        attempt: Int,
+    ) {
+        if (released) return
+        val createTrusted = WorkspaceController.createVirtualDisplay ?: return
         val displayId = createTrusted(displayName, width, height, DENSITY_DPI, surface)
         if (displayId == null) {
-            Log.e(TAG, "trusted display creation failed — falling back to untrusted")
-            start(context, presentationFor)
+            if (attempt >= MAX_TRUSTED_ATTEMPTS) {
+                Log.e(
+                    TAG,
+                    "trusted display creation failed after $MAX_TRUSTED_ATTEMPTS attempts " +
+                        "— helper never reached READY; slot $displayName stays blank",
+                )
+                return
+            }
+            Log.i(
+                TAG,
+                "trusted display creation deferred (helper not READY); " +
+                    "retry $attempt/${MAX_TRUSTED_ATTEMPTS} in ${TRUSTED_RETRY_MS}ms",
+            )
+            mainHandler.postDelayed(
+                { attemptTrustedStart(context, presentationFor, attempt + 1) },
+                TRUSTED_RETRY_MS,
+            )
             return
         }
         val dm = context.getSystemService(DisplayManager::class.java)
@@ -123,7 +160,7 @@ class UiScreen(
             trustedDisplayId = null
             null
         }
-        Log.i(TAG, "ui screen ready (trusted) ${width}x$height display=$displayId")
+        Log.i(TAG, "ui screen ready (trusted) ${width}x$height display=$displayId (attempt=$attempt)")
     }
 
     /** Non-null when this UiScreen owns a trusted display created via the privileged path. */
@@ -207,5 +244,13 @@ class UiScreen(
         const val FLAGS =
             DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+
+        /**
+         * Retry budget for trusted-display creation. The privileged helper takes a few
+         * hundred ms to bind over wireless-debugging ADB on cold start; 250 ms × 40 ≈
+         * 10 s is far more than typical.
+         */
+        const val TRUSTED_RETRY_MS = 250L
+        const val MAX_TRUSTED_ATTEMPTS = 40
     }
 }

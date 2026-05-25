@@ -139,14 +139,103 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         displayId: Int,
         packageName: String,
         activityName: String,
-    ): Boolean = run(
-        "am", "start",
-        "--display", displayId.toString(),
-        "-n", "$packageName/$activityName",
-        "-a", "android.intent.action.MAIN",
-        "-c", "android.intent.category.LAUNCHER",
-        "-f", FLAG_NEW_TASK_MULTIPLE,
-    )
+    ): Boolean {
+        Log.i(
+            "UxSpace/Launch",
+            "11) helper.launchOnDisplay pkg=$packageName/$activityName display=$displayId",
+        )
+        val ok = runVerbose(
+            "am", "start",
+            "--display", displayId.toString(),
+            // 5 = WINDOWING_MODE_FREEFORM — launches the activity into a freeform,
+            // movable window rather than fullscreen. Falls through gracefully to
+            // fullscreen if the device doesn't expose FEATURE_FREEFORM_WINDOW_MANAGEMENT.
+            "--windowingMode", "5",
+            "-n", "$packageName/$activityName",
+            "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER",
+            // NEW_TASK | MULTIPLE_TASK as raw flags. EXCLUDE_FROM_RECENTS is split out
+            // into am's high-level `--activity-exclude-from-recents` argument because
+            // bundling 0x00800000 into the raw -f blob broke launches on a secondary
+            // trusted display — the activity record was created on the right display
+            // but never produced a visible frame, leaving the taskbar with an icon
+            // but the workspace showing only wallpaper.
+            "-f", FLAG_NEW_TASK_MULTIPLE,
+            "--activity-exclude-from-recents",
+        )
+        Log.i("UxSpace/Launch", "12) am-start returned ok=$ok display=$displayId")
+        // ~600 ms after the launch, dump the activity stack for this display so we can
+        // see whether the activity actually landed where we asked it to. The dumpsys
+        // call is cheap; this only fires once per launch.
+        scheduleDisplayDump(displayId, packageName)
+        return ok
+    }
+
+    /**
+     * Fire a one-shot delayed dump of `dumpsys activity activities` filtered to a
+     * specific display id, so we can see post-launch what's actually on that display.
+     * Helps diagnose the "icon shown in taskbar but no window" symptom — if the
+     * dump shows the activity on a different display (or not at all), we know the
+     * launch routing went wrong.
+     */
+    private fun scheduleDisplayDump(displayId: Int, packageName: String) {
+        Thread {
+            try {
+                Thread.sleep(600)
+                val dump = runCapture("dumpsys", "activity", "activities") ?: return@Thread
+                val lines = dump.lineSequence().toList()
+                var inDisplay = false
+                var matched = 0
+                val out = StringBuilder()
+                for (raw in lines) {
+                    val line = raw.trim()
+                    if (line.startsWith("Display #")) {
+                        val num = line.removePrefix("Display #").takeWhile(Char::isDigit).toIntOrNull()
+                        inDisplay = num == displayId
+                        if (inDisplay) out.appendLine(line)
+                    } else if (inDisplay && (
+                            line.contains("ActivityRecord{") ||
+                                line.contains("Stack ") ||
+                                line.contains("RootTask ") ||
+                                line.startsWith("* Task")
+                            )
+                    ) {
+                        out.appendLine("    $line")
+                        matched++
+                    }
+                }
+                Log.i(
+                    "UxSpace/Launch",
+                    "13) dumpsys display=$displayId activities=$matched for pkg=$packageName\n" +
+                        if (out.isEmpty()) "    (no display section found)" else out.toString().trimEnd(),
+                )
+            } catch (_: InterruptedException) {
+                // Helper shutting down — fine.
+            }
+        }.start()
+    }
+
+    /**
+     * Like [run] but always logs stdout and stderr separately on completion — used for
+     * the launch path so we can see exactly what `am start` printed. The other shell-out
+     * call-sites (input tap, swipe, key, force-stop) stay on [run] which logs only when
+     * something printed or the exit code was non-zero, to keep input logs quiet.
+     */
+    private fun runVerbose(vararg command: String): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(command)
+            val stdout = process.inputStream.bufferedReader().readText().trim()
+            val stderr = process.errorStream.bufferedReader().readText().trim()
+            val exit = process.waitFor()
+            Log.i(TAG, "[$exit] ${command.joinToString(" ")}")
+            if (stdout.isNotEmpty()) Log.i(TAG, "  stdout: $stdout")
+            if (stderr.isNotEmpty()) Log.i(TAG, "  stderr: $stderr")
+            exit == 0
+        } catch (e: Exception) {
+            Log.e(TAG, "command failed: ${command.joinToString(" ")}", e)
+            false
+        }
+    }
 
     override fun tap(displayId: Int, x: Int, y: Int) {
         run("input", "-d", displayId.toString(), "tap", x.toString(), y.toString())
@@ -458,12 +547,11 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
     companion object {
         private const val TAG = "UxSpace/Privileged"
 
-        // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK |
-        // FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS — last bit keeps the task off the phone's
-        // Overview screen, so an app launched into UxSpace never appears on the phone's
-        // own Recents list. (Apps that set excludeFromRecents="false" in their manifest
-        // can override this — accepted edge case.)
-        private const val FLAG_NEW_TASK_MULTIPLE = "0x18800000"
+        // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK. The third bit we want
+        // (FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS, 0x00800000) is no longer ORed in here —
+        // we pass it via am's `--activity-exclude-from-recents` argument instead so it
+        // doesn't ride in the same raw -f blob. See launchOnDisplay() for the reason.
+        private const val FLAG_NEW_TASK_MULTIPLE = "0x18000000"
 
         /** Frame spacing for the pinch interpolation in [pinchOnDisplay]. */
         private const val PINCH_STEP_MS = 16
@@ -476,6 +564,11 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
          * on it; `OWN_CONTENT_ONLY` so it never mirrors the phone; `PRESENTATION` marks it as
          * secondary content; `TRUSTED` (1 << 10 — a hidden constant) so an app launched onto
          * it may follow its own activity launches there rather than escaping to the phone.
+         *
+         * `OWN_DISPLAY_GROUP` (1<<11) + `ALWAYS_UNLOCKED` (1<<12) were tried as a way to keep
+         * the Samsung-injected KEYGUARD_DIALOG window off this display — but together they
+         * leave the display in `state OFF` (DisplayPowerManager in the new group never
+         * receives a power-on), which kills rendering entirely. Don't combine them again.
          */
         private const val VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 shl 10
         private const val TRUSTED_DISPLAY_FLAGS =

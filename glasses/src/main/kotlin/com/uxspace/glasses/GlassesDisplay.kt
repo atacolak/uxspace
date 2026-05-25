@@ -16,7 +16,18 @@ import android.view.Display
 object GlassesDisplay {
 
     private const val TAG = "UxSpace/Display"
-    private const val UXSPACE_SCREEN_PREFIX = "uxspace-screen"
+
+    /**
+     * Display-name prefix the per-slot trusted VirtualDisplays use ("uxspace-desktop"
+     * for slot 0, "uxspace-desktop-screen<i>" for the rest — see syncScreens in
+     * WorkspaceRenderer). Excluded from the glasses-display search so we never pick
+     * our own off-screen buffer as the glasses target. The previous value was
+     * "uxspace-screen", from an older naming convention; once the slot displays were
+     * renamed to "uxspace-desktop*" the filter stopped matching and find() would fall
+     * back to one of our own trusted displays whenever the real glasses dropped off
+     * the bus, which then triggered a chain of relayout / app-kill.
+     */
+    private const val UXSPACE_SCREEN_PREFIX = "uxspace-desktop"
 
     /** The glasses' display, or `null` when they are not connected. */
     fun find(context: Context): Display? {

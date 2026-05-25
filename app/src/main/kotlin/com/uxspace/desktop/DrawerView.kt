@@ -169,6 +169,10 @@ class DrawerView(context: Context) : LinearLayout(context) {
     }
 
     private fun launch(app: InstalledApp) {
+        android.util.Log.i(
+            "UxSpace/Launch",
+            "1) drawer tap pkg=${app.packageName} act=${app.activityName} label='${app.label}'",
+        )
         WorkspaceController.launchApp(app.packageName, app.activityName, app.label)
         WorkspaceController.setDrawerOpen(false)
     }

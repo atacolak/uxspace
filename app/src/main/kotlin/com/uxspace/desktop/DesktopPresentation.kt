@@ -59,6 +59,15 @@ class DesktopPresentation(
     private lateinit var batteryText: TextView
     private lateinit var volumeText: TextView
 
+    /**
+     * Wallpaper layer — kept as a field so we can hide it while any app is running on
+     * this slot. With the translucent Presentation theme, hiding the wallpaper view
+     * lets the launched activity (which renders *behind* the Presentation's window in
+     * SurfaceFlinger z-order — TYPE_PRIVATE_PRESENTATION sits above TYPE_BASE_APPLICATION)
+     * show through. The taskbar stays opaque on top.
+     */
+    private lateinit var wallpaper: View
+
     /** Taskbar icons for the open app windows, keyed by package, in launch order. */
     private val runningIcons = LinkedHashMap<String, View>()
 
@@ -82,11 +91,19 @@ class DesktopPresentation(
     private val appLaunchedListener: (String, String, Int) -> Unit =
         { packageName, label, launchSlot ->
             if (launchSlot == slotIdx) {
+                android.util.Log.i(
+                    "UxSpace/Launch",
+                    "14) DesktopPresentation slot=$slotIdx adding taskbar icon for $packageName",
+                )
                 mainHandler.post { addRunningApp(packageName, label) }
             }
         }
 
     private val appClosedListener: (String) -> Unit = { packageName ->
+        android.util.Log.i(
+            "UxSpace/Launch",
+            "X) DesktopPresentation slot=$slotIdx removing taskbar icon for $packageName",
+        )
         mainHandler.post { removeRunningApp(packageName) }
     }
 
@@ -139,8 +156,31 @@ class DesktopPresentation(
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Reshape the Presentation's window so it doesn't eat input or paint over the
+        // launched app:
+        //   - Set the window background drawable to transparent (theme has an opaque
+        //     DeviceDefault background which would render a solid panel over the
+        //     activity stacked beneath us on the same trusted display).
+        //   - FLAG_NOT_TOUCHABLE so the system input dispatcher skips this window
+        //     when it picks a target on the display. UxSpace's WorkspaceRenderer
+        //     calls dispatchTap() directly on this Presentation's view tree for
+        //     taskbar / drawer / settings hits, which doesn't go through the system
+        //     dispatcher and therefore isn't blocked by the flag.
+        //   - FLAG_DISMISS_KEYGUARD because Samsung One UI parks a transient
+        //     KEYGUARD_DIALOG window (type 2009) on every Presentation-capable
+        //     secondary display; that window also doesn't carry NOT_TOUCHABLE, so
+        //     touches injected at the display are eaten before they ever reach our
+        //     activity. The dismiss flag chases it off our display.
+        window?.let { w ->
+            w.setBackgroundDrawableResource(android.R.color.transparent)
+            w.addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
+            )
+        }
         val root = FrameLayout(context)
-        root.addView(buildWallpaper())
+        wallpaper = buildWallpaper()
+        root.addView(wallpaper)
         // Scrim sits between wallpaper and taskbar/drawer so a click on bare
         // wallpaper closes the drawer, but taskbar buttons + the drawer itself
         // still receive their own clicks (they're above the scrim in z-order).
@@ -480,6 +520,7 @@ class DesktopPresentation(
             icon,
             LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(12) },
         )
+        refreshWallpaperVisibility()
     }
 
     private fun appIcon(packageName: String): Drawable? = runCatching {
@@ -490,6 +531,19 @@ class DesktopPresentation(
     private fun removeRunningApp(packageName: String) {
         if (!::runningApps.isInitialized) return
         runningIcons.remove(packageName)?.let { runningApps.removeView(it) }
+        refreshWallpaperVisibility()
+    }
+
+    /**
+     * Wallpaper visible only when no app is running on this slot. With the translucent
+     * Presentation theme, the wallpaper is the one piece of the desktop's UI that
+     * would still occlude a launched activity (the activity renders behind the
+     * Presentation window in SurfaceFlinger z-order); hiding it lets the activity
+     * appear in the slot. Taskbar stays opaque on top so the user still has it.
+     */
+    private fun refreshWallpaperVisibility() {
+        if (!::wallpaper.isInitialized) return
+        wallpaper.visibility = if (runningIcons.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun clockText(): String =
