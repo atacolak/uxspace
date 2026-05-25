@@ -272,6 +272,17 @@ object WorkspaceController {
     }
 
     /**
+     * Force-stop every app UxSpace has launched into the workspace. Called by the
+     * workspace foreground service on tear-down so a launched app never outlives its
+     * glasses session (otherwise releasing the trusted display would re-home the
+     * activity onto the phone's own screen). No-op if no renderer is registered —
+     * the renderer's own dismiss path already ran the same cleanup.
+     */
+    fun closeAllLaunchedApps() {
+        renderer?.closeAllWindows()
+    }
+
+    /**
      * Open or close the app-drawer. `screenIdx` is the index of the screen whose
      * drawer button triggered this — the drawer is a view embedded in *that* screen's
      * [com.uxspace.desktop.DesktopPresentation], not a separate 3D quad. Closing
@@ -281,6 +292,10 @@ object WorkspaceController {
     fun setDrawerOpen(open: Boolean, screenIdx: Int = 0) {
         drawerOpenState = open
         drawerOnScreen = if (open) screenIdx else -1
+        if (open && settingsOpenState) {
+            // Mutually exclusive — opening the drawer closes the settings panel.
+            setSettingsOpen(false, screenIdx)
+        }
         drawerStateListeners.forEach { runCatching { it(open, screenIdx) } }
     }
 
@@ -303,6 +318,52 @@ object WorkspaceController {
 
     fun removeDrawerStateListener(listener: (open: Boolean, screenIdx: Int) -> Unit) {
         drawerStateListeners.remove(listener)
+    }
+
+    @Volatile
+    private var settingsOpenState = false
+
+    /** Whether the settings panel is currently open on some screen. */
+    val isSettingsOpen: Boolean get() = settingsOpenState
+
+    /** Index of the screen that owns the currently-open settings panel, or −1 when closed. */
+    @Volatile
+    var settingsOnScreen: Int = -1
+        private set
+
+    /**
+     * Listeners notified (main thread) when the settings panel opens/closes. Each
+     * per-screen [com.uxspace.desktop.DesktopPresentation] registers one and toggles its
+     * own embedded SettingsView's visibility iff `screenIdx == own slotIdx`. Mirrors the
+     * drawer's plumbing — different modal panel, same per-screen visibility model.
+     */
+    private val settingsStateListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(open: Boolean, screenIdx: Int) -> Unit>()
+
+    fun addSettingsStateListener(listener: (open: Boolean, screenIdx: Int) -> Unit) {
+        settingsStateListeners.add(listener)
+    }
+
+    fun removeSettingsStateListener(listener: (open: Boolean, screenIdx: Int) -> Unit) {
+        settingsStateListeners.remove(listener)
+    }
+
+    /**
+     * Open or close the settings panel. `screenIdx` is the index of the screen whose
+     * Settings button (or in-view toolbar) triggered this — the panel opens on that
+     * screen, exactly like the drawer. Opening on one slot while another already holds
+     * an open settings panel implicitly moves it (each per-screen listener checks its
+     * own slotIdx). Closing also implicitly closes the drawer if one is open on the
+     * same screen, since only one modal panel can be visible at a time.
+     */
+    fun setSettingsOpen(open: Boolean, screenIdx: Int = 0) {
+        settingsOpenState = open
+        settingsOnScreen = if (open) screenIdx else -1
+        if (open && drawerOpenState) {
+            // Mutually exclusive — opening settings closes the drawer.
+            setDrawerOpen(false, screenIdx)
+        }
+        settingsStateListeners.forEach { runCatching { it(open, screenIdx) } }
     }
 
     /**
@@ -351,6 +412,16 @@ object WorkspaceController {
         screenBandState = fraction
         renderer?.setScreenBand(fraction)
     }
+
+    /** Current render band fraction — survives renderer teardown. */
+    fun currentScreenBand(): Float = screenBandState
+
+    /**
+     * Current workspace zoom in the active view mode. Returns 1.0 when no renderer is
+     * registered (used by the settings panel to render a sensible default before the
+     * glasses are connected).
+     */
+    fun currentZoom(): Float = renderer?.workspaceZoom() ?: 1.0f
 
     /** Recenter every window's vertical position on the user's current head pitch. */
     fun alignVerticalToHead() {

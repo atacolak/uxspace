@@ -93,13 +93,15 @@ class DesktopPresentation(
     /** Drawer view embedded as a child of the root; visibility driven by the controller. */
     private lateinit var drawer: DrawerView
 
+    /** Settings panel embedded alongside the drawer — same modal model. */
+    private lateinit var settings: SettingsView
+
     /**
      * Transparent click-catcher sized to the whole screen. Shown on *every* slot
-     * whenever a drawer is open anywhere, so a click on any monitor's wallpaper —
-     * including a different monitor from the one hosting the drawer — closes it.
-     * The taskbar is added above the scrim in z-order, so taskbar buttons still
-     * receive their clicks; the drawer itself sits above the scrim too, so taps
-     * inside the drawer don't dismiss it.
+     * whenever any modal panel (drawer or settings) is open anywhere, so a click on any
+     * monitor's wallpaper — including a different monitor from the one hosting the
+     * panel — closes it. Taskbar + drawer + settings sit above the scrim in z-order so
+     * their own clicks still register.
      */
     private lateinit var scrim: View
 
@@ -109,15 +111,30 @@ class DesktopPresentation(
             if (::drawer.isInitialized) {
                 drawer.visibility = if (showDrawerHere) View.VISIBLE else View.GONE
             }
-            if (::scrim.isInitialized) {
-                scrim.visibility = if (open) View.VISIBLE else View.GONE
-            }
+            refreshScrim()
             android.util.Log.i(
                 "UxSpace/Drawer",
                 "screen=$slotIdx listener fired open=$open targetScreen=$screenIdx " +
                     "showDrawerHere=$showDrawerHere",
             )
         }
+    }
+
+    private val settingsStateListener: (Boolean, Int) -> Unit = { open, screenIdx ->
+        mainHandler.post {
+            val showHere = open && screenIdx == slotIdx
+            if (::settings.isInitialized) {
+                settings.visibility = if (showHere) View.VISIBLE else View.GONE
+            }
+            refreshScrim()
+        }
+    }
+
+    /** Scrim visible whenever any modal panel is open anywhere. */
+    private fun refreshScrim() {
+        if (!::scrim.isInitialized) return
+        val anyOpen = WorkspaceController.isDrawerOpen || WorkspaceController.isSettingsOpen
+        scrim.visibility = if (anyOpen) View.VISIBLE else View.GONE
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -129,7 +146,16 @@ class DesktopPresentation(
         // still receive their own clicks (they're above the scrim in z-order).
         scrim = View(context).apply {
             visibility = View.GONE
-            setOnClickListener { WorkspaceController.setDrawerOpen(false, slotIdx) }
+            setOnClickListener {
+                // Close whichever modal is open. Mutually exclusive so usually one of
+                // these is a no-op; the order doesn't matter.
+                if (WorkspaceController.isDrawerOpen) {
+                    WorkspaceController.setDrawerOpen(false, slotIdx)
+                }
+                if (WorkspaceController.isSettingsOpen) {
+                    WorkspaceController.setSettingsOpen(false, slotIdx)
+                }
+            }
         }
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
         if (showTaskbar) root.addView(buildTaskbar())
@@ -164,17 +190,26 @@ class DesktopPresentation(
             layoutParams = FrameLayout.LayoutParams(dw, dh, Gravity.CENTER)
         }
         root.addView(drawer)
+        // Settings panel shares the drawer's size + centring rule — it's a sibling
+        // modal that opens via the taskbar's Settings button (or workspace toolbar).
+        settings = SettingsView(context).apply {
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(dw, dh, Gravity.CENTER)
+        }
+        root.addView(settings)
         setContentView(root)
         // Per-screen taskbar — only react to launches on this screen.
         WorkspaceController.addAppLaunchedListener(appLaunchedListener)
         WorkspaceController.addAppClosedListener(appClosedListener)
         WorkspaceController.addDrawerStateListener(drawerStateListener)
+        WorkspaceController.addSettingsStateListener(settingsStateListener)
     }
 
     override fun onDetachedFromWindow() {
         WorkspaceController.removeAppLaunchedListener(appLaunchedListener)
         WorkspaceController.removeAppClosedListener(appClosedListener)
         WorkspaceController.removeDrawerStateListener(drawerStateListener)
+        WorkspaceController.removeSettingsStateListener(settingsStateListener)
         super.onDetachedFromWindow()
     }
 
@@ -331,6 +366,15 @@ class DesktopPresentation(
             gravity = Gravity.CENTER_VERTICAL
             addView(statusItem(R.drawable.ic_volume, volumeText, "Volume"))
             addView(statusItem(R.drawable.ic_battery, batteryText, "Battery"))
+            addView(
+                taskbarButton(R.drawable.ic_settings, "Settings") {
+                    // Same one-click move semantics as the App drawer: clicking on a
+                    // different slot's Settings button moves the panel here in one tap.
+                    val openHere = WorkspaceController.isSettingsOpen &&
+                        WorkspaceController.settingsOnScreen == slotIdx
+                    WorkspaceController.setSettingsOpen(!openHere, slotIdx)
+                },
+            )
             addView(
                 clock,
                 LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) },
