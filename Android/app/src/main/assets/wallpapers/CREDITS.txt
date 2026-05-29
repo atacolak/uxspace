@@ -1,0 +1,21 @@
+Bundled workspace wallpapers — NASA imagery (public domain)
+===========================================================
+
+Source: NASA Scientific Visualization Studio — "Cosmic Wallpapers"
+        https://svs.gsfc.nasa.gov/14866
+
+NASA media are generally not copyrighted and may be used for any purpose
+(see NASA's media usage guidelines). Mission/instrument credit, where known:
+
+  nasa_whirlpool.jpg    Whirlpool Galaxy (M51)                NASA
+  nasa_rosette.jpg      Rosette Nebula                        NASA / WISE
+  nasa_arp142.jpg       Arp 142 (the Penguin & the Egg)       NASA, ESA, CSA (JWST)
+  nasa_m81_m82.jpg      Messier 81 & Messier 82               NASA
+  nasa_cepheus.jpg      Cepheus B & C                         NASA / JPL-Caltech (Spitzer)
+  nasa_w39.jpg          W39 star-forming region               NASA / JPL-Caltech (Spitzer, WISE)
+  nasa_ngc1929.jpg      NGC 1929                              NASA (Spitzer, Chandra, ESO)
+  nasa_cw_leonis.jpg    CW Leonis                             NASA (GALEX)
+  nasa_tess_southern.jpg TESS Southern Sky (Sector 12)        NASA
+
+Images were downscaled/re-encoded to JPEG for bundling; originals are at the
+URL above. NASA does not endorse this project.

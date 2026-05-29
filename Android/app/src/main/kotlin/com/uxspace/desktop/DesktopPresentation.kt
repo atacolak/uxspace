@@ -720,7 +720,13 @@ class DesktopPresentation(
     private fun applyWallpaperSpec(container: FrameLayout, spec: WallpaperSpec) {
         container.removeAllViews()
         container.background = null
+        // Fall back to the default bundled wallpaper if the chosen asset can't be
+        // loaded — e.g. a pref saved under an asset that was renamed/removed between
+        // builds — so the desktop shows a wallpaper rather than the bare void colour.
         val bitmap = loadWallpaperBitmap(spec.source)
+            ?: (spec.source as? WallpaperSource.Asset)
+                ?.takeIf { it.assetPath != (DesktopWallpaperStore.DEFAULT_SPEC.source as? WallpaperSource.Asset)?.assetPath }
+                ?.let { loadWallpaperBitmap(DesktopWallpaperStore.DEFAULT_SPEC.source) }
         if (bitmap == null) {
             container.setBackgroundColor(VOID_COLOR)
             return

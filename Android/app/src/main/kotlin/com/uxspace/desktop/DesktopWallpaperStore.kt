@@ -37,19 +37,33 @@ data class WallpaperSpec(
 object DesktopWallpaperStore {
 
     private const val PREFS_NAME = "uxspace_desktop_wallpapers"
-    private const val DEFAULT_ASSET = "workspace_background.jpg"
+    private const val DEFAULT_ASSET = "wallpapers/nasa_whirlpool.jpg"
 
     /**
-     * Default wallpaper used by every desktop until the user picks one. Matches
-     * the asset DesktopPresentation used to hardcode.
+     * Default wallpaper used by every desktop until the user picks one — the
+     * first entry of [BUNDLED_ASSETS].
      */
     val DEFAULT_SPEC: WallpaperSpec = WallpaperSpec(
         source = WallpaperSource.Asset(DEFAULT_ASSET),
         mode = PlacementMode.CENTER_CROP,
     )
 
-    /** Bundled wallpaper assets the user can pick in settings. Append to grow. */
-    val BUNDLED_ASSETS: List<String> = listOf(DEFAULT_ASSET)
+    /**
+     * Bundled wallpapers the user can pick in settings — NASA public-domain
+     * imagery (see assets/wallpapers/CREDITS.txt). The first is the default.
+     * Append to grow; the in-app picker renders one thumbnail per entry.
+     */
+    val BUNDLED_ASSETS: List<String> = listOf(
+        "wallpapers/nasa_whirlpool.jpg",
+        "wallpapers/nasa_rosette.jpg",
+        "wallpapers/nasa_arp142.jpg",
+        "wallpapers/nasa_m81_m82.jpg",
+        "wallpapers/nasa_cepheus.jpg",
+        "wallpapers/nasa_w39.jpg",
+        "wallpapers/nasa_ngc1929.jpg",
+        "wallpapers/nasa_cw_leonis.jpg",
+        "wallpapers/nasa_tess_southern.jpg",
+    )
 
     @Volatile
     private lateinit var prefs: SharedPreferences

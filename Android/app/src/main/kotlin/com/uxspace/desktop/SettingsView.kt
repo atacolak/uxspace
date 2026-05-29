@@ -405,8 +405,17 @@ class SettingsView(context: Context) : LinearLayout(context) {
         FrameLayout(context).apply {
             val iv = ImageView(context).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
+                // Decode downsampled — the thumbnail strip shows one bitmap per
+                // bundled wallpaper across three desktop rows, so loading each at
+                // full 1920x1080 would burn ~8 MB apiece and risk OOM. ~4x down is
+                // plenty for a small tile.
                 val bitmap = runCatching {
-                    context.assets.open(assetPath).use { BitmapFactory.decodeStream(it) }
+                    context.assets.open(assetPath).use {
+                        BitmapFactory.decodeStream(
+                            it, null,
+                            BitmapFactory.Options().apply { inSampleSize = 4 },
+                        )
+                    }
                 }.getOrNull()
                 if (bitmap != null) setImageBitmap(bitmap) else setBackgroundColor(0xFFD7D8DC.toInt())
             }
