@@ -29,8 +29,14 @@ class TrackpadView @JvmOverloads constructor(
     /** Called when a one-finger touch ends without having become a drag. */
     var onTap: (() -> Unit)? = null
 
-    /** Called on a two-finger drag with the vertical movement, as a fraction of pad height. */
-    var onScroll: ((dyFraction: Float) -> Unit)? = null
+    /**
+     * Called on a two-finger drag with the centroid movement since the last event —
+     * horizontal as a fraction of pad width, vertical as a fraction of pad height. The
+     * controller routes this to either an in-window scroll (most cases) or a workspace
+     * pan (PINNED + zoomed). The auto-flick tick also calls this with dx=0 so the same
+     * routing applies to continued momentum.
+     */
+    var onTwoFingerDrag: ((dxFraction: Float, dyFraction: Float) -> Unit)? = null
 
     /**
      * Called on a two-finger pinch with the ratio of current to previous finger spread —
@@ -46,6 +52,14 @@ class TrackpadView @JvmOverloads constructor(
 
     /** Called when an in-flight drag is interrupted by a second finger landing. */
     var onDragCancel: (() -> Unit)? = null
+
+    /**
+     * Called when a one-finger touch stays down without moving past the tap slop for
+     * `WorkspaceController.longPressMs` — distinct from the tap-and-drag gesture (which needs a prior
+     * tap). Used by callers (e.g. the drawer) that want a "press-and-hold to pick up"
+     * affordance without giving up the normal tap-launches semantics.
+     */
+    var onLongPress: (() -> Unit)? = null
 
     private var lastX = 0f
     private var lastY = 0f
@@ -71,6 +85,7 @@ class TrackpadView @JvmOverloads constructor(
 
     /** Latched true once a second finger lands; cleared when all fingers lift. */
     private var scrolling = false
+    private var lastScrollX = 0f
     private var lastScrollY = 0f
     private var lastSpread = 0f
 
@@ -101,7 +116,7 @@ class TrackpadView @JvmOverloads constructor(
     private val autoScrollTick = object : Runnable {
         override fun run() {
             if (!autoScrollActive) return
-            onScroll?.invoke(autoScrollFractionPerMs * AUTO_SCROLL_TICK_MS)
+            onTwoFingerDrag?.invoke(0f, autoScrollFractionPerMs * AUTO_SCROLL_TICK_MS)
             postDelayed(this, AUTO_SCROLL_TICK_MS.toLong())
         }
     }
@@ -120,7 +135,8 @@ class TrackpadView @JvmOverloads constructor(
             return
         }
         val fractionPerMs = (dy / dt) / height
-        autoScrollFractionPerMs = fractionPerMs.coerceIn(-MAX_AUTO_SCROLL_PER_MS, MAX_AUTO_SCROLL_PER_MS)
+        val cap = com.uxspace.spatial.WorkspaceController.flickSensitivity
+        autoScrollFractionPerMs = fractionPerMs.coerceIn(-cap, cap)
         autoScrollActive = true
         Log.d(TAG, "maybeStartAutoScroll start dt=${dt}ms dy=${dy.toInt()} fractionPerMs=${"%.6f".format(autoScrollFractionPerMs)}")
         post(autoScrollTick)
@@ -128,6 +144,7 @@ class TrackpadView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         cancelAutoScroll()
+        removeCallbacks(longPressTimeout)
         super.onDetachedFromWindow()
     }
 
@@ -148,6 +165,26 @@ class TrackpadView @JvmOverloads constructor(
     /** Posted on the lift of a confirmed first tap; reverts to idle if the user
      *  doesn't land a second touch within [DRAG_LOCK_MS]. */
     private val dragLockTimeout = Runnable { tapPending = false }
+
+    /**
+     * Long-press detection. Posted on every fresh ACTION_DOWN; cancelled if the
+     * touch becomes a drag, tap, scroll, or pinch first. When it fires the
+     * caller's onLongPress runs and [longPressFired] suppresses the upcoming
+     * ACTION_UP's tap so a long-press doesn't also act as a click.
+     */
+    private var longPressFired = false
+    private val longPressTimeout = Runnable {
+        Log.i(
+            TAG,
+            "longPressTimeout fires: scrolling=$scrolling dragging=$dragging movedFar=$movedFar tapPending=$tapPending listenerSet=${onLongPress != null}",
+        )
+        if (!scrolling && !dragging && !movedFar) {
+            longPressFired = true
+            onLongPress?.invoke() ?: Log.w(TAG, "longPress conditions met but no onLongPress listener wired")
+        } else {
+            Log.i(TAG, "longPress suppressed (conditions failed)")
+        }
+    }
 
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FF9AA0AC")
@@ -171,6 +208,11 @@ class TrackpadView @JvmOverloads constructor(
                 warmupDy = 0f
                 cursorEmittedDx = 0f
                 cursorEmittedDy = 0f
+                longPressFired = false
+                removeCallbacks(longPressTimeout)
+                val longPressDelay = com.uxspace.spatial.WorkspaceController.longPressMs
+                postDelayed(longPressTimeout, longPressDelay)
+                Log.i(TAG, "DOWN scheduled longPressTimeout in ${longPressDelay}ms")
                 // Any touch stops an active auto-scroll, matching how every
                 // touchscreen behaves — finger on the surface means "stop".
                 cancelAutoScroll()
@@ -195,6 +237,7 @@ class TrackpadView @JvmOverloads constructor(
                 // not start a new one).
                 scrolling = true
                 movedFar = true
+                removeCallbacks(longPressTimeout)
                 // A pending tap or in-flight drag is cancelled by the second finger.
                 removeCallbacks(dragLockTimeout)
                 tapPending = false
@@ -222,6 +265,7 @@ class TrackpadView @JvmOverloads constructor(
                 twoFingerDownY = averageY(event)
                 twoFingerLastY = twoFingerDownY
                 twoFingerLastTime = twoFingerDownTime
+                lastScrollX = averageX(event)
                 lastScrollY = twoFingerDownY
                 lastSpread = pointerSpread(event)
             }
@@ -232,25 +276,29 @@ class TrackpadView @JvmOverloads constructor(
                     return true
                 }
                 if (scrolling) {
+                    val x = averageX(event)
                     val y = averageY(event)
                     val spread = pointerSpread(event)
                     val dSpread = spread - lastSpread
+                    val dx = x - lastScrollX
                     val dy = y - lastScrollY
                     // Spread change dominating centroid translation → it's a pinch.
-                    // Otherwise emit interactive scroll per frame; the same vertical
-                    // motion also feeds the flick velocity for auto-scroll on lift.
+                    // Otherwise emit a two-finger drag; the controller routes it (in-window
+                    // scroll, or PINNED-zoomed pan). The same vertical motion also feeds
+                    // the flick velocity for auto-scroll on lift.
                     if (
                         spread > MIN_PINCH_SPREAD_PX && lastSpread > MIN_PINCH_SPREAD_PX &&
                         abs(dSpread) > abs(dy) * PINCH_BIAS
                     ) {
                         Log.d(TAG, "MOVE pinch spread=${spread.toInt()} dSpread=${dSpread.toInt()} dy=${dy.toInt()}")
                         onZoom?.invoke(spread / lastSpread)
-                    } else if (height > 0) {
-                        Log.d(TAG, "MOVE scroll dy=${dy.toInt()} -> ${"%.4f".format(dy / height)}")
-                        onScroll?.invoke(dy / height)
+                    } else if (width > 0 && height > 0) {
+                        Log.d(TAG, "MOVE drag dx=${dx.toInt()} dy=${dy.toInt()}")
+                        onTwoFingerDrag?.invoke(dx / width, dy / height)
                     }
                     twoFingerLastY = y
                     twoFingerLastTime = event.eventTime
+                    lastScrollX = x
                     lastScrollY = y
                     lastSpread = spread
                 } else {
@@ -261,7 +309,15 @@ class TrackpadView @JvmOverloads constructor(
                     if (abs(event.x - downX) > TAP_SLOP_PX ||
                         abs(event.y - downY) > TAP_SLOP_PX
                     ) {
+                        if (!movedFar) {
+                            Log.i(
+                                TAG,
+                                "MOVE past slop dx=${(event.x - downX).toInt()} dy=${(event.y - downY).toInt()} — cancelling longPressTimeout",
+                            )
+                        }
                         movedFar = true
+                        // Moved past slop → no long-press; release the pending timer.
+                        removeCallbacks(longPressTimeout)
                     }
                     // Tap-and-drag model: ACTION_MOVE during the first touch is just
                     // cursor positioning. A pending tap is invalidated if we move past
@@ -311,6 +367,7 @@ class TrackpadView @JvmOverloads constructor(
                     maybeStartAutoScroll()
                 }
                 // Re-average over the fingers that remain, so the next move does not jump.
+                lastScrollX = averageX(event, lifting = event.actionIndex)
                 lastScrollY = averageY(event, lifting = event.actionIndex)
                 lastSpread = pointerSpread(event, lifting = event.actionIndex)
                 scrolling = false
@@ -320,13 +377,18 @@ class TrackpadView @JvmOverloads constructor(
             }
             MotionEvent.ACTION_UP -> {
                 val duration = event.eventTime - downTime
-                Log.d(TAG, "UP duration=${duration}ms scrolling=$scrolling dragging=$dragging tapPending=$tapPending movedFar=$movedFar autoScroll=$autoScrollActive")
+                Log.d(TAG, "UP duration=${duration}ms scrolling=$scrolling dragging=$dragging tapPending=$tapPending movedFar=$movedFar longPressFired=$longPressFired autoScroll=$autoScrollActive")
+                removeCallbacks(longPressTimeout)
                 if (dragging) {
                     // End of a drag — clean lift. The renderer's finalizePress emits
                     // ACTION_UP (or the window-drag release).
                     endDragIfActive()
                     // After a drag ends, no new tap-and-drag window opens — a fresh
                     // gesture is needed to start the next one.
+                    tapPending = false
+                } else if (longPressFired) {
+                    // Long-press already triggered its own action — don't double-fire
+                    // a tap on lift, and don't open a tap-and-drag window.
                     tapPending = false
                 } else if (!scrolling && !movedFar &&
                     event.eventTime - downTime < TAP_TIMEOUT_MS
@@ -348,6 +410,7 @@ class TrackpadView @JvmOverloads constructor(
             MotionEvent.ACTION_CANCEL -> {
                 Log.d(TAG, "CANCEL")
                 removeCallbacks(dragLockTimeout)
+                removeCallbacks(longPressTimeout)
                 tapPending = false
                 if (dragging) {
                     dragging = false
@@ -364,6 +427,18 @@ class TrackpadView @JvmOverloads constructor(
             dragging = false
             onDragEnd?.invoke()
         }
+    }
+
+    /** Mean X of the active pointers, optionally excluding one that is lifting. */
+    private fun averageX(event: MotionEvent, lifting: Int = -1): Float {
+        var sum = 0f
+        var count = 0
+        for (i in 0 until event.pointerCount) {
+            if (i == lifting) continue
+            sum += event.getX(i)
+            count++
+        }
+        return if (count > 0) sum / count else lastScrollX
     }
 
     /** Mean Y of the active pointers, optionally excluding one that is lifting. */
@@ -425,8 +500,5 @@ class TrackpadView @JvmOverloads constructor(
 
         /** Below this total vertical travel during the gesture, no auto-scroll starts. */
         const val MIN_FLICK_PX = 20
-
-        /** Pad-fractions per millisecond, capped so a super-fast flick stays sane. */
-        const val MAX_AUTO_SCROLL_PER_MS = 0.01f
     }
 }

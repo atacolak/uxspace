@@ -17,6 +17,19 @@ object UxSpaceTheme {
     /** Text and button glyphs drawn on the (light) window frame. */
     const val windowFrameText: Int = 0xFF2B2B2B.toInt()
 
+    /**
+     * Background for the floating chrome toolbar shown over an app window in
+     * FULLSCREEN — a dark colour close to the taskbar's, so the toolbar reads
+     * as part of the workspace shell rather than the running app. The slot's
+     * Presentation can't have *real* alpha here without hiding the wallpaper
+     * view under the chrome rect, so this opaque tone mimics the look of a
+     * translucent dark panel.
+     */
+    const val windowChromeCompactBg: Int = 0xFF1A1F2A.toInt()
+
+    /** Icon tint for the compact (fullscreen) chrome — light on dark. */
+    const val windowChromeCompactIcon: Int = 0xFFE6E6E6.toInt()
+
     /** Taskbar background. */
     const val taskbar: Int = 0xF0121620.toInt()
 

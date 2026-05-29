@@ -24,6 +24,12 @@ enum class Layout(
      * applies `displayedZoom × zoomBaseScale`. 1.0 = no adjustment (Single baseline).
      */
     val zoomBaseScale: Float = 1f,
+    /**
+     * Default "main screen" index for the layout — Two SBS uses left (0), Three SBS the
+     * centre (1), V/H/V the H (1). Single layouts default to their only screen. The user
+     * can override this per-layout in settings; the override lives in WorkspaceSettings.
+     */
+    val defaultMainScreen: Int = 0,
 ) {
     SINGLE(
         "Single",
@@ -58,6 +64,7 @@ enum class Layout(
         // Each screen is ~2.0m tall vs Single's ~3.66m; compensate so "100% zoom" gives
         // the same perceived size as Single's 100%.
         zoomBaseScale = 1.83f,
+        defaultMainScreen = 0,
     ),
     THREE_SBS(
         "Three SBS",
@@ -83,6 +90,7 @@ enum class Layout(
         ),
         // Per-screen perceived size matches Single's at the same displayed %.
         zoomBaseScale = 2.75f,
+        defaultMainScreen = 1,
     ),
     THREE_VHV(
         "Three V/H/V",
@@ -110,6 +118,7 @@ enum class Layout(
         // H screen ~2.08m tall vs Single's 3.66m; zoom comp keeps perceived size in line
         // with other layouts at the same displayed %.
         zoomBaseScale = 1.76f,
+        defaultMainScreen = 1,
     ),
 }
 

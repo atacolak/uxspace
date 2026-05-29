@@ -18,16 +18,16 @@ object GlassesDisplay {
     private const val TAG = "UxSpace/Display"
 
     /**
-     * Display-name prefix the per-slot trusted VirtualDisplays use ("uxspace-desktop"
-     * for slot 0, "uxspace-desktop-screen<i>" for the rest — see syncScreens in
-     * WorkspaceRenderer). Excluded from the glasses-display search so we never pick
-     * our own off-screen buffer as the glasses target. The previous value was
-     * "uxspace-screen", from an older naming convention; once the slot displays were
-     * renamed to "uxspace-desktop*" the filter stopped matching and find() would fall
-     * back to one of our own trusted displays whenever the real glasses dropped off
-     * the bus, which then triggered a chain of relayout / app-kill.
+     * Prefix every UxSpace-owned virtual display name shares. The per-slot UI
+     * Presentations are named `uxspace-desktop` / `uxspace-desktop-screenN`, and the
+     * per-window bare trusted displays are `uxspace-app-N`. We must filter out *all*
+     * of them — picking one of our own as "the glasses" was the bug that put the
+     * workspace Presentation on top of our own app display, recursing. The prefix
+     * has shifted twice now (was `uxspace-screen`, then `uxspace-desktop`); using
+     * the broader `uxspace-` removes the need for future updates if more display
+     * categories are added.
      */
-    private const val UXSPACE_SCREEN_PREFIX = "uxspace-desktop"
+    private const val UXSPACE_SCREEN_PREFIX = "uxspace-"
 
     /** The glasses' display, or `null` when they are not connected. */
     fun find(context: Context): Display? {

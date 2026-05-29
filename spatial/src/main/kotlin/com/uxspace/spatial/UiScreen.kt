@@ -115,6 +115,65 @@ class UiScreen(
         attemptTrustedStart(context, presentationFor, attempt = 1)
     }
 
+    /**
+     * Like [startTrusted] but does **not** attach a Presentation to the trusted display.
+     * Used for the per-app activity displays — Samsung One UI parks a transient
+     * KEYGUARD_DIALOG window on every secondary display where a Presentation has been
+     * `show()`-n, and that window sits at z=2009 with no NOT_TOUCHABLE bit, silently
+     * eating every injected touch before it reaches the activity. Skipping `show()`
+     * leaves the display Presentation-less, so the launched activity is the only
+     * touchable window on it and injected events land where we want them.
+     *
+     * Same retry policy as [startTrusted] for the helper-not-READY race.
+     *
+     * Call on the main thread.
+     */
+    fun startTrustedBare() {
+        if (released) return
+        val createTrusted = WorkspaceController.createVirtualDisplay ?: return
+        attemptTrustedBareStart(createTrusted, attempt = 1)
+    }
+
+    private fun attemptTrustedBareStart(
+        createTrusted: (String, Int, Int, Int, Surface) -> Int?,
+        attempt: Int,
+    ) {
+        if (released) return
+        // Per-app DPI is user-configurable in the Windows tab; the UI's own
+        // displays (start / startTrusted) keep the fixed [DENSITY_DPI] so the
+        // workspace chrome / taskbar size doesn't shift around per-app.
+        val appDpi = WorkspaceController.appDisplayDpi.coerceIn(80, 640)
+        val displayId = createTrusted(displayName, width, height, appDpi, surface)
+        if (displayId == null) {
+            if (attempt >= MAX_TRUSTED_ATTEMPTS) {
+                Log.e(
+                    TAG,
+                    "bare trusted display creation failed after $MAX_TRUSTED_ATTEMPTS attempts " +
+                        "— helper never reached READY; window $displayName stays blank",
+                )
+                return
+            }
+            Log.i(
+                TAG,
+                "bare trusted display creation deferred (helper not READY); " +
+                    "retry $attempt/${MAX_TRUSTED_ATTEMPTS} in ${TRUSTED_RETRY_MS}ms",
+            )
+            mainHandler.postDelayed(
+                {
+                    val again = WorkspaceController.createVirtualDisplay ?: return@postDelayed
+                    attemptTrustedBareStart(again, attempt + 1)
+                },
+                TRUSTED_RETRY_MS,
+            )
+            return
+        }
+        trustedDisplayId = displayId
+        Log.i(
+            TAG,
+            "ui screen ready (trusted, bare) ${width}x$height display=$displayId (attempt=$attempt)",
+        )
+    }
+
     private fun attemptTrustedStart(
         context: Context,
         presentationFor: (Context, Display) -> Presentation,

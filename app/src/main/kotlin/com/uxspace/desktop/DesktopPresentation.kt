@@ -57,7 +57,7 @@ class DesktopPresentation(
     private lateinit var clock: TextView
     private lateinit var runningApps: LinearLayout
     private lateinit var batteryText: TextView
-    private lateinit var volumeText: TextView
+    private lateinit var outputButton: ImageButton
 
     /**
      * Wallpaper layer — kept as a field so we can hide it while any app is running on
@@ -75,15 +75,14 @@ class DesktopPresentation(
     private val runningLabels = HashMap<String, String>()
 
     private val chromeListener = object : WindowChromeView.Listener {
+        override fun onBack(packageName: String) {
+            WorkspaceController.sendBackToApp(packageName)
+        }
         override fun onMinimize(packageName: String) {
-            // No "minimised" state in the per-slot model yet; for now close — same
-            // behavior as the close button. TODO: actual minimise (hide the activity
-            // but keep its task alive, restore from the taskbar icon).
-            WorkspaceController.closeAppByPackage(packageName)
+            WorkspaceController.minimizeWindow(packageName)
         }
         override fun onMaximize(packageName: String) {
-            // No "windowed" state to toggle yet — activities currently fill the slot.
-            // No-op until freeform launch bounds are wired.
+            WorkspaceController.toggleMaximizeWindow(packageName)
         }
         override fun onClose(packageName: String) {
             WorkspaceController.closeAppByPackage(packageName)
@@ -132,15 +131,39 @@ class DesktopPresentation(
     /** Settings panel embedded alongside the drawer — same modal model. */
     private lateinit var settings: SettingsView
 
+    /** Audio popup embedded alongside the drawer / settings — same modal model. */
+    private lateinit var audio: AudioPanelView
+
+    /** Pinned-app icons painted directly on the wallpaper for this screen's desktop. */
+    private lateinit var shortcuts: DesktopShortcutsView
+
+    /** Slot Presentation's root FrameLayout — chrome / frame children are added here. */
+    private lateinit var root: FrameLayout
+
+    /** Built by [buildTaskbar]; referenced so [applyChromeBoundsList] can keep it on top. */
+    private var taskbarContainer: View? = null
+
+    /** Build-stamp label in the corner; tracked for z-order. */
+    private var versionLabel: View? = null
+
     /**
-     * Window chrome — a thin title bar pinned to the top of the slot, visible only while
-     * an app is running on this slot. Carries the foreground app's icon + name plus
-     * minimize / maximize / close buttons. The chrome is part of the slot Presentation's
-     * view tree, so its button clicks are routed by WorkspaceRenderer via
-     * `UiScreen.dispatchTap` (the Presentation is FLAG_NOT_TOUCHABLE for the system
-     * dispatcher).
+     * Per-window chrome + frame views, keyed by package name. Each running
+     * window on this slot has its own `WindowChromeView` (title bar with
+     * icon, label, buttons) and `windowFrame` (3 px border ring). The list
+     * grows / shrinks as windows launch / close, and the views' alpha is
+     * lowered on non-focused windows so the top one reads clearly.
      */
-    private lateinit var chrome: WindowChromeView
+    private val windowChromes = mutableMapOf<String, ChromeViewSet>()
+
+    private data class ChromeViewSet(val chrome: WindowChromeView, val frame: View)
+
+    /**
+     * Translucent preview rectangle shown during a window drag to hint at the
+     * snap zone the window will tile into on release (left half / right half /
+     * maximised). Positioned on demand by [snapPreviewListener]; hidden when
+     * the cursor isn't in any snap zone.
+     */
+    private lateinit var snapPreview: View
 
     /**
      * Transparent click-catcher sized to the whole screen. Shown on *every* slot
@@ -176,10 +199,191 @@ class DesktopPresentation(
         }
     }
 
+    private val audioStateListener: (Boolean, Int) -> Unit = { open, screenIdx ->
+        mainHandler.post {
+            val showHere = open && screenIdx == slotIdx
+            if (::audio.isInitialized) {
+                audio.visibility = if (showHere) View.VISIBLE else View.GONE
+            }
+            refreshScrim()
+        }
+    }
+
+    /** Context menu created lazily on first right-click; rebuilt on each open
+     *  so view-mode-dependent rows (Cycle layout, Recenter) reflect the latest
+     *  state. Positioned at the click coordinates within the slot. */
+    private var contextMenu: View? = null
+
+    private val contextMenuStateListener: (Boolean, Int, Float, Float) -> Unit =
+        { open, screenIdx, pxX, pxY ->
+            mainHandler.post {
+                val showHere = open && screenIdx == slotIdx
+                if (showHere) {
+                    contextMenu?.let { root.removeView(it) }
+                    val menu = buildContextMenu()
+                    contextMenu = menu
+                    val lp = FrameLayout.LayoutParams(WRAP, WRAP).apply {
+                        leftMargin = pxX.toInt()
+                        topMargin = pxY.toInt()
+                    }
+                    root.addView(menu, lp)
+                } else {
+                    contextMenu?.let { root.removeView(it) }
+                    contextMenu = null
+                }
+                refreshScrim()
+            }
+        }
+
+    /**
+     * Position + size the chrome bar from the active window's bounds on this slot.
+     * Renderer calls `WorkspaceController.notifyWindowBoundsChanged(slotIdx, bounds)`
+     * whenever an app is launched, moved, or closed on the slot; we mirror those
+     * bounds into the chrome view's FrameLayout params so the title bar sits exactly
+     * above the activity quad. A null payload means there's no window on this slot —
+     * we hide the chrome.
+     */
+    private val windowBoundsListener: (Int, List<WorkspaceController.WindowBounds>) -> Unit =
+        { boundsSlot, bounds ->
+            if (boundsSlot == slotIdx) {
+                // notifyWindowBoundsChanged already fires on the main thread
+                // (the renderer posts it that way), so call directly — an
+                // extra mainHandler.post adds a frame of lag visible during
+                // drag as a gap between the chrome strip and the activity.
+                applyChromeBoundsList(bounds)
+            }
+        }
+
+    private val snapPreviewListener: (WorkspaceController.SnapPreview?) -> Unit =
+        { preview ->
+            if (::snapPreview.isInitialized) {
+                if (preview == null || preview.slotIdx != slotIdx) {
+                    snapPreview.visibility = View.GONE
+                } else {
+                    snapPreview.layoutParams = FrameLayout.LayoutParams(
+                        preview.widthPx, preview.heightPx,
+                    ).apply {
+                        leftMargin = preview.xPx
+                        topMargin = preview.yPx
+                        gravity = Gravity.TOP or Gravity.START
+                    }
+                    snapPreview.visibility = View.VISIBLE
+                }
+            }
+        }
+
+    private fun applyChromeBoundsList(boundsList: List<WorkspaceController.WindowBounds>) {
+        if (!::root.isInitialized) return
+        // Drop chrome / frame pairs for any package no longer in the list — its
+        // window was closed or moved off this slot.
+        val seen = boundsList.mapTo(mutableSetOf()) { it.packageName }
+        val stale = windowChromes.keys.filter { it !in seen }.toList()
+        stale.forEach { pkg ->
+            windowChromes.remove(pkg)?.let { set ->
+                root.removeView(set.chrome)
+                root.removeView(set.frame)
+            }
+        }
+        // Position / create each window's chrome + frame in z-order (last =
+        // topmost). bringChildToFront moves the matching pair to the front of
+        // root's child list each iteration, so by the end the topmost
+        // window's chrome + frame are above all others.
+        boundsList.forEach { bounds ->
+            val set = windowChromes.getOrPut(bounds.packageName) {
+                createWindowChromeSet(bounds.packageName)
+            }
+            positionWindowChromeSet(set, bounds)
+            // Z-order: bring this window's frame and chrome above any earlier
+            // entries in the list. Frame first (it sits *behind* the chrome
+            // already from view-tree order), then chrome on top.
+            root.bringChildToFront(set.frame)
+            root.bringChildToFront(set.chrome)
+            // Taskbar and modal panels need to stay on top of the windows —
+            // re-raise them after each window's z-rank pass.
+        }
+        if (boundsList.isNotEmpty()) {
+            // Restore taskbar / modals to the very top of the view tree so a
+            // window's chrome doesn't cover them.
+            taskbarContainer?.let { root.bringChildToFront(it) }
+            versionLabel?.let { root.bringChildToFront(it) }
+            if (::drawer.isInitialized) root.bringChildToFront(drawer)
+            if (::settings.isInitialized) root.bringChildToFront(settings)
+            if (::audio.isInitialized) root.bringChildToFront(audio)
+            if (::snapPreview.isInitialized) root.bringChildToFront(snapPreview)
+        }
+    }
+
+    private fun createWindowChromeSet(packageName: String): ChromeViewSet {
+        val frame = View(context).apply {
+            visibility = View.GONE
+            setBackgroundColor(UxSpaceTheme.windowBorder)
+        }
+        root.addView(frame, FrameLayout.LayoutParams(0, 0, Gravity.TOP or Gravity.START))
+        val chrome = WindowChromeView(context).apply {
+            visibility = View.GONE
+            setListener(chromeListener)
+        }
+        root.addView(
+            chrome,
+            FrameLayout.LayoutParams(MATCH, dp(CHROME_HEIGHT_DP), Gravity.TOP),
+        )
+        // Pre-bind the icon + label so the chrome paints immediately on the
+        // first positionWindowChromeSet call instead of a frame later.
+        chrome.bind(packageName, runningLabels[packageName], appIcon(packageName))
+        return ChromeViewSet(chrome, frame)
+    }
+
+    private fun positionWindowChromeSet(
+        set: ChromeViewSet,
+        bounds: WorkspaceController.WindowBounds,
+    ) {
+        // Frame: WINDOW_BORDER_PX larger than the outer rect on every side.
+        // Hidden in FULLSCREEN (no slot real estate to border against).
+        val fullscreen = bounds.mode == WorkspaceController.WindowMode.FULLSCREEN
+        if (fullscreen) {
+            set.frame.visibility = View.GONE
+        } else {
+            set.frame.layoutParams = FrameLayout.LayoutParams(
+                bounds.widthPx + 2 * WINDOW_BORDER_PX,
+                bounds.heightPx + 2 * WINDOW_BORDER_PX,
+            ).apply {
+                leftMargin = bounds.xPx - WINDOW_BORDER_PX
+                topMargin = bounds.yPx - WINDOW_BORDER_PX
+                gravity = Gravity.TOP or Gravity.START
+            }
+            set.frame.visibility = View.VISIBLE
+        }
+        set.chrome.layoutParams = FrameLayout.LayoutParams(
+            bounds.chromeBoundsW, bounds.chromeBoundsH,
+        ).apply {
+            leftMargin = bounds.chromeBoundsX
+            topMargin = bounds.chromeBoundsY
+            gravity = Gravity.TOP or Gravity.START
+        }
+        set.chrome.setWindowMode(bounds.mode)
+        set.chrome.visibility = View.VISIBLE
+        // Make sure the chrome's per-window listener context (icon, label,
+        // package) matches THIS window before any button click fires.
+        set.chrome.bind(
+            bounds.packageName,
+            runningLabels[bounds.packageName],
+            appIcon(bounds.packageName),
+        )
+        // Visual focus cue — dim non-focused windows' chrome + frame so the
+        // top window reads clearly.
+        val alpha = if (bounds.focused) 1f else UNFOCUSED_CHROME_ALPHA
+        set.chrome.alpha = alpha
+        set.frame.alpha = alpha
+    }
+
     /** Scrim visible whenever any modal panel is open anywhere. */
     private fun refreshScrim() {
         if (!::scrim.isInitialized) return
-        val anyOpen = WorkspaceController.isDrawerOpen || WorkspaceController.isSettingsOpen
+        val anyOpen =
+            WorkspaceController.isDrawerOpen ||
+                WorkspaceController.isSettingsOpen ||
+                WorkspaceController.isAudioOpen ||
+                WorkspaceController.isContextMenuOpen
         scrim.visibility = if (anyOpen) View.VISIBLE else View.GONE
     }
 
@@ -202,14 +406,22 @@ class DesktopPresentation(
         //     activity. The dismiss flag chases it off our display.
         window?.let { w ->
             w.setBackgroundDrawableResource(android.R.color.transparent)
+            @Suppress("DEPRECATION")
             w.addFlags(
                 android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
             )
         }
-        val root = FrameLayout(context)
+        root = FrameLayout(context)
         wallpaper = buildWallpaper()
         root.addView(wallpaper)
+        // Pinned shortcuts ride above the wallpaper but below the scrim — a click on
+        // an icon launches its app, a click on bare wallpaper still closes a drawer
+        // via the scrim's outside-click handler.
+        shortcuts = DesktopShortcutsView(context, slotIdx).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
+        }
+        root.addView(shortcuts)
         // Scrim sits between wallpaper and taskbar/drawer so a click on bare
         // wallpaper closes the drawer, but taskbar buttons + the drawer itself
         // still receive their own clicks (they're above the scrim in z-order).
@@ -221,25 +433,35 @@ class DesktopPresentation(
                 if (WorkspaceController.isDrawerOpen) {
                     WorkspaceController.setDrawerOpen(false, slotIdx)
                 }
+                if (WorkspaceController.isContextMenuOpen) {
+                    WorkspaceController.setContextMenuOpen(false, slotIdx)
+                }
                 if (WorkspaceController.isSettingsOpen) {
                     WorkspaceController.setSettingsOpen(false, slotIdx)
+                }
+                if (WorkspaceController.isAudioOpen) {
+                    WorkspaceController.setAudioOpen(false, slotIdx)
                 }
             }
         }
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
-        // Window chrome is a thin strip pinned to the top of the slot. Hidden until an
-        // app is running on this slot — refreshChrome() flips its visibility from
-        // addRunningApp / removeRunningApp.
-        chrome = WindowChromeView(context).apply {
+        // Snap-preview overlay — translucent rectangle shown during drag at the
+        // prospective tile zone. Created early so it sits in z-order below
+        // per-window chrome / frame views (which are added on demand). The
+        // applyChromeBoundsList pass re-raises it after rebuilding chrome
+        // z-order each frame so it stays visible above any windows it overlaps.
+        snapPreview = View(context).apply {
             visibility = View.GONE
-            setListener(chromeListener)
+            setBackgroundColor(SNAP_PREVIEW_COLOR)
         }
-        root.addView(
-            chrome,
-            FrameLayout.LayoutParams(MATCH, dp(CHROME_HEIGHT_DP), Gravity.TOP),
-        )
-        if (showTaskbar) root.addView(buildTaskbar())
-        root.addView(buildVersionLabel())
+        root.addView(snapPreview, FrameLayout.LayoutParams(0, 0, Gravity.TOP or Gravity.START))
+        // Per-window chrome + frame views are created lazily by
+        // [applyChromeBoundsList] when the renderer publishes a window's
+        // bounds — one pair per package on this slot.
+        if (showTaskbar) {
+            taskbarContainer = buildTaskbar().also { root.addView(it) }
+        }
+        versionLabel = buildVersionLabel().also { root.addView(it) }
         // Drawer goes last so it sits on top of wallpaper + taskbar in the view tree.
         // Insets from screen edges so it doesn't cover the whole surface; tap outside
         // would land on the wallpaper (no close-on-outside yet — drawer closes when an
@@ -252,6 +474,7 @@ class DesktopPresentation(
         // screen. Cap rule unchanged: ultrawide / panoramic screens still get the
         // *same* drawer as a single 1920×1080 screen.
         val metrics = android.util.DisplayMetrics()
+        @Suppress("DEPRECATION")
         display.getRealMetrics(metrics)
         val portraitHost = metrics.heightPixels > metrics.widthPixels
         val baselineW = if (portraitHost) DRAWER_BASELINE_SCREEN_H else DRAWER_BASELINE_SCREEN_W
@@ -277,12 +500,35 @@ class DesktopPresentation(
             layoutParams = FrameLayout.LayoutParams(dw, dh, Gravity.CENTER)
         }
         root.addView(settings)
+        // Audio panel — same centred modal slot. Sized like the others so the
+        // renderer's drawSlotModalOverlay can use the shared modal rect.
+        audio = AudioPanelView(context).apply {
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(dw, dh, Gravity.CENTER)
+        }
+        root.addView(audio)
         setContentView(root)
+        // Tell the renderer where the drawer + settings panels sit on the slot's
+        // Presentation surface — both share the same centred rectangle. The renderer
+        // uses these bounds to re-composite the modal area on top of any window
+        // stacked behind it, so the activity stays visible around the modal panel.
+        val modalX = ((metrics.widthPixels - dw) / 2).coerceAtLeast(0)
+        val modalY = ((metrics.heightPixels - dh) / 2).coerceAtLeast(0)
+        WorkspaceController.notifyModalBoundsChanged(
+            slotIdx,
+            WorkspaceController.ModalBounds(modalX, modalY, dw, dh),
+        )
         // Per-screen taskbar — only react to launches on this screen.
         WorkspaceController.addAppLaunchedListener(appLaunchedListener)
         WorkspaceController.addAppClosedListener(appClosedListener)
         WorkspaceController.addDrawerStateListener(drawerStateListener)
         WorkspaceController.addSettingsStateListener(settingsStateListener)
+        WorkspaceController.addAudioStateListener(audioStateListener)
+        WorkspaceController.addContextMenuStateListener(contextMenuStateListener)
+        WorkspaceController.addWindowBoundsListener(windowBoundsListener)
+        WorkspaceController.addSnapPreviewListener(snapPreviewListener)
+        DesktopWallpaperStore.addChangeListener(wallpaperListener)
+        WorkspaceSettings.addChangeListener(taskbarSettingsListener)
     }
 
     override fun onDetachedFromWindow() {
@@ -290,6 +536,12 @@ class DesktopPresentation(
         WorkspaceController.removeAppClosedListener(appClosedListener)
         WorkspaceController.removeDrawerStateListener(drawerStateListener)
         WorkspaceController.removeSettingsStateListener(settingsStateListener)
+        WorkspaceController.removeAudioStateListener(audioStateListener)
+        WorkspaceController.removeContextMenuStateListener(contextMenuStateListener)
+        WorkspaceController.removeWindowBoundsListener(windowBoundsListener)
+        WorkspaceController.removeSnapPreviewListener(snapPreviewListener)
+        DesktopWallpaperStore.removeChangeListener(wallpaperListener)
+        WorkspaceSettings.removeChangeListener(taskbarSettingsListener)
         super.onDetachedFromWindow()
     }
 
@@ -299,6 +551,7 @@ class DesktopPresentation(
         clockTick.run()
         SystemStatus.addListener(systemStatusListener)
         refreshStatusTray()
+        applyTaskbarSettings()
     }
 
     override fun onStop() {
@@ -313,19 +566,178 @@ class DesktopPresentation(
             val charging = if (SystemStatus.batteryCharging) "⚡ " else ""
             batteryText.text = "$charging${SystemStatus.batteryPercent}%"
         }
-        if (::volumeText.isInitialized) {
-            volumeText.text = "${(SystemStatus.volumeFraction * 100).toInt()}%"
+        if (::outputButton.isInitialized) {
+            val iconRes = when (SystemStatus.activeOutput) {
+                SystemStatus.AudioOutput.BLUETOOTH -> R.drawable.ic_bluetooth
+                SystemStatus.AudioOutput.USB -> R.drawable.ic_usb
+                SystemStatus.AudioOutput.WIRED -> R.drawable.ic_headphones
+                SystemStatus.AudioOutput.SPEAKER -> R.drawable.ic_volume
+            }
+            outputButton.setImageResource(iconRes)
+            outputButton.contentDescription = SystemStatus.activeOutputName
         }
     }
 
-    private fun buildWallpaper(): View = ImageView(context).apply {
-        layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
-        scaleType = ImageView.ScaleType.CENTER_CROP
-        val bitmap = runCatching {
-            context.assets.open(WALLPAPER_ASSET).use { BitmapFactory.decodeStream(it) }
-        }.getOrNull()
-        if (bitmap != null) setImageBitmap(bitmap) else setBackgroundColor(VOID_COLOR)
+    /**
+     * Outer container for the wallpaper — kept as a [FrameLayout] so we can swap the
+     * inner ImageView / tiled background on a store change without rebuilding the
+     * whole view tree. The actual image is applied by [applyWallpaperSpec].
+     */
+    /**
+     * Build the desktop right-click context menu — a vertical list of action
+     * rows. Built fresh on every open so the FREE-only rows / taskbar toggle /
+     * "Lock vs Unlock" label all reflect current state. Each row dismisses the
+     * menu before running its action.
+     */
+    private fun buildContextMenu(): View {
+        val container = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0xEE1C1E22.toInt())
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val pinned = WorkspaceController.currentViewMode ==
+            com.uxspace.spatial.WorkspaceRenderer.ViewMode.PINNED
+        val free = !pinned
+        val dofUp = WorkspaceController.headTrackingActive
+
+        addContextMenuItem(container, "Arrange icons") {
+            DesktopShortcutsStore.arrange(currentDesktopIdx())
+        }
+        addContextMenuItem(container, "Change wallpaper") {
+            WorkspaceController.pickWallpaperFromDevice?.invoke(currentDesktopIdx())
+        }
+        addContextMenuItem(container, "Settings") {
+            WorkspaceController.setSettingsOpen(true, slotIdx)
+        }
+        addContextMenuItem(container, "Cycle layout", enabled = free) {
+            WorkspaceController.cycleLayout()
+        }
+        addContextMenuItem(container, "Recenter view", enabled = free) {
+            WorkspaceController.alignVerticalToHead()
+        }
+        addContextMenuItem(
+            container,
+            label = if (pinned) "Unlock (FREE)" else "Lock (PINNED)",
+            enabled = dofUp,
+        ) {
+            val next = if (pinned) {
+                com.uxspace.spatial.WorkspaceRenderer.ViewMode.FREE
+            } else {
+                com.uxspace.spatial.WorkspaceRenderer.ViewMode.PINNED
+            }
+            WorkspaceController.setViewMode(next)
+        }
+        addContextMenuItem(container, "Reset zoom") {
+            WorkspaceController.resetWorkspaceZoom()
+        }
+        addContextMenuItem(
+            container,
+            if (WorkspaceSettings.showTaskbar()) "Hide taskbar" else "Show taskbar",
+        ) {
+            WorkspaceSettings.setShowTaskbar(!WorkspaceSettings.showTaskbar())
+        }
+        return container
     }
+
+    private fun addContextMenuItem(
+        parent: android.widget.LinearLayout,
+        label: String,
+        enabled: Boolean = true,
+        onClick: () -> Unit,
+    ) {
+        val row = TextView(context).apply {
+            text = label
+            textSize = 16f
+            setTextColor(if (enabled) 0xFFEAEAEA.toInt() else 0xFF888888.toInt())
+            isClickable = enabled
+            isFocusable = enabled
+            setPadding(dp(20), dp(12), dp(64), dp(12))
+            if (enabled) {
+                setOnClickListener {
+                    // Close the menu first so the action lands on a clean
+                    // workspace state (the action may toggle another modal
+                    // like Settings, which is mutually exclusive anyway).
+                    WorkspaceController.setContextMenuOpen(false, slotIdx)
+                    onClick()
+                }
+            }
+        }
+        parent.addView(
+            row,
+            android.widget.LinearLayout.LayoutParams(MATCH, WRAP),
+        )
+    }
+
+    private fun buildWallpaper(): View {
+        val container = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH, MATCH)
+        }
+        applyWallpaperSpec(container, currentWallpaperSpec())
+        return container
+    }
+
+    private fun currentDesktopIdx(): Int =
+        DesktopShortcutsStore.desktopIdxFor(WorkspaceController.layout, slotIdx)
+
+    private fun currentWallpaperSpec(): WallpaperSpec =
+        DesktopWallpaperStore.specFor(currentDesktopIdx())
+
+    private val wallpaperListener: (Int) -> Unit = { changedDesktopIdx ->
+        if (changedDesktopIdx == currentDesktopIdx() && ::wallpaper.isInitialized) {
+            mainHandler.post {
+                applyWallpaperSpec(wallpaper as FrameLayout, currentWallpaperSpec())
+            }
+        }
+    }
+
+    /**
+     * Replace the wallpaper container's contents to match [spec]. Tile mode lays the
+     * image as a repeating [android.graphics.drawable.BitmapDrawable] background;
+     * every other mode uses an `ImageView` with the matching `ScaleType`. Unloadable
+     * images fall back to the void colour so the desktop never goes transparent.
+     */
+    private fun applyWallpaperSpec(container: FrameLayout, spec: WallpaperSpec) {
+        container.removeAllViews()
+        container.background = null
+        val bitmap = loadWallpaperBitmap(spec.source)
+        if (bitmap == null) {
+            container.setBackgroundColor(VOID_COLOR)
+            return
+        }
+        if (spec.mode == PlacementMode.TILE) {
+            container.background = android.graphics.drawable.BitmapDrawable(
+                context.resources, bitmap,
+            ).apply {
+                setTileModeXY(
+                    android.graphics.Shader.TileMode.REPEAT,
+                    android.graphics.Shader.TileMode.REPEAT,
+                )
+            }
+            return
+        }
+        val iv = ImageView(context).apply {
+            scaleType = when (spec.mode) {
+                PlacementMode.CENTER_CROP -> ImageView.ScaleType.CENTER_CROP
+                PlacementMode.ONE_TO_ONE -> ImageView.ScaleType.CENTER
+                PlacementMode.STRETCH -> ImageView.ScaleType.FIT_XY
+                PlacementMode.FIT -> ImageView.ScaleType.FIT_CENTER
+                PlacementMode.TILE -> ImageView.ScaleType.CENTER_CROP // unreachable
+            }
+            setImageBitmap(bitmap)
+        }
+        container.addView(iv, FrameLayout.LayoutParams(MATCH, MATCH))
+    }
+
+    private fun loadWallpaperBitmap(source: WallpaperSource): android.graphics.Bitmap? = runCatching {
+        when (source) {
+            is WallpaperSource.Asset -> context.assets.open(source.assetPath).use {
+                BitmapFactory.decodeStream(it)
+            }
+            is WallpaperSource.Uri -> context.contentResolver
+                .openInputStream(android.net.Uri.parse(source.uri))
+                ?.use { BitmapFactory.decodeStream(it) }
+        }
+    }.getOrNull()
 
     /**
      * A faint build stamp in the workspace's top-left corner. The time is the APK's install
@@ -431,8 +843,11 @@ class DesktopPresentation(
      * now. Wi-Fi, signal, message indicator and the click-to-open quick-settings panel
      * come in follow-up commits (see docs/TASKBAR.md).
      */
+    /** Container views for status tray items, kept so settings can show/hide them. */
+    private var volumeItem: View? = null
+    private var batteryItem: View? = null
+
     private fun buildRightCluster(): View {
-        volumeText = statusValue()
         batteryText = statusValue()
         clock = TextView(context).apply {
             setTextColor(UxSpaceTheme.taskbarText)
@@ -444,8 +859,10 @@ class DesktopPresentation(
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(statusItem(R.drawable.ic_volume, volumeText, "Volume"))
-            addView(statusItem(R.drawable.ic_battery, batteryText, "Battery"))
+            volumeItem = buildVolumeItem()
+            batteryItem = statusItem(R.drawable.ic_battery, batteryText, "Battery")
+            addView(volumeItem)
+            addView(batteryItem)
             addView(
                 taskbarButton(R.drawable.ic_settings, "Settings") {
                     // Same one-click move semantics as the App drawer: clicking on a
@@ -460,6 +877,31 @@ class DesktopPresentation(
                 LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) },
             )
         }
+    }
+
+    /**
+     * Volume tray slot: a single icon showing the active output type (speaker /
+     * headphones / BT / USB). Tap toggles the [AudioPanelView] popup on *this*
+     * slot — same one-click-move semantics as the App drawer and Settings.
+     */
+    private fun buildVolumeItem(): View {
+        outputButton = ImageButton(context).apply {
+            setImageResource(R.drawable.ic_volume)
+            background = null
+            contentDescription = "Audio"
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            }
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setOnClickListener {
+                val openHere = WorkspaceController.isAudioOpen &&
+                    WorkspaceController.audioOnScreen == slotIdx
+                WorkspaceController.setAudioOpen(!openHere, slotIdx)
+            }
+        }
+        return outputButton
     }
 
     /** Right-tray cell: a small icon next to a tiny percentage label. */
@@ -579,39 +1021,55 @@ class DesktopPresentation(
     }
 
     /**
-     * Sync the window-chrome bar to the slot's foreground app — the most recently
-     * launched (last entry in the [runningIcons] LinkedHashMap). Hidden when no app is
-     * running on this slot.
+     * Re-bind every per-window chrome's icon + label when the running-apps map
+     * changes. Each [WindowChromeView] in [windowChromes] is keyed by package,
+     * so the labels / icons of *other* windows on this slot aren't disturbed.
+     * Position / visibility are owned by [applyChromeBoundsList] — this only
+     * refreshes content for whichever chrome views already exist.
      */
     private fun refreshChrome() {
-        if (!::chrome.isInitialized) return
-        val top = runningIcons.keys.lastOrNull()
-        if (top == null) {
-            chrome.visibility = View.GONE
-            chrome.bind(null, null, null)
-            return
+        windowChromes.forEach { (pkg, set) ->
+            set.chrome.bind(pkg, runningLabels[pkg], appIcon(pkg))
         }
-        chrome.bind(top, runningLabels[top], appIcon(top))
-        chrome.visibility = View.VISIBLE
     }
 
     /**
-     * Wallpaper visible only when no app is running on this slot. With the translucent
-     * Presentation theme, the wallpaper is the one piece of the desktop's UI that
-     * would still occlude a launched activity (the activity renders behind the
-     * Presentation window in SurfaceFlinger z-order); hiding it lets the activity
-     * appear in the slot. Taskbar stays opaque on top so the user still has it.
+     * Wallpaper is always visible now — activities live on *their own* bare trusted
+     * displays sampled by the renderer as separate quads over the slot's quad, so the
+     * slot's wallpaper shows through around the window naturally. Kept as a no-op
+     * function so the addRunningApp / removeRunningApp call sites don't need to know.
      */
     private fun refreshWallpaperVisibility() {
         if (!::wallpaper.isInitialized) return
-        wallpaper.visibility = if (runningIcons.isEmpty()) View.VISIBLE else View.GONE
+        wallpaper.visibility = View.VISIBLE
     }
 
-    private fun clockText(): String =
-        SimpleDateFormat("h:mm a\nEEE, MMM d", Locale.getDefault()).format(Date())
+    private fun clockText(): String {
+        val timePattern = if (WorkspaceSettings.clockUse24h()) "HH:mm" else "h:mm a"
+        val pattern = if (WorkspaceSettings.showTaskbarDate()) "$timePattern\nEEE, MMM d" else timePattern
+        return SimpleDateFormat(pattern, Locale.getDefault()).format(Date())
+    }
+
+    /** Refresh status-tray visibility from [WorkspaceSettings]. */
+    private fun applyTaskbarSettings() {
+        // Global "show taskbar" off → the whole container hides regardless of
+        // per-slot showTaskbar (which is the layout-baked default).
+        val globalOn = WorkspaceSettings.showTaskbar()
+        taskbarContainer?.visibility =
+            if (globalOn && showTaskbar) View.VISIBLE else View.GONE
+        if (::clock.isInitialized) {
+            clock.visibility = if (WorkspaceSettings.showTaskbarClock()) View.VISIBLE else View.GONE
+            clock.text = clockText()
+        }
+        volumeItem?.visibility = if (WorkspaceSettings.showTaskbarVolume()) View.VISIBLE else View.GONE
+        batteryItem?.visibility = if (WorkspaceSettings.showTaskbarBattery()) View.VISIBLE else View.GONE
+    }
+
+    private val taskbarSettingsListener: () -> Unit = {
+        mainHandler.post { applyTaskbarSettings() }
+    }
 
     private companion object {
-        const val WALLPAPER_ASSET = "workspace_background.jpg"
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
@@ -623,7 +1081,24 @@ class DesktopPresentation(
          * `CHROME_HEIGHT_PX` (computed with the slot Presentation's density 200) so the
          * cursor-region check picks the same band on the slot's surface texture.
          */
-        const val CHROME_HEIGHT_DP = 36
+        const val CHROME_HEIGHT_DP = 26
+
+        /**
+         * Window-frame thickness in slot-local pixels — drawn as a colour ring
+         * around the chrome + activity by sizing the frame view this many px
+         * larger than the window's outer rect on every side. Pixels (not dp)
+         * so the border thickness is exact regardless of slot density.
+         */
+        const val WINDOW_BORDER_PX = 3
+
+        /**
+         * Tile-preview overlay colour during a window drag — a translucent
+         * accent tint, visible against the slot's wallpaper.
+         */
+        const val SNAP_PREVIEW_COLOR = 0x554090F0.toInt()
+
+        /** Alpha applied to non-focused windows' chrome + frame views. */
+        const val UNFOCUSED_CHROME_ALPHA = 0.55f
 
         /** Translucent white for the left-cluster divider — a quarter-strength rule line. */
         const val DIVIDER_COLOR = 0x40FFFFFF

@@ -4,6 +4,7 @@
 package com.uxspace.privileged;
 
 import android.view.Surface;
+import com.uxspace.privileged.IPrivilegedHotkeyListener;
 
 interface IPrivilegedService {
 
@@ -69,4 +70,23 @@ interface IPrivilegedService {
      * carry the right downAt and the app sees a consistent touch sequence.
      */
     void injectTouch(int displayId, int x, int y, int action) = 13;
+
+    /**
+     * Install a global Ctrl+Alt+X hotkey spy, mirroring the Windows app's
+     * WH_KEYBOARD_LL hook. The helper reads /dev/input/event* directly from shell uid
+     * and forwards matching combos as PrivilegedHotkeys.HK_* codes through
+     * [listener] (oneway). Passing null tears the monitor down. Replaces any previously
+     * registered listener. Events are observed passively — the focused app still sees
+     * the original key presses.
+     */
+    void setHotkeyListener(IPrivilegedHotkeyListener listener) = 14;
+
+    /**
+     * Force-detach and re-attach the VITURE glasses' USB device. Locates the VID 0x35ca
+     * device under /sys/bus/usb/devices, writes its bus-port id to the usb-driver's
+     * unbind file, sleeps briefly, then writes the same id to bind. The kernel
+     * re-enumerates the device, which surfaces back to the app as USB_DEVICE_ATTACHED.
+     * Idempotent — silent no-op when no VITURE device is present.
+     */
+    void rescanGlassesUsb() = 15;
 }

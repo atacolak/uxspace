@@ -49,12 +49,6 @@ object AppCache {
     }
 
     /**
-     * Snapshot getter — returns the cached list if ready, else `null`. Callers either use
-     * the snapshot immediately or [whenReady] to wait.
-     */
-    fun snapshot(): List<InstalledApp>? = cache.get()
-
-    /**
      * Run [block] on the loader thread once the cache is ready (immediately if already
      * loaded). Use to populate the drawer adapter without blocking the UI thread.
      */

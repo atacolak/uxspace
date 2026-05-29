@@ -1,0 +1,13 @@
+<!-- Material Symbols Rounded · "usb" · Apache-2.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960"
+    android:tint="#FFECEFF4">
+    <group android:translateY="960">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M440,-160v-440H320v80q17,9 28.5,26t11.5,38q0,25 -17.5,42.5T300,-396q-25,0 -42.5,-17.5T240,-456q0,-21 11.5,-38t28.5,-26v-120q0,-17 11.5,-28.5T320,-680h120v-80h-40q-17,0 -28.5,-11.5T360,-800v-80q0,-17 11.5,-28.5T400,-920h160q17,0 28.5,11.5T600,-880v80q0,17 -11.5,28.5T560,-760h-40v200h120q17,0 28.5,11.5T680,-520v120l40,-40v-40q0,-17 11.5,-28.5T760,-520q17,0 28.5,11.5T800,-480v40q0,17 -6,32t-17,27l-77,77 -100,-78v-58H520v280l80,-80h-40q-17,0 -28.5,-11.5T520,-280v-40q0,-17 11.5,-28.5T560,-360h120q17,0 28.5,11.5T720,-320v40q0,17 -6,32t-17,27L520,-44q-12,12 -28,12t-28,-12L368,-141q-12,-12 -28,-12t-28,12q-12,12 -12,28t12,28l99,99q9,8 19.5,11.5T440,-160Z" />
+    </group>
+</vector>

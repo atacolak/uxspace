@@ -24,7 +24,7 @@ object NativeGlasses {
     /** Open the glasses. [fd] is a USB file descriptor; [pid] the USB product id. */
     external fun create(pid: Int, fd: Int): Boolean
 
-    /** [DEVICE_TYPE_GEN1] / [DEVICE_TYPE_GEN2] / [DEVICE_TYPE_CARINA], or -1. */
+    /** [DEVICE_TYPE_CARINA] for VITURE Carina, or -1 for older Gen1/2 hardware. */
     external fun getDeviceType(): Int
 
     external fun registerStateCallback(): Int
@@ -76,7 +76,5 @@ object NativeGlasses {
     external fun getVolume(): Int
     external fun getFilm(): Int
 
-    const val DEVICE_TYPE_GEN1: Int = 0
-    const val DEVICE_TYPE_GEN2: Int = 1
     const val DEVICE_TYPE_CARINA: Int = 2
 }

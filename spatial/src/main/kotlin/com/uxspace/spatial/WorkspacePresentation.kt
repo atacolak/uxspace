@@ -34,15 +34,45 @@ class WorkspacePresentation(
         // centred band; a plain external display can use its whole height.
         WorkspaceController.setScreenBand(if (GlassesUsb.isConnected(context)) 0.83f else 1.0f)
         // Drive the camera from the glasses' head pose, so the screens stay world-fixed.
+        // The pose-stream watchdog inside HeadTracking flips the controller's
+        // headTrackingActive flag on start/stop transitions, which (a) ungrays the FREE
+        // toggle in the toolbars and (b) auto-reverts to PINNED when DOF dies.
         val renderer = view.workspaceRenderer
         headTracking = HeadTracking(context) { w, x, y, z ->
             renderer.setHeadPose(w, x, y, z)
-        }.also { it.start() }
+        }.also { tracking ->
+            tracking.onStreamingChanged = { streaming ->
+                WorkspaceController.headTrackingActive = streaming
+            }
+            tracking.start()
+        }
     }
 
     override fun onStart() {
         super.onStart()
         surfaceView?.onResume()
+    }
+
+    /**
+     * Re-attempt head-tracking startup. No-op if it's already running. Used to recover
+     * from the startup race where the glasses' DisplayPort side enumerates before the USB
+     * IMU endpoint — without this hook, the first `HeadTracking.start()` returns with no
+     * device found and DOF stays dead for the session. Wired by [com.uxspace.MainActivity]
+     * from its `USB_DEVICE_ATTACHED` handler.
+     */
+    fun retryHeadTracking() {
+        headTracking?.start()
+    }
+
+    /**
+     * Force-restart head tracking with a full SDK teardown first. Used after a USB
+     * rescan (from the DOF-stall watchdog): the prior SDK handle is bound to a USB
+     * device file the kernel just removed, so we have to release it cleanly before
+     * the post-bind attach intent triggers a fresh `start()`.
+     */
+    fun restartHeadTracking() {
+        headTracking?.stop()
+        headTracking?.start()
     }
 
     override fun onStop() {
@@ -53,6 +83,7 @@ class WorkspacePresentation(
     override fun dismiss() {
         headTracking?.stop()
         headTracking = null
+        WorkspaceController.headTrackingActive = false
         surfaceView?.let { view ->
             WorkspaceController.unregister(view.workspaceRenderer)
             view.queueEvent {

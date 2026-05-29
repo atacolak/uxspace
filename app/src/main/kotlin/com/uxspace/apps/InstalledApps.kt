@@ -24,7 +24,7 @@ data class InstalledApp(
     val icon: Drawable,
 )
 
-/** Enumerates launchable apps and builds intents that target a specific [activityName]. */
+/** Enumerates launchable apps installed on the device. */
 object InstalledApps {
 
     /**
@@ -77,17 +77,4 @@ object InstalledApps {
         bounds = previousBounds
         return BitmapDrawable(resources, bitmap)
     }
-
-    /**
-     * An intent that launches [packageName]/[activityName] as a fresh task.
-     *
-     * `NEW_TASK` is required to start it from a non-activity context and to place it on
-     * another display; `MULTIPLE_TASK` lets it land on the virtual display even when an
-     * instance is already running on the phone.
-     */
-    fun launchIntent(packageName: String, activityName: String): Intent =
-        Intent(Intent.ACTION_MAIN)
-            .addCategory(Intent.CATEGORY_LAUNCHER)
-            .setClassName(packageName, activityName)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
 }

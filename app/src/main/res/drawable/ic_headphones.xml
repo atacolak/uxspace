@@ -1,0 +1,13 @@
+<!-- Material Symbols Rounded · "headphones" · Apache-2.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960"
+    android:tint="#FFECEFF4">
+    <group android:translateY="960">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M480,-840q150,0 255,105t105,255v320q0,33 -23.5,56.5T760,-80h-80q-33,0 -56.5,-23.5T600,-160v-160q0,-33 23.5,-56.5T680,-400h80v-80q0,-117 -81.5,-198.5T480,-760q-117,0 -198.5,81.5T200,-480v80h80q33,0 56.5,23.5T360,-320v160q0,33 -23.5,56.5T280,-80h-80q-33,0 -56.5,-23.5T120,-160v-320q0,-150 105,-255t255,-105Z" />
+    </group>
+</vector>

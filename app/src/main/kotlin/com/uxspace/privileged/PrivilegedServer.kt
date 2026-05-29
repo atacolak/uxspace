@@ -7,14 +7,21 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
+import android.os.FileObserver
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.Surface
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 
 /**
@@ -147,10 +154,12 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         val ok = runVerbose(
             "am", "start",
             "--display", displayId.toString(),
-            // 5 = WINDOWING_MODE_FREEFORM — launches the activity into a freeform,
-            // movable window rather than fullscreen. Falls through gracefully to
-            // fullscreen if the device doesn't expose FEATURE_FREEFORM_WINDOW_MANAGEMENT.
-            "--windowingMode", "5",
+            // 1 = WINDOWING_MODE_FULLSCREEN — the activity fills its own bare trusted
+            // display; UxSpace draws the surrounding window chrome itself. Freeform
+            // mode (5) was used before per-app displays existed; it makes Samsung One
+            // UI add its own freeform title bar (grey strip with a blue drag handle)
+            // above the activity, which now stacks against our chrome and looks broken.
+            "--windowingMode", "1",
             "-n", "$packageName/$activityName",
             "-a", "android.intent.action.MAIN",
             "-c", "android.intent.category.LAUNCHER",
@@ -335,6 +344,88 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
      * is latched on `DOWN` and reused for the rest of the sequence, so the app sees a
      * coherent gesture (which is required by Android's input dispatching).
      */
+    /**
+     * Force the VITURE glasses' USB device to re-enumerate. Locates the device by
+     * walking `/sys/bus/usb/devices/` for a `idVendor` that reads `35ca`; if found,
+     * writes the device's bus-port identifier (the directory name, e.g. `1-1.2`) to
+     * the USB driver's `unbind` file, sleeps briefly, then writes it to `bind`. The
+     * kernel re-enumerates the device which then fires `USB_DEVICE_ATTACHED` back to
+     * the app. Both writes need shell-uid sysfs write permission (which we have).
+     *
+     * Triggered from the app-side DOF-stall watchdog when the SDK reports the
+     * pose stream has been quiet for several seconds — empirically the BT-keyboard
+     * pair sometimes wedges the Carina endpoint until something tickles the bus.
+     */
+    override fun rescanGlassesUsb() {
+        try {
+            val devicesRoot = File("/sys/bus/usb/devices")
+            val devices = devicesRoot.listFiles() ?: run {
+                Log.w(TAG, "rescanGlassesUsb: /sys/bus/usb/devices unreadable")
+                return
+            }
+            var matched = 0
+            for (dev in devices) {
+                val vendor = runCatching { File(dev, "idVendor").readText().trim() }
+                    .getOrNull() ?: continue
+                if (vendor != VITURE_VID_HEX) continue
+                val busPort = dev.name
+                matched++
+                Log.i(TAG, "rescanGlassesUsb: rescanning $busPort (idVendor=$vendor)")
+                if (rescanViaAuthorized(dev) || rescanViaDriverUnbind(busPort)) {
+                    Log.i(TAG, "rescanGlassesUsb: $busPort rescan dispatched")
+                } else {
+                    Log.w(
+                        TAG,
+                        "rescanGlassesUsb: every rescan path failed for $busPort " +
+                            "— shell uid likely lacks sysfs write permission on this OEM",
+                    )
+                }
+            }
+            if (matched == 0) Log.w(TAG, "rescanGlassesUsb: no VITURE device under /sys/bus/usb/devices")
+        } catch (t: Throwable) {
+            Log.e(TAG, "rescanGlassesUsb failed", t)
+        }
+    }
+
+    /**
+     * Toggle `authorized` from 1 → 0 → 1 on the device's sysfs node. On Samsung this
+     * file is sometimes group-writable by `usb`, which shell is a member of — so it
+     * works where `/sys/bus/usb/drivers/usb/unbind` doesn't. Same end effect: kernel
+     * tears down the device, then re-enumerates.
+     */
+    private fun rescanViaAuthorized(devDir: File): Boolean {
+        val authorized = File(devDir, "authorized")
+        if (!authorized.exists()) return false
+        return try {
+            authorized.writeText("0")
+            try { Thread.sleep(USB_REBIND_GAP_MS) } catch (_: InterruptedException) {}
+            authorized.writeText("1")
+            Log.i(TAG, "rescanViaAuthorized: ${devDir.name} toggled")
+            true
+        } catch (e: Exception) {
+            Log.d(TAG, "rescanViaAuthorized failed for ${devDir.name}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Classic unbind/bind via the usb driver. Requires write access to
+     * `/sys/bus/usb/drivers/usb/{unbind,bind}` which is normally root-only; mentioned
+     * for completeness and to keep a fallback path documented.
+     */
+    private fun rescanViaDriverUnbind(busPort: String): Boolean {
+        return try {
+            File("/sys/bus/usb/drivers/usb/unbind").writeText(busPort)
+            try { Thread.sleep(USB_REBIND_GAP_MS) } catch (_: InterruptedException) {}
+            File("/sys/bus/usb/drivers/usb/bind").writeText(busPort)
+            Log.i(TAG, "rescanViaDriverUnbind: $busPort rebound")
+            true
+        } catch (e: Exception) {
+            Log.d(TAG, "rescanViaDriverUnbind failed for $busPort: ${e.message}")
+            false
+        }
+    }
+
     override fun injectTouch(displayId: Int, x: Int, y: Int, action: Int) {
         try {
             val injector = obtainInjector() ?: run {
@@ -525,6 +616,348 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         }
     }
 
+    // region Hotkey monitor — mirrors the Windows companion's WH_KEYBOARD_LL global hook.
+    //
+    // MainActivity runs with FLAG_NOT_FOCUSABLE so it never sees physical key events. The
+    // shell uid we run as can read `/dev/input/event*` directly (same path `adb getevent`
+    // uses), which gives us every keyboard regardless of focused window or display. We
+    // read passively — the OS still delivers the same events to whatever window has
+    // focus, so this is a spy, not an interceptor.
+    //
+    // We track Ctrl + Alt held state and fire a [PrivilegedHotkeys] code to the
+    // registered app-side listener on each ACTION_DOWN of a target key. Hot-plug
+    // (BT keyboard connects later) is handled via a FileObserver on /dev/input.
+    //
+    // Modifier choice: Win/Meta was the natural cross-platform combo (matching the
+    // Windows app), but Samsung One UI hard-binds Meta to the launcher's app-drawer
+    // shortcut. Switching the Android *and* Windows hotkey set to Ctrl+Alt sidesteps
+    // both Samsung's launcher and Windows' Meta-key reservations.
+
+    @Volatile private var hotkeyMonitor: HotkeyMonitor? = null
+
+    override fun setHotkeyListener(listener: IPrivilegedHotkeyListener?) {
+        synchronized(this) {
+            hotkeyMonitor?.stop()
+            hotkeyMonitor = null
+            if (listener != null) {
+                try {
+                    hotkeyMonitor = HotkeyMonitor(listener).also { it.start() }
+                    Log.i(TAG, "hotkey monitor started")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "could not start hotkey monitor", t)
+                }
+            } else {
+                Log.i(TAG, "hotkey monitor stopped")
+            }
+        }
+    }
+
+    private class HotkeyMonitor(private val listener: IPrivilegedHotkeyListener) {
+
+        private val readers = CopyOnWriteArrayList<FileInputStream>()
+        private val threads = CopyOnWriteArrayList<Thread>()
+        @Volatile private var stopped = false
+        private val ctrlHeld = AtomicBoolean(false)
+        private val altHeld = AtomicBoolean(false)
+        private val modsHeld = AtomicBoolean(false)
+        private var fileObserver: FileObserver? = null
+
+        fun start() {
+            val inputDir = File(INPUT_DIR)
+            inputDir.listFiles { f -> f.name.startsWith("event") }?.forEach(::spawnReader)
+            fileObserver = newFileObserver(inputDir).also { it.startWatching() }
+        }
+
+        fun stop() {
+            stopped = true
+            runCatching { fileObserver?.stopWatching() }
+            readers.forEach { runCatching { it.close() } }
+            // Threads exit on EOF when their FD closes; no need to interrupt.
+        }
+
+        private fun newFileObserver(dir: File): FileObserver {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                object : FileObserver(dir, CREATE) {
+                    override fun onEvent(event: Int, name: String?) = handleNewDevice(name)
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                object : FileObserver(dir.absolutePath, CREATE) {
+                    override fun onEvent(event: Int, name: String?) = handleNewDevice(name)
+                }
+            }
+        }
+
+        private fun handleNewDevice(name: String?) {
+            if (stopped || name == null || !name.startsWith("event")) return
+            spawnReader(File(INPUT_DIR, name))
+        }
+
+        private fun spawnReader(dev: File) {
+            if (stopped) return
+            val fis = try {
+                FileInputStream(dev)
+            } catch (e: Exception) {
+                // Most event devices are readable by shell uid via the `input` group;
+                // a handful (e.g. accelerometer) may be locked down. Skip silently.
+                Log.d(TAG, "hotkey: skip ${dev.name} (${e.message})")
+                return
+            }
+            // Logged at INFO so the user can correlate keyboard attach with
+            // any downstream USB / DOF disturbance in a single logcat scroll.
+            Log.i(TAG, "hotkey: opened ${dev.name} (${describeInputDevice(dev.name)})")
+            // Mice (devices that report EV_REL relative motion) get EVIOCGRAB'd so
+            // system_server stops seeing them. Without the grab, clicks land on
+            // whatever phone UI sits under the (hidden) system pointer — the home
+            // gesture pill, the status bar, anywhere the cursor wanders. With it,
+            // the kernel only delivers mouse events to this reader; the workspace
+            // cursor + click are the only consumers.
+            if (isMouseDevice(dev.name)) {
+                grabExclusive(fis, dev.name)
+            }
+            readers.add(fis)
+            val t = Thread({ readLoop(fis, dev) }, "uxspace-hotkey-${dev.name}").apply {
+                isDaemon = true
+            }
+            threads.add(t)
+            t.start()
+        }
+
+        /**
+         * A device reports relative motion (EV_REL bit set in its capabilities
+         * bitmap) — that's the kernel's definition of a mouse. Touchscreens use
+         * EV_ABS instead, so this filter never accidentally grabs the phone's
+         * actual touchscreen and breaks touch input.
+         */
+        private fun isMouseDevice(eventName: String): Boolean {
+            val cap = runCatching {
+                File("/sys/class/input/$eventName/device/capabilities/ev")
+                    .readText().trim()
+            }.getOrNull() ?: return false
+            val capLong = runCatching { java.lang.Long.parseLong(cap, 16) }.getOrNull() ?: return false
+            // bit 2 = EV_REL.
+            return (capLong and 0x4L) != 0L
+        }
+
+        /**
+         * Call EVIOCGRAB(1) on the device's FD so the kernel routes its events
+         * exclusively to this reader. system_server (the input dispatcher behind
+         * the on-screen cursor + click routing) stops receiving anything from
+         * this device until the FD is closed or EVIOCGRAB(0) releases it. The
+         * grab is dropped automatically when [stop] closes the FD.
+         */
+        private fun grabExclusive(fis: FileInputStream, devName: String) {
+            try {
+                // Os.ioctlInt(FileDescriptor, int, MutableInt) is @hide on the
+                // public SDK; shell uid bypasses the hidden-API blocklist so
+                // reflection works at runtime.
+                val osClass = Class.forName("android.system.Os")
+                val mutableIntClass = android.util.MutableInt::class.java
+                val arg = mutableIntClass.getConstructor(Int::class.javaPrimitiveType)
+                    .newInstance(1)
+                val method = osClass.getMethod(
+                    "ioctlInt",
+                    java.io.FileDescriptor::class.java,
+                    Int::class.javaPrimitiveType,
+                    mutableIntClass,
+                )
+                method.invoke(null, fis.fd, EVIOCGRAB, arg)
+                Log.i(TAG, "hotkey: EVIOCGRAB ok for $devName")
+            } catch (e: Exception) {
+                Log.w(TAG, "hotkey: EVIOCGRAB failed for $devName: ${e.message}")
+            }
+        }
+
+        /**
+         * Map an event-N node to its human-readable device name by reading
+         * `/sys/class/input/eventN/device/name` — the sysfs surface for input devices.
+         * `/proc/bus/input/devices` would be richer but it's `EACCES` from shell uid on
+         * recent Android; sysfs files are world-readable, so this path actually works.
+         * Returns "?" / a short failure string when the file isn't present.
+         */
+        private fun describeInputDevice(eventName: String): String {
+            return runCatching {
+                File("/sys/class/input/$eventName/device/name").readText().trim()
+            }.getOrElse { "name unavailable: ${it.message}" }
+        }
+
+        private fun readLoop(fis: FileInputStream, dev: File) {
+            val buf = ByteArray(INPUT_EVENT_SIZE)
+            try {
+                while (!stopped) {
+                    var read = 0
+                    while (read < buf.size) {
+                        val n = fis.read(buf, read, buf.size - read)
+                        if (n <= 0) return
+                        read += n
+                    }
+                    handle(buf)
+                }
+            } catch (_: IOException) {
+                // Closed (stop()) or device unplugged — exit cleanly.
+            } catch (t: Throwable) {
+                Log.w(TAG, "hotkey: ${dev.name} reader error", t)
+            } finally {
+                readers.remove(fis)
+                runCatching { fis.close() }
+            }
+        }
+
+        /**
+         * Recompute the combined Ctrl+Alt held state and, on a transition, fire the
+         * synthetic [PrivilegedHotkeys.HK_MODIFIERS_DOWN] / `_UP` hotkey so the app can
+         * surface its keymap-legend overlay while the modifier pair is held. Called from
+         * the key event handler whenever either Ctrl or Alt changes state.
+         */
+        private fun updateModifiersHeld() {
+            val both = ctrlHeld.get() && altHeld.get()
+            if (modsHeld.compareAndSet(!both, both)) {
+                val code = if (both) PrivilegedHotkeys.HK_MODIFIERS_DOWN
+                           else      PrivilegedHotkeys.HK_MODIFIERS_UP
+                try {
+                    listener.onHotkey(code)
+                } catch (_: RemoteException) {
+                    stop()
+                }
+            }
+        }
+
+        // Per-reader-thread accumulators for batched mouse motion. EV_REL events
+        // come one axis at a time (separate REL_X and REL_Y), terminated by an
+        // EV_SYN_REPORT to mark "frame ready". We sum within a frame and flush
+        // on SYN so the listener gets one delta per logical mouse movement.
+        private var mouseDxAccum = 0
+        private var mouseDyAccum = 0
+        private var mouseWheelAccum = 0
+
+        private fun handle(buf: ByteArray) {
+            val type = u16le(buf, OFFSET_TYPE)
+            val code = u16le(buf, OFFSET_CODE)
+            val value = i32le(buf, OFFSET_VALUE)
+            if (type == EV_REL) {
+                when (code) {
+                    REL_X -> mouseDxAccum += value
+                    REL_Y -> mouseDyAccum += value
+                    REL_WHEEL -> mouseWheelAccum += value
+                }
+                return
+            }
+            if (type == EV_SYN && code == SYN_REPORT) {
+                if (mouseDxAccum != 0 || mouseDyAccum != 0 || mouseWheelAccum != 0) {
+                    val dx = mouseDxAccum
+                    val dy = mouseDyAccum
+                    val wh = mouseWheelAccum
+                    mouseDxAccum = 0
+                    mouseDyAccum = 0
+                    mouseWheelAccum = 0
+                    try {
+                        listener.onMouseDelta(dx, dy, wh)
+                    } catch (_: RemoteException) {
+                        stop()
+                    }
+                }
+                return
+            }
+            if (type != EV_KEY) return
+            // Mouse buttons — forward press/release to the app. value==2 is
+            // autorepeat which mice don't really emit but skip just in case.
+            if (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE) {
+                if (value != 0 && value != 1) return
+                try {
+                    listener.onMouseButton(code, value == 1)
+                } catch (_: RemoteException) {
+                    stop()
+                }
+                return
+            }
+            when (code) {
+                KEY_LEFTCTRL, KEY_RIGHTCTRL -> {
+                    ctrlHeld.set(value != 0)
+                    updateModifiersHeld()
+                }
+                KEY_LEFTALT, KEY_RIGHTALT -> {
+                    altHeld.set(value != 0)
+                    updateModifiersHeld()
+                }
+                else -> {
+                    // value: 0 = up, 1 = down, 2 = autorepeat. Only fire on the
+                    // initial press so a held key doesn't spam zoom steps.
+                    if (value != 1) return
+                    if (!(ctrlHeld.get() && altHeld.get())) return
+                    val hk = when (code) {
+                        KEY_A -> PrivilegedHotkeys.HK_CYCLE_LAYOUT
+                        KEY_Z -> PrivilegedHotkeys.HK_CYCLE_SCREEN_BAND
+                        KEY_X -> PrivilegedHotkeys.HK_TOGGLE_VIEW_MODE
+                        KEY_R -> PrivilegedHotkeys.HK_SDK_RECENTER
+                        KEY_C -> PrivilegedHotkeys.HK_ANCHOR_POSE
+                        KEY_EQUAL, KEY_KPPLUS -> PrivilegedHotkeys.HK_ZOOM_IN
+                        KEY_MINUS, KEY_KPMINUS -> PrivilegedHotkeys.HK_ZOOM_OUT
+                        else -> return
+                    }
+                    try {
+                        listener.onHotkey(hk)
+                    } catch (_: RemoteException) {
+                        // App side died — stop the whole monitor so we don't keep
+                        // racing against a dead Binder.
+                        stop()
+                    }
+                }
+            }
+        }
+
+        companion object {
+            private const val INPUT_DIR = "/dev/input"
+
+            // struct input_event on Android 11+ (64-bit user space):
+            //   struct timeval { __kernel_long_t tv_sec; __kernel_long_t tv_usec; }  // 16 bytes
+            //   __u16 type, __u16 code, __s32 value                                  //  8 bytes
+            // Total: 24 bytes. 32-bit Android is no longer in scope for this app
+            // (PrivilegedService gates the helper on Android 11+).
+            private const val INPUT_EVENT_SIZE = 24
+            private const val OFFSET_TYPE = 16
+            private const val OFFSET_CODE = 18
+            private const val OFFSET_VALUE = 20
+
+            // <linux/input-event-codes.h> — kernel keycodes (not Android KeyEvent codes).
+            private const val EV_SYN = 0
+            private const val EV_KEY = 1
+            private const val EV_REL = 2
+            private const val SYN_REPORT = 0
+            private const val REL_X = 0
+            private const val REL_Y = 1
+            private const val REL_WHEEL = 8
+            // Mouse button kernel codes.
+            private const val BTN_LEFT = 272
+            private const val BTN_RIGHT = 273
+            private const val BTN_MIDDLE = 274
+            // _IOW('E', 0x90, int) — exclusive-grab ioctl for evdev devices.
+            private const val EVIOCGRAB = 0x40044590
+            private const val KEY_MINUS = 12
+            private const val KEY_EQUAL = 13
+            private const val KEY_R = 19
+            private const val KEY_LEFTCTRL = 29
+            private const val KEY_A = 30
+            private const val KEY_Z = 44
+            private const val KEY_X = 45
+            private const val KEY_C = 46
+            private const val KEY_LEFTALT = 56
+            private const val KEY_KPMINUS = 74
+            private const val KEY_KPPLUS = 78
+            private const val KEY_RIGHTCTRL = 97
+            private const val KEY_RIGHTALT = 100
+
+            private fun u16le(b: ByteArray, off: Int): Int =
+                (b[off].toInt() and 0xff) or ((b[off + 1].toInt() and 0xff) shl 8)
+
+            private fun i32le(b: ByteArray, off: Int): Int =
+                (b[off].toInt() and 0xff) or
+                    ((b[off + 1].toInt() and 0xff) shl 8) or
+                    ((b[off + 2].toInt() and 0xff) shl 16) or
+                    ((b[off + 3].toInt() and 0xff) shl 24)
+        }
+    }
+    // endregion
+
     /** Run a shell command, log anything it prints, and report a clean exit. */
     private fun run(vararg command: String): Boolean {
         return try {
@@ -559,6 +992,12 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         /** Package owning the shell uid — the virtual display is created under it. */
         private const val SHELL_PACKAGE = "com.android.shell"
 
+        /** VITURE Technology vendor id, lowercased hex as sysfs reports it. */
+        private const val VITURE_VID_HEX = "35ca"
+
+        /** Brief pause between unbind and bind during a USB rescan, ms. */
+        private const val USB_REBIND_GAP_MS = 200L
+
         /**
          * Flags for the workspace's virtual displays. `PUBLIC` so the system places activities
          * on it; `OWN_CONTENT_ONLY` so it never mirrors the phone; `PRESENTATION` marks it as
@@ -585,6 +1024,9 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         @JvmStatic
         fun main(args: Array<String>) {
             try {
+                Log.i(TAG, "PrivilegedServer.main entered, pid=${android.os.Process.myPid()}")
+                killOrphanPrivilegedServers()
+                Log.i(TAG, "orphan sweep returned; preparing Looper")
                 Looper.prepareMainLooper()
                 val systemContext = obtainSystemContext()
                     ?: throw IllegalStateException("could not obtain a system context")
@@ -596,6 +1038,61 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 Log.e(TAG, "PrivilegedServer crashed during start-up", t)
                 exitProcess(1)
             }
+        }
+
+        /**
+         * Kill any other `uxspace_privileged` processes left over from previous app
+         * sessions before claiming the role ourselves. `app_process` detaches once
+         * started; `adb shell am force-stop com.uxspace` only kills the app uid, not
+         * the shell-uid helper, so without this sweep every reinstall would leave
+         * behind another orphan holding FDs on every `/dev/input/event*` node — a
+         * pattern observed in logcat as multiple `hotkey monitor started` lines and
+         * 3×+ FD use on every input device, which in turn correlates with the
+         * Bluetooth-keyboard-kills-DOF symptom.
+         *
+         * Identifies peers by `--nice-name=uxspace_privileged` riding in their
+         * `/proc/<pid>/cmdline`. Shell uid has signal permission for shell-owned
+         * processes, so `Process.killProcess` does what we need; the SIGKILL on
+         * our SDK handle / Binder is handled by Android's process teardown.
+         */
+        private fun killOrphanPrivilegedServers() {
+            val self = android.os.Process.myPid()
+            Log.i(TAG, "orphan sweep starting (self pid=$self)")
+            val procRoot = File("/proc")
+            val children = procRoot.listFiles()
+            if (children == null) {
+                Log.w(TAG, "orphan sweep: /proc.listFiles() returned null — skipping")
+                return
+            }
+            var examined = 0
+            var killed = 0
+            try {
+                for (entry in children) {
+                    val pid = entry.name.toIntOrNull() ?: continue
+                    if (pid == self) continue
+                    examined++
+                    val cmdline = runCatching { File(entry, "cmdline").readText() }.getOrNull()
+                        ?: continue
+                    // /proc/<pid>/cmdline is NUL-separated; argv[0] is everything before
+                    // the first NUL. Match strictly on argv[0] — substring matches caught
+                    // the parent shell whose own command line embedded the helper's
+                    // command string, and killing that shell tore down the ADB stream
+                    // the app reads the privileged binder over.
+                    val argv0 = cmdline.substringBefore('\u0000')
+                    if (argv0 != "uxspace_privileged") continue
+                    Log.i(TAG, "killing orphan uxspace_privileged pid=$pid")
+                    runCatching { android.os.Process.killProcess(pid) }
+                    killed++
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "orphan sweep loop crashed (examined=$examined)", t)
+            }
+            if (killed > 0) {
+                // Give the kernel a tick to reap the FDs (incl. /dev/input/event* opens)
+                // so the new helper's HotkeyMonitor sees a clean state.
+                try { Thread.sleep(200) } catch (_: InterruptedException) {}
+            }
+            Log.i(TAG, "orphan sweep complete; examined=$examined killed=$killed")
         }
 
         /** `ActivityThread.systemMain().getSystemContext()` — the standard app_process bootstrap. */

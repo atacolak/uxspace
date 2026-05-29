@@ -1,0 +1,13 @@
+<!-- Material Symbols Rounded · "bluetooth" · Apache-2.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960"
+    android:tint="#FFECEFF4">
+    <group android:translateY="960">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M440,-80q-17,0 -28.5,-11.5T400,-120v-300L246,-266q-12,12 -28,11.5T190,-267q-11,-12 -11,-28t11,-28l210,-209L190,-741q-11,-12 -11,-28t11,-28q12,-12 28,-12.5T246,-797l154,154v-303q0,-19 13,-28.5T440,-984q11,0 21.5,5t18.5,12l190,191q11,12 11,27.5T670,-721L530,-580l140,141q11,11 11,26.5T670,-385L480,-194q-8,7 -18.5,12t-21.5,5ZM480,-628 580,-727 480,-826v198ZM480,-134 580,-233 480,-333v199Z" />
+    </group>
+</vector>

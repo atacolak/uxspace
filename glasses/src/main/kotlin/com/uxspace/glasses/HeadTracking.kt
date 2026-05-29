@@ -36,6 +36,17 @@ class HeadTracking(
     // SDK handle is a process-wide singleton.
     @Volatile private var started = false
 
+    // Pose-stream watchdog: tracks the wall-clock time of the last [feedPose] callback and
+    // declares the stream dead when it goes silent for [STREAM_STALL_TIMEOUT_MS]. The
+    // glasses USB endpoint can be killed externally (e.g. Bluetooth radio activation
+    // racing the USB host on some OEMs) — Carina logs LIBUSB_ERROR_TIMEOUT but keeps
+    // its poll thread alive, so without this watchdog the app keeps claiming DOF is live.
+    @Volatile private var lastPoseAtMs = 0L
+    @Volatile private var streaming = false
+
+    /** Fires when the pose stream starts or stops. Posted from the poll thread. */
+    var onStreamingChanged: ((streaming: Boolean) -> Unit)? = null
+
     // Reference orientation for recentre; the first pose fills it in.
     @Volatile private var haveRef = false
     private var refW = 1f
@@ -43,28 +54,34 @@ class HeadTracking(
     private var refY = 0f
     private var refZ = 0f
 
-    /** Begin tracking: locate the glasses on USB and request permission. */
+    /**
+     * Begin tracking: locate the glasses on USB and request permission. Idempotent — if
+     * tracking is already up this is a no-op; if a previous call missed the device because
+     * USB enumeration lagged behind the display, calling again retries. The expected retry
+     * trigger is `USB_DEVICE_ATTACHED` in [com.uxspace.MainActivity].
+     */
     fun start() {
         if (started) {
-            Log.w(TAG, "start() ignored — head tracking already started")
+            Log.d(TAG, "start() ignored — head tracking already started")
+            return
+        }
+        val glassesUsb = usb ?: GlassesUsb(appContext, ::onUsbOpened, ::onUsbDenied).also { usb = it }
+        val device = glassesUsb.find()
+        if (device == null) {
+            // Don't latch — leave [started] false so a later USB_DEVICE_ATTACHED
+            // re-entry can succeed. The display side of the glasses can come up before
+            // the USB IMU endpoint enumerates; without retry that brief race kills DOF
+            // for the whole session.
+            Log.i(TAG, "no VITURE glasses found on USB — head tracking off (will retry on USB attach)")
             return
         }
         started = true
-        val glassesUsb = GlassesUsb(appContext, ::onUsbOpened, ::onUsbDenied)
-        usb = glassesUsb
-        val device = glassesUsb.find()
-        if (device == null) {
-            Log.i(TAG, "no VITURE glasses found on USB — head tracking off")
-            return
-        }
         Log.i(TAG, "found glasses, pid=0x${device.productId.toString(16)}")
         glassesUsb.open(device)
     }
 
-    /** Make the current head direction the new centre. */
-    fun recenter() {
-        haveRef = false
-    }
+    /** Whether [start] has successfully claimed the glasses' USB device for this instance. */
+    fun isStarted(): Boolean = started
 
     /** Stop tracking and release the SDK + USB. */
     fun stop() {
@@ -134,6 +151,8 @@ class HeadTracking(
 
     private fun startPolling() {
         polling = true
+        lastPoseAtMs = 0L
+        streaming = false
         pollThread = Thread {
             while (polling) {
                 if (NativeGlasses.isPoseFresh()) {
@@ -141,6 +160,7 @@ class HeadTracking(
                     // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
                     if (pose.size >= 7) feedPose(pose[3], pose[4], pose[5], pose[6])
                 }
+                checkStreamWatchdog()
                 try {
                     Thread.sleep(POLL_INTERVAL_MS)
                 } catch (_: InterruptedException) {
@@ -153,8 +173,32 @@ class HeadTracking(
         }
     }
 
+    /**
+     * Detect a stalled pose stream. Once [streaming] has been latched true (first pose
+     * arrived), look for a quiet gap of [STREAM_STALL_TIMEOUT_MS] and flip it back to
+     * false — the USB endpoint or the SDK has stopped delivering data. The corresponding
+     * recover transition fires from [feedPose] the next time a pose arrives.
+     */
+    private fun checkStreamWatchdog() {
+        if (!streaming) return
+        val now = System.currentTimeMillis()
+        if (lastPoseAtMs == 0L) return
+        val sinceMs = now - lastPoseAtMs
+        if (sinceMs > STREAM_STALL_TIMEOUT_MS) {
+            streaming = false
+            Log.w(TAG, "pose stream stalled — no pose for ${sinceMs}ms (DOF lost)")
+            runCatching { onStreamingChanged?.invoke(false) }
+        }
+    }
+
     /** Recentre against the reference orientation, then deliver the result via [onPose]. */
     private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
+        lastPoseAtMs = System.currentTimeMillis()
+        if (!streaming) {
+            streaming = true
+            Log.i(TAG, "pose stream live (DOF up)")
+            runCatching { onStreamingChanged?.invoke(true) }
+        }
         if (!haveRef) {
             refW = w; refX = x; refY = y; refZ = z
             haveRef = true
@@ -171,5 +215,8 @@ class HeadTracking(
     private companion object {
         const val TAG = "UxSpace/Tracking"
         const val POLL_INTERVAL_MS = 8L  // ~120 Hz
+        /** A live pose stream emits at >=60 Hz; a 1.5 s gap is far past any normal lull
+         *  and is the threshold for declaring DOF dead. */
+        const val STREAM_STALL_TIMEOUT_MS = 1500L
     }
 }

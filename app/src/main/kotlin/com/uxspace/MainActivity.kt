@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
+import android.hardware.input.InputManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -14,14 +15,20 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
+import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.uxspace.databinding.ActivityMainBinding
+import com.uxspace.desktop.DesktopWallpaperStore
+import com.uxspace.desktop.WallpaperSource
 import com.uxspace.glasses.GlassesDisplay
 import com.uxspace.privileged.PairingNotifier
 import com.uxspace.privileged.PrivilegedService
@@ -61,12 +68,148 @@ class MainActivity : ComponentActivity() {
      *  and deletions per text-change event. */
     private var lastKeyboardText: String = ""
 
+    /** Desktop index waiting for a wallpaper pick result. −1 = none in flight. */
+    private var pendingWallpaperDesktopIdx: Int = -1
+
+    /** Caps diagnostic mouse logs so a steady stream of events doesn't drown logcat. */
+    private var mouseDiagFrameCount: Int = 0
+
+    /**
+     * Phone-side photo picker for wallpaper. Triggered from the in-glasses settings
+     * panel via [WorkspaceController.pickWallpaperFromDevice] (the panel lives on a
+     * VirtualDisplay and can't host the picker dialog itself). On a successful pick
+     * we take a persistable URI permission so the URI keeps working across restarts.
+     */
+    private val pickWallpaperLauncher = registerForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        val idx = pendingWallpaperDesktopIdx
+        pendingWallpaperDesktopIdx = -1
+        if (uri == null || idx < 0) return@registerForActivityResult
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+        DesktopWallpaperStore.setSource(idx, WallpaperSource.Uri(uri.toString()))
+    }
+
     /** Reacts when the glasses are plugged in or out while the panel is open. */
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = syncGlasses()
         override fun onDisplayRemoved(displayId: Int) = syncGlasses()
         override fun onDisplayChanged(displayId: Int) = syncGlasses()
     }
+
+    /** Re-evaluates whether any physical keyboard is attached whenever the input
+     *  device set changes. The HotkeyMonitor in the shell-uid helper is gated on
+     *  the result — no keyboard means we don't open any /dev/input/event* nodes. */
+    private val keyboardPresenceListener = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = refreshKeyboardPresence()
+        override fun onInputDeviceRemoved(deviceId: Int) = refreshKeyboardPresence()
+        override fun onInputDeviceChanged(deviceId: Int) = refreshKeyboardPresence()
+    }
+
+    private fun inputManager(): InputManager = getSystemService(InputManager::class.java)
+
+    /**
+     * Scan every attached input device for a real physical keyboard and tell
+     * [PrivilegedService] whether to keep the global hotkey spy alive.
+     *
+     * Naive checks (sources & SOURCE_KEYBOARD, keyboardType == ALPHABETIC) match
+     * too aggressively: Android's "Virtual" soft keyboard (id=-1) and HID combo
+     * mouse-receivers (e.g. Logitech "MX Anywhere 2S Keyboard") both advertise
+     * ALPHABETIC even though neither has A-Z keys. Filter them out with
+     *
+     *   - skip [InputDevice.isVirtual] (kills the "Virtual" keyboard)
+     *   - require [InputDevice.hasKeys] to return true for `KEYCODE_A` (kills the
+     *     receivers whose only "keyboard" surface is media keys)
+     *
+     * Done as a full scan rather than tracking individual add/remove flips
+     * because a single device can advertise multiple sources and the listener
+     * can fire in any order.
+     */
+    private fun refreshKeyboardPresence() {
+        val current = mutableSetOf<Int>()
+        var anyMouse = false
+        for (id in InputDevice.getDeviceIds()) {
+            val dev = InputDevice.getDevice(id) ?: continue
+            val name = dev.name
+            if (dev.isVirtual) {
+                Log.d("UxSpace/Main", "kb scan: skip virtual id=$id name='$name'")
+                continue
+            }
+            // Track real mice so the monitor stays alive for the raw-evdev mouse
+            // delta path even when no keyboard is attached.
+            if ((dev.sources and InputDevice.SOURCE_MOUSE) != 0) {
+                Log.i("UxSpace/Main", "mouse present: id=$id name='$name'")
+                anyMouse = true
+            }
+            if ((dev.sources and InputDevice.SOURCE_KEYBOARD) == 0) continue
+            if (dev.keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
+                Log.d("UxSpace/Main", "kb scan: skip non-alphabetic id=$id name='$name'")
+                continue
+            }
+            // Wireless mice (Logitech "MX Anywhere 2S Keyboard" etc.) expose a
+            // media-keys HID interface that Android classifies as ALPHABETIC and
+            // even claims KEYCODE_A — but the device's primary identity is a
+            // mouse. Real keyboards never advertise SOURCE_MOUSE.
+            if ((dev.sources and InputDevice.SOURCE_MOUSE) != 0) {
+                Log.d(
+                    "UxSpace/Main",
+                    "kb scan: skip mouse-combo id=$id name='$name' (sources=0x${
+                        dev.sources.toString(16)
+                    })",
+                )
+                continue
+            }
+            val hasA = dev.hasKeys(KeyEvent.KEYCODE_A)
+            if (hasA.isEmpty() || !hasA[0]) {
+                Log.d(
+                    "UxSpace/Main",
+                    "kb scan: skip no-KEYCODE_A id=$id name='$name' (combo HID, not a real keyboard)",
+                )
+                continue
+            }
+            Log.i("UxSpace/Main", "keyboard present: id=$id name='$name'")
+            current.add(id)
+        }
+        PrivilegedService.setHotkeyMonitoringEnabled(current.isNotEmpty() || anyMouse)
+
+        // Proactive glasses-USB rescan around keyboard-connect events. The first
+        // scan after process start is the baseline — only later adds count.
+        // Catches the Samsung quirk where pairing a BT keyboard wedges the
+        // Carina endpoint; rebinding ~1.5s later (after the BT-stack USB churn
+        // peaks) usually resurrects pose flow before the user sees a drop.
+        if (!firstKeyboardScan) {
+            val freshAdds = current - lastKnownKeyboardIds
+            if (freshAdds.isNotEmpty() && WorkspaceController.isRunning) {
+                Log.i(
+                    "UxSpace/Main",
+                    "keyboard add (ids=$freshAdds) — scheduling glasses USB rescan in ${KEYBOARD_CONNECT_RESCAN_MS}ms",
+                )
+                pendingKeyboardRescan?.let { mainHandler.removeCallbacks(it) }
+                val r = Runnable {
+                    if (!WorkspaceController.isRunning) return@Runnable
+                    Log.i(
+                        "UxSpace/Main",
+                        "proactive rescanGlassesUsb (post-keyboard-connect)",
+                    )
+                    PrivilegedService.rescanGlassesUsb()
+                }
+                pendingKeyboardRescan = r
+                mainHandler.postDelayed(r, KEYBOARD_CONNECT_RESCAN_MS)
+            }
+        }
+        firstKeyboardScan = false
+        lastKnownKeyboardIds = current
+    }
+
+    /** First-scan-after-onCreate sentinel: don't fire a proactive rescan for a keyboard
+     *  that was already attached when the app launched — only for *new* attaches. */
+    private var firstKeyboardScan = true
+    private var lastKnownKeyboardIds: Set<Int> = emptySet()
+    private var pendingKeyboardRescan: Runnable? = null
 
     private val privilegeListener: () -> Unit = { runOnUiThread { renderStatus() } }
 
@@ -89,16 +232,42 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // EXPERIMENT: keep this activity from becoming the system's top-focused display
-        // when the trackpad is touched. Otherwise the moment the user taps the touchpad,
-        // the WindowManager updates topFocusedDisplay = 0 (this activity's display),
-        // which yanks focus away from whatever per-app secondary display hosts a launched
-        // activity — and Samsung One UI's GameBooster reacts by pausing the foreground
-        // task and destroying its input channel. FLAG_NOT_FOCUSABLE still lets the window
-        // receive touches; it just doesn't take input focus.
-        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        // FLAG_NOT_FOCUSABLE was kept here to prevent the workspace Presentation
+        // from being rehomed onto this activity, but that rehoming had a different
+        // root cause — GlassesDisplay.find picking our own `uxspace-app-*` virtual
+        // display as "the glasses" — which is now fixed. The flag also blocks
+        // mouse / keyboard input dispatch, leading to ANRs ("Application does
+        // not have a focused window") when a BT mouse is connected. Leave it off.
+        // window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Hide the Android system pointer while it's anywhere over our window.
+        // The workspace cursor (rendered in the glasses) is the only cursor the
+        // user looks at; the on-phone pointer is just noise once raw-evdev mouse
+        // deltas drive the workspace from PrivilegedService.mouseDeltaHandler.
+        window.decorView.pointerIcon =
+            android.view.PointerIcon.getSystemIcon(this, android.view.PointerIcon.TYPE_NULL)
+
+        // Sticky-immersive fullscreen — hide the status bar and navigation /
+        // gesture bar. Two reasons:
+        //  1. The mouse cursor riding past the top or bottom edge used to land
+        //     clicks on system_server's status bar / Samsung gesture pill (those
+        //     surfaces ignore FLAG_NOT_FOCUSABLE etc. because they aren't owned
+        //     by our window). Now the area is ours and our event consumer eats
+        //     the clicks before they go anywhere.
+        //  2. The trackpad already takes the whole visible area; no reason to
+        //     give up screen real estate to system chrome the user isn't looking
+        //     at (they're looking at the glasses).
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
 
         binding.setupButton.setOnClickListener { onSetupAction() }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
@@ -111,10 +280,10 @@ class MainActivity : ComponentActivity() {
             } else false
         }
         binding.layoutButton.setOnClickListener {
-            if (WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.PINNED) {
-                Toast.makeText(this, "Unlock view to change layout", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+            // The button is grayed and isEnabled=false in PINNED via renderToolbarStates,
+            // but isEnabled toggling alone doesn't block click in all paths — keep the
+            // mode check as a belt-and-braces guard.
+            if (WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.PINNED) return@setOnClickListener
             val next = WorkspaceController.cycleLayout()
             Toast.makeText(this, "Layout: ${next.displayName}", Toast.LENGTH_SHORT).show()
         }
@@ -142,14 +311,54 @@ class MainActivity : ComponentActivity() {
             true
         }
         renderViewModeButton()
+        renderToolbarStates()
+        // DOF flips async from the head-pose thread; viewMode flips from any toggle path.
+        // Both must refresh the lock + layout buttons' enabled/alpha. Hop to main since
+        // these listeners can fire on any thread.
+        WorkspaceController.addDofListener { mainHandler.post { renderToolbarStates() } }
+        WorkspaceController.addViewModeListener {
+            mainHandler.post {
+                renderViewModeButton()
+                renderToolbarStates()
+            }
+        }
 
         binding.trackpad.onMove = { dx, dy -> WorkspaceController.moveCursor(dx, dy) }
         binding.trackpad.onTap = { WorkspaceController.click() }
-        binding.trackpad.onScroll = { dy -> WorkspaceController.scroll(dy) }
+        binding.trackpad.onTwoFingerDrag = { dx, dy ->
+            WorkspaceController.twoFingerDrag(dx, dy)
+        }
         binding.trackpad.onZoom = { scale -> WorkspaceController.pinch(scale) }
         binding.trackpad.onDragStart = { WorkspaceController.beginDrag() }
         binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
         binding.trackpad.onDragCancel = { WorkspaceController.cancelDrag() }
+        binding.trackpad.onLongPress = { WorkspaceController.longPress() }
+        // Mouse goes only through dispatchGenericMotionEvent below in absolute mode.
+        // Pointer capture would give us raw deltas (no phone-screen edge clamping),
+        // but it needs window input focus — which FLAG_NOT_FOCUSABLE denies, and
+        // that flag is non-negotiable: without it the glasses' Presentation gets
+        // rehomed onto this activity and the user sees the phone UI in the glasses.
+
+        WorkspaceController.pickWallpaperFromDevice = { desktopIdx ->
+            pendingWallpaperDesktopIdx = desktopIdx
+            // PickVisualMedia is the modern, permission-less path for picking images
+            // (Android 13+; gracefully degrades to a system picker on older OS).
+            pickWallpaperLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        }
+        WorkspaceController.openSoundOutputPicker = {
+            // Settings.Panel.ACTION_VOLUME is the documented "small panel" intent —
+            // on Android 11+ it shows the per-stream volume sliders and the system's
+            // output-device picker. Activity-context required; the panel can't host
+            // it from inside a Presentation.
+            runCatching {
+                startActivity(
+                    Intent(android.provider.Settings.Panel.ACTION_VOLUME)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
 
         // Forward IME keystrokes into the workspace drawer's search field while the drawer
         // is open, or into a focused text field on a launched app's virtual display
@@ -193,6 +402,11 @@ class MainActivity : ComponentActivity() {
         PrivilegedService.addListener(privilegeListener)
         // Watch for the glasses the whole time the panel exists — not just while resumed.
         displayManager().registerDisplayListener(displayListener, mainHandler)
+        // Gate the shell-uid hotkey monitor on physical-keyboard presence — when no
+        // keyboard is attached, the helper opens no /dev/input/event* nodes at all.
+        // BT/USB keyboards arrive as InputDevice add events on this listener.
+        inputManager().registerInputDeviceListener(keyboardPresenceListener, mainHandler)
+        refreshKeyboardPresence()
         requestNotificationPermissionIfNeeded()
         requestMicrophonePermissionIfNeeded()
         renderStatus()
@@ -224,17 +438,46 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            val dev = intent.getParcelableExtra<android.hardware.usb.UsbDevice>(UsbManager.EXTRA_DEVICE)
+            Log.i(
+                "UxSpace/Main",
+                "USB_DEVICE_ATTACHED vid=0x${"%04x".format(dev?.vendorId ?: 0)} " +
+                    "pid=0x${"%04x".format(dev?.productId ?: 0)} name=${dev?.productName}",
+            )
             syncGlasses()
+            // VITURE attach intent → force-restart tracking. This is the path the
+            // post-rescan attach comes through, where the prior SDK session was
+            // bound to a USB device the kernel just unbound; a plain retry would
+            // early-out on started=true. For non-VITURE attaches, the cheap retry
+            // is enough (covers the original DisplayPort-before-IMU race).
+            if (dev?.vendorId == VITURE_VENDOR_ID) presentation?.restartHeadTracking()
+            else presentation?.retryHeadTracking()
         }
     }
 
     private fun toggleViewMode() {
+        if (!WorkspaceController.headTrackingActive) return
         val next = when (WorkspaceController.currentViewMode) {
             WorkspaceRenderer.ViewMode.PINNED -> WorkspaceRenderer.ViewMode.FREE
             WorkspaceRenderer.ViewMode.FREE -> WorkspaceRenderer.ViewMode.PINNED
         }
         WorkspaceController.setViewMode(next)
         renderViewModeButton()
+    }
+
+    /**
+     * Refresh enabled/alpha of the buttons that depend on DOF availability and view
+     * mode. Lock toggle requires DOF (FREE makes no sense without head tracking);
+     * Layout button only does something in FREE (PINNED forces SINGLE). Called from
+     * the WorkspaceController listeners and on resume.
+     */
+    private fun renderToolbarStates() {
+        val tracking = WorkspaceController.headTrackingActive
+        val free = WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.FREE
+        binding.viewModeButton.isEnabled = tracking
+        binding.viewModeButton.alpha = if (tracking) 1f else DISABLED_ALPHA
+        binding.layoutButton.isEnabled = free
+        binding.layoutButton.alpha = if (free) 1f else DISABLED_ALPHA
     }
 
     private fun renderViewModeButton() {
@@ -321,11 +564,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         displayManager().unregisterDisplayListener(displayListener)
+        runCatching { inputManager().unregisterInputDeviceListener(keyboardPresenceListener) }
         presentation?.dismiss()
         presentation = null
         setWorkspaceServiceRunning(false)
         PrivilegedService.removeListener(privilegeListener)
         WorkspaceController.removeZoomListener(zoomHudListener)
+        if (WorkspaceController.pickWallpaperFromDevice != null) {
+            WorkspaceController.pickWallpaperFromDevice = null
+        }
+        if (WorkspaceController.openSoundOutputPicker != null) {
+            WorkspaceController.openSoundOutputPicker = null
+        }
         super.onDestroy()
     }
 
@@ -380,8 +630,27 @@ class MainActivity : ComponentActivity() {
     private var workspaceServiceRunning = false
     private fun setWorkspaceServiceRunning(running: Boolean) {
         if (running == workspaceServiceRunning) return
-        workspaceServiceRunning = running
-        if (running) WorkspaceService.start(this) else WorkspaceService.stop(this)
+        if (running) {
+            // Android 12+ throws ForegroundServiceStartNotAllowedException if the
+            // activity isn't in the foreground when the call fires — this happens
+            // when the glasses are plugged in while the user is on another app.
+            // Swallow it: onResume will re-run syncGlasses and try again from the
+            // foreground state where it succeeds.
+            try {
+                WorkspaceService.start(this)
+                workspaceServiceRunning = true
+            } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                Log.w(
+                    "UxSpace/Main",
+                    "WorkspaceService start deferred — activity not in foreground (${e.message})",
+                )
+            } catch (e: Exception) {
+                Log.e("UxSpace/Main", "WorkspaceService start failed", e)
+            }
+        } else {
+            workspaceServiceRunning = false
+            runCatching { WorkspaceService.stop(this) }
+        }
     }
 
     /**
@@ -514,6 +783,68 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * BT mouse → workspace. The cursor + clicks are driven via the privileged
+     * helper's raw evdev path (no phone-edge clamping); only the wheel still
+     * needs this `dispatchGenericMotionEvent` route — `ACTION_SCROLL` has no
+     * clean evdev equivalent and the system already delivers it correctly,
+     * including the modifier state used by Ctrl+Alt+Wheel zoom. Every other
+     * mouse event is consumed (`return true`) so it doesn't double-fire on
+     * the trackpad view or any phone-side UI.
+     *
+     * (Pointer capture would have given us raw deltas directly, but it needs
+     * window focus, and `FLAG_NOT_FOCUSABLE` is non-negotiable here — without
+     * it the glasses' Presentation gets rehomed onto this activity.)
+     */
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            @Suppress("ConstantConditionIf")
+            if (MOUSE_VERBOSE_LOGS && mouseDiagFrameCount < 8) {
+                Log.i(
+                    "UxSpace/Mouse",
+                    "uncaptured ev action=${ev.actionMasked} src=0x${Integer.toHexString(ev.source)} " +
+                        "x=${ev.x} y=${ev.y}",
+                )
+                mouseDiagFrameCount++
+            }
+            handleMouseEvent(ev)
+            return true
+        }
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    /**
+     * Swallow mouse-as-touch events too — once the wheel works through
+     * [dispatchGenericMotionEvent], we don't want the trackpad view to treat a
+     * mouse click as a finger tap. Touchscreen events are passed through.
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) return true
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun handleMouseEvent(ev: MotionEvent) {
+        if (ev.actionMasked == MotionEvent.ACTION_SCROLL) {
+            val v = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            if (v == 0f) return
+            val ctrlAlt = KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON
+            if ((ev.metaState and ctrlAlt) == ctrlAlt) {
+                // Ctrl+Alt+Wheel → workspace zoom (matches the Windows companion's
+                // combo). Was Win+Shift originally; switched because Samsung One UI
+                // hard-binds Meta to the launcher.
+                val factor = if (v > 0) 1f + v * MOUSE_ZOOM_GAIN
+                             else        1f / (1f - v * MOUSE_ZOOM_GAIN)
+                WorkspaceController.pinch(factor)
+            } else {
+                WorkspaceController.scroll(v * MOUSE_SCROLL_GAIN)
+            }
+        }
+        // All other mouse events (HOVER_MOVE, MOVE, BUTTON_PRESS / RELEASE) fall
+        // through to the dispatchGenericMotionEvent `return true` consumer — they
+        // arrive twice for events the helper missed (no EVIOCGRAB), but we never
+        // ACT on them here. Cursor motion + clicks happen via the raw-evdev path.
+    }
+
     private companion object {
         /** Settings preference key for the Wireless Debugging row in Developer Options. */
         const val WIRELESS_DEBUGGING_PREF_KEY = "toggle_adb_wireless"
@@ -524,5 +855,27 @@ class MainActivity : ComponentActivity() {
 
         /** How long the trackpad's zoom HUD lingers after the last zoom event. */
         const val ZOOM_HUD_HIDE_MS = 1200L
+
+        /** Alpha applied to phone-side toolbar buttons whose action isn't currently
+         *  available (Lock toggle without DOF, Layout toggle in PINNED). */
+        const val DISABLED_ALPHA = 0.35f
+
+        /** USB Vendor ID assigned to VITURE Technology — used in [onNewIntent] to
+         *  tell a glasses USB attach apart from any other device's attach. */
+        const val VITURE_VENDOR_ID = 0x35ca
+
+        /** Delay between a real keyboard appearing and the proactive glasses USB
+         *  rescan. ~1.5s lets the BT pairing's peak USB churn finish before we
+         *  rebind, so the rebind doesn't race against the disruption itself. */
+        const val KEYBOARD_CONNECT_RESCAN_MS = 1_500L
+
+        /** Mouse-wheel notch → workspace-scroll fraction. */
+        const val MOUSE_SCROLL_GAIN = 0.08f
+
+        /** Ctrl+Alt+Wheel: zoom multiplier per notch (1 notch up = ×1.10, down = ÷1.10). */
+        const val MOUSE_ZOOM_GAIN = 0.10f
+
+        /** Flip to true while triaging mouse plumbing; otherwise spam-free. */
+        const val MOUSE_VERBOSE_LOGS = false
     }
 }

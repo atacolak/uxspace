@@ -1,0 +1,12 @@
+<!-- Horizontal double-arrow ← → for E/W edge resize cursor. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="0.6"
+        android:pathData="M2,12 L8,7 L8,11 L16,11 L16,7 L22,12 L16,17 L16,13 L8,13 L8,17 Z" />
+</vector>

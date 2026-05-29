@@ -1,7 +1,11 @@
 package com.uxspace.desktop
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
@@ -38,6 +42,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val adapter = AppGridAdapter()
     private val search: EditText
+    private val grid: GridView
     private val allAppsTab: TextView
     private val recentTab: TextView
 
@@ -72,7 +77,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
             )
         }
 
-        val grid = GridView(context).apply {
+        grid = GridView(context).apply {
             numColumns = DRAWER_COLUMNS
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
             verticalSpacing = dp(8)
@@ -117,6 +122,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
         super.onAttachedToWindow()
         WorkspaceController.onDrawerSearchQuery = searchQueryListener
         WorkspaceController.addDrawerModeListener(modeChangedListener)
+        registerDragLookup()
     }
 
     override fun onDetachedFromWindow() {
@@ -124,6 +130,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
             WorkspaceController.onDrawerSearchQuery = null
         }
         WorkspaceController.removeDrawerModeListener(modeChangedListener)
+        unregisterDragLookup()
         super.onDetachedFromWindow()
     }
 
@@ -135,7 +142,75 @@ class DrawerView(context: Context) : LinearLayout(context) {
         // the controller held a different (stale) mode.
         if (changedView === this && visibility == VISIBLE) {
             applyMode(WorkspaceController.drawerMode)
+            registerDragLookup()
+        } else if (changedView === this && visibility != VISIBLE) {
+            unregisterDragLookup()
         }
+    }
+
+    /**
+     * While this drawer is visible, expose a slot-pixel → grid-item lookup so the
+     * renderer can arm a drag-from-drawer when the cursor press-and-holds on a cell.
+     * Only one drawer is ever visible at a time (modal exclusivity is owned by
+     * [WorkspaceController]), so a single global hook is enough.
+     */
+    private val dragLookup: (Int, Int) -> WorkspaceController.ArmedDrag? = { slotPx, slotPy ->
+        appAtSlotPx(slotPx, slotPy)?.let { app ->
+            WorkspaceController.ArmedDrag(
+                packageName = app.packageName,
+                activityName = app.activityName,
+                label = app.label,
+                iconBitmap = app.icon.toBitmap(),
+            )
+        }
+    }
+
+    private fun registerDragLookup() {
+        WorkspaceController.drawerItemAt = dragLookup
+        android.util.Log.i(
+            "UxSpace/DrawerDrag",
+            "DrawerView.registerDragLookup attached=$isAttachedToWindow vis=${visibility} bounds=(L=$left T=$top W=$width H=$height) grid=(L=${grid.left} T=${grid.top} W=${grid.width} H=${grid.height}) items=${adapter.count}",
+        )
+    }
+
+    private fun unregisterDragLookup() {
+        if (WorkspaceController.drawerItemAt === dragLookup) {
+            WorkspaceController.drawerItemAt = null
+            android.util.Log.i("UxSpace/DrawerDrag", "DrawerView.unregisterDragLookup")
+        }
+    }
+
+    /**
+     * Map a slot-local pixel (cursor projected onto the slot's surface) to the drawer
+     * grid item under it. Walks the slot → DrawerView → GridView coordinate chain by
+     * subtracting view offsets; the GridView's own `pointToPosition` finds the cell.
+     * Returns null when the cursor is outside the drawer or not over a cell.
+     */
+    private fun appAtSlotPx(slotPx: Int, slotPy: Int): InstalledApp? {
+        val drawerX = slotPx - left
+        val drawerY = slotPy - top
+        if (drawerX < 0 || drawerY < 0 || drawerX >= width || drawerY >= height) return null
+        val gridX = drawerX - grid.left
+        val gridY = drawerY - grid.top
+        if (gridX < 0 || gridY < 0 || gridX >= grid.width || gridY >= grid.height) return null
+        val pos = grid.pointToPosition(gridX, gridY)
+        if (pos < 0 || pos >= adapter.count) return null
+        return adapter.getItem(pos) as? InstalledApp
+    }
+
+    private fun Drawable.toBitmap(): Bitmap {
+        if (this is BitmapDrawable) {
+            bitmap?.let { return it }
+        }
+        val w = intrinsicWidth.takeIf { it > 0 } ?: DRAG_ICON_PX
+        val h = intrinsicHeight.takeIf { it > 0 } ?: DRAG_ICON_PX
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val prev = copyBounds()
+        setBounds(0, 0, w, h)
+        draw(c)
+        bounds = prev
+        return bmp
     }
 
     private fun applyMode(mode: WorkspaceController.DrawerMode) {
@@ -272,5 +347,8 @@ class DrawerView(context: Context) : LinearLayout(context) {
         const val TAB_ACTIVE = 0xFF1A1B1F.toInt()
         const val TAB_INACTIVE = 0xFF9A9CA3.toInt()
         const val HINT_COLOR = 0xFF8A8C93.toInt()
+
+        /** Fallback rasterisation size for an app icon with no intrinsic dims. */
+        const val DRAG_ICON_PX = 192
     }
 }
