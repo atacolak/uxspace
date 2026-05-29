@@ -690,6 +690,15 @@ class SettingsView(context: Context) : LinearLayout(context) {
 
     private fun buildTaskbarTab(): View = LinearLayout(context).apply {
         orientation = VERTICAL
+        addView(sectionLabel("Behavior"))
+        addView(
+            backedToggleRow(
+                label = "Auto-hide",
+                current = WorkspaceSettings.taskbarAutoHide(),
+            ) { WorkspaceSettings.setTaskbarAutoHide(it) },
+        )
+        addView(spacer(dp(14)))
+
         addView(sectionLabel("Tray indicators"))
         addView(
             backedToggleRow(

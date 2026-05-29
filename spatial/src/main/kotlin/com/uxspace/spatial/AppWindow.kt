@@ -88,15 +88,6 @@ class AppWindow(
     private var restoreBounds: IntArray? = null
 
     /**
-     * Auto-hide deadline (uptimeMillis) for the fullscreen floating chrome
-     * toolbar. Each frame where the cursor sits in the slot's top hover zone
-     * bumps this to `now + CHROME_HOVER_HOLD_MS`; while `chromeShownUntilMs > now`
-     * the renderer composites the toolbar over the activity. Always 0 in NORMAL /
-     * MAXIMIZED — those modes keep the chrome strip visible unconditionally.
-     */
-    var chromeShownUntilMs: Long = 0L
-
-    /**
      * Current direct-manipulation state. [Interaction.Idle] when the window is
      * just sitting there; later phases of the window framework add
      * `Dragging(grabOffset)` (chrome press-and-hold) and `Resizing(edge)`
@@ -221,21 +212,6 @@ class AppWindow(
          * no slack. Slot density is 200 dpi, so 4 × 48 dp = 192 dp = 240 px.
          */
         const val FULLSCREEN_TOOLBAR_WIDTH_PX = 240
-
-        /**
-         * How long after the cursor last sat in the fullscreen hover zone the
-         * floating chrome stays visible before auto-hiding. 3 s = enough time
-         * to move from the hover band to the close button.
-         */
-        const val CHROME_HOVER_HOLD_MS = 3000L
-
-        /**
-         * Top band of the slot (in slot-local pixels) where cursor presence
-         * counts as "hover" for the floating chrome. Generous (160 px ≈ 15% of
-         * a 1080-tall slot) so the cursor doesn't need pixel-perfect aim — the
-         * toolbar wakes well before the cursor reaches the toolbar itself.
-         */
-        const val CHROME_HOVER_ZONE_PX = 160
 
         /**
          * Outer window bounds `[x, y, width, height]` (slot-local pixels) for a window

@@ -48,6 +48,7 @@ object WorkspaceSettings {
     private const val KEY_SHOW_TASKBAR_VOLUME = "show_taskbar_volume"
     private const val KEY_CLOCK_USE_24H = "clock_use_24h"
     private const val KEY_SHOW_TASKBAR_DATE = "show_taskbar_date"
+    private const val KEY_TASKBAR_AUTO_HIDE = "taskbar_auto_hide"
 
     const val DEFAULT_MAX_WINDOWS_PER_SLOT = 5
     const val DEFAULT_RECORDING_FRAME_INTERVAL = 12
@@ -219,6 +220,11 @@ object WorkspaceSettings {
     fun showTaskbarDate(): Boolean =
         if (::prefs.isInitialized) prefs.getBoolean(KEY_SHOW_TASKBAR_DATE, true) else true
     fun setShowTaskbarDate(v: Boolean) = putBoolean(KEY_SHOW_TASKBAR_DATE, v)
+
+    /** When true, the taskbar hides on idle and reappears while the cursor sits over the slot's bottom band. */
+    fun taskbarAutoHide(): Boolean =
+        if (::prefs.isInitialized) prefs.getBoolean(KEY_TASKBAR_AUTO_HIDE, false) else false
+    fun setTaskbarAutoHide(v: Boolean) = putBoolean(KEY_TASKBAR_AUTO_HIDE, v)
 
     /** Density-DPI used when creating a per-app trusted VirtualDisplay. */
     fun appDisplayDpi(): Int =

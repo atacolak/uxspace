@@ -222,9 +222,27 @@ class DesktopPresentation(
                     contextMenu?.let { root.removeView(it) }
                     val menu = buildContextMenu()
                     contextMenu = menu
+                    // Measure first so we can flip / clamp the position to keep the
+                    // whole menu on-screen — without this, a click near the bottom
+                    // or right edge crops the menu. Falls back to displayMetrics
+                    // if root hasn't been laid out yet.
+                    val unspecified = View.MeasureSpec.makeMeasureSpec(
+                        0, View.MeasureSpec.UNSPECIFIED,
+                    )
+                    menu.measure(unspecified, unspecified)
+                    val menuW = menu.measuredWidth
+                    val menuH = menu.measuredHeight
+                    val rootW = if (root.width > 0) root.width
+                        else context.resources.displayMetrics.widthPixels
+                    val rootH = if (root.height > 0) root.height
+                        else context.resources.displayMetrics.heightPixels
+                    val x = pxX.toInt()
+                    val y = pxY.toInt()
+                    val left = if (x + menuW <= rootW) x else (x - menuW).coerceAtLeast(0)
+                    val top = if (y + menuH <= rootH) y else (y - menuH).coerceAtLeast(0)
                     val lp = FrameLayout.LayoutParams(WRAP, WRAP).apply {
-                        leftMargin = pxX.toInt()
-                        topMargin = pxY.toInt()
+                        leftMargin = left.coerceAtMost((rootW - menuW).coerceAtLeast(0))
+                        topMargin = top.coerceAtMost((rootH - menuH).coerceAtLeast(0))
                     }
                     root.addView(menu, lp)
                 } else {
@@ -527,6 +545,7 @@ class DesktopPresentation(
         WorkspaceController.addContextMenuStateListener(contextMenuStateListener)
         WorkspaceController.addWindowBoundsListener(windowBoundsListener)
         WorkspaceController.addSnapPreviewListener(snapPreviewListener)
+        WorkspaceController.addTaskbarHoverListener(taskbarHoverListener)
         DesktopWallpaperStore.addChangeListener(wallpaperListener)
         WorkspaceSettings.addChangeListener(taskbarSettingsListener)
     }
@@ -540,8 +559,10 @@ class DesktopPresentation(
         WorkspaceController.removeContextMenuStateListener(contextMenuStateListener)
         WorkspaceController.removeWindowBoundsListener(windowBoundsListener)
         WorkspaceController.removeSnapPreviewListener(snapPreviewListener)
+        WorkspaceController.removeTaskbarHoverListener(taskbarHoverListener)
         DesktopWallpaperStore.removeChangeListener(wallpaperListener)
         WorkspaceSettings.removeChangeListener(taskbarSettingsListener)
+        mainHandler.removeCallbacks(taskbarHideRunnable)
         super.onDetachedFromWindow()
     }
 
@@ -1055,8 +1076,12 @@ class DesktopPresentation(
         // Global "show taskbar" off → the whole container hides regardless of
         // per-slot showTaskbar (which is the layout-baked default).
         val globalOn = WorkspaceSettings.showTaskbar()
-        taskbarContainer?.visibility =
-            if (globalOn && showTaskbar) View.VISIBLE else View.GONE
+        val baseVisible = globalOn && showTaskbar
+        val autoHide = WorkspaceSettings.taskbarAutoHide()
+        val effectiveVisible = if (!autoHide) baseVisible else {
+            baseVisible && android.os.SystemClock.uptimeMillis() < taskbarShownUntilMs
+        }
+        taskbarContainer?.visibility = if (effectiveVisible) View.VISIBLE else View.GONE
         if (::clock.isInitialized) {
             clock.visibility = if (WorkspaceSettings.showTaskbarClock()) View.VISIBLE else View.GONE
             clock.text = clockText()
@@ -1069,6 +1094,36 @@ class DesktopPresentation(
         mainHandler.post { applyTaskbarSettings() }
     }
 
+    /**
+     * Auto-hide taskbar state — deadline (uptimeMillis) until which the bar stays
+     * visible after the cursor last sat in the bottom hover band. While hovering,
+     * the renderer keeps bumping this via [taskbarHoverListener]; when the cursor
+     * leaves, [taskbarHideRunnable] is posted to re-evaluate visibility right when
+     * the hold expires (no per-frame polling needed).
+     */
+    private var taskbarShownUntilMs: Long = 0L
+    private val taskbarHideRunnable = Runnable { applyTaskbarSettings() }
+
+    private val taskbarHoverListener: (Int, Boolean) -> Unit = { hoverSlot, hovering ->
+        if (hoverSlot == slotIdx) {
+            mainHandler.post {
+                if (!WorkspaceSettings.taskbarAutoHide()) return@post
+                mainHandler.removeCallbacks(taskbarHideRunnable)
+                if (hovering) {
+                    // While hovering, hold the bar visible far in the future — the
+                    // next leave event will set the actual fade-out deadline.
+                    taskbarShownUntilMs = Long.MAX_VALUE
+                    applyTaskbarSettings()
+                } else {
+                    val deadline = android.os.SystemClock.uptimeMillis() + TASKBAR_HOVER_HOLD_MS
+                    taskbarShownUntilMs = deadline
+                    mainHandler.postAtTime(taskbarHideRunnable, deadline + 1)
+                    applyTaskbarSettings()
+                }
+            }
+        }
+    }
+
     private companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1077,11 +1132,18 @@ class DesktopPresentation(
         const val CLOCK_INTERVAL_MS = 20_000L
 
         /**
-         * Height of the window-chrome bar in dp. Mirrored on the renderer side as
-         * `CHROME_HEIGHT_PX` (computed with the slot Presentation's density 200) so the
-         * cursor-region check picks the same band on the slot's surface texture.
+         * Auto-hide hold time after the cursor leaves the slot's bottom hover band —
+         * long enough to keep the bar present while the user moves between buttons,
+         * short enough that it tucks away soon after the user moves on.
          */
-        const val CHROME_HEIGHT_DP = 26
+        const val TASKBAR_HOVER_HOLD_MS = 1500L
+
+        /**
+         * Height of the window-chrome bar in dp. Mirrored on the renderer side as
+         * `WINDOW_CHROME_PX` (computed with the slot Presentation's density 200) so the
+         * activity quad and chrome rect align on the slot's surface texture.
+         */
+        const val CHROME_HEIGHT_DP = 39
 
         /**
          * Window-frame thickness in slot-local pixels — drawn as a colour ring

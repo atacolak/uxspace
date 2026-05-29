@@ -567,6 +567,26 @@ object WorkspaceController {
     }
 
     /**
+     * Per-slot taskbar-hover edge: fires from the renderer when the cursor enters or
+     * leaves the slot's bottom hover band. Used by each slot's
+     * [com.uxspace.desktop.DesktopPresentation] to drive the taskbar's auto-hide.
+     */
+    private val taskbarHoverListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(slotIdx: Int, hovering: Boolean) -> Unit>()
+
+    fun addTaskbarHoverListener(listener: (slotIdx: Int, hovering: Boolean) -> Unit) {
+        taskbarHoverListeners.add(listener)
+    }
+
+    fun removeTaskbarHoverListener(listener: (slotIdx: Int, hovering: Boolean) -> Unit) {
+        taskbarHoverListeners.remove(listener)
+    }
+
+    internal fun notifyTaskbarHover(slotIdx: Int, hovering: Boolean) {
+        taskbarHoverListeners.forEach { runCatching { it(slotIdx, hovering) } }
+    }
+
+    /**
      * Bounds of the modal panel (drawer or settings) inside a slot, in slot-local
      * pixels. The drawer + settings panels share the same centred size, so a single
      * payload covers both — the renderer uses it to sample the slot's Presentation

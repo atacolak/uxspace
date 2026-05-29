@@ -673,6 +673,22 @@ class WorkspaceRenderer(
         lastInputAtMs = android.os.SystemClock.uptimeMillis()
     }
 
+    /** Per-slot cache of the last cursor-in-bottom-band state, so the renderer only
+     *  fires [WorkspaceController.notifyTaskbarHover] on edge transitions. Grows on
+     *  demand as slot indices appear; sparsely keyed because layouts have at most a
+     *  handful of slots. Read / written only on the GL thread. */
+    private var taskbarHoverPrevArr: BooleanArray = BooleanArray(0)
+
+    private fun taskbarHoverPrev(slotIdx: Int): Boolean =
+        slotIdx < taskbarHoverPrevArr.size && taskbarHoverPrevArr[slotIdx]
+
+    private fun setTaskbarHoverPrev(slotIdx: Int, value: Boolean) {
+        if (slotIdx >= taskbarHoverPrevArr.size) {
+            taskbarHoverPrevArr = taskbarHoverPrevArr.copyOf((slotIdx + 1).coerceAtLeast(4))
+        }
+        taskbarHoverPrevArr[slotIdx] = value
+    }
+
     /**
      * Force-stop every launched app — called when the workspace is torn down (the glasses
      * are unplugged), so the apps close instead of being relocated onto the phone's screen.
@@ -849,6 +865,15 @@ class WorkspaceRenderer(
                 Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
                 drawExternalQuad(d.textureId, d.textureMatrix)
             }
+            // Auto-hide taskbar: per-slot hover edge — fire only on transitions so
+            // DesktopPresentation gets one event per enter/leave, not 60/sec.
+            val cursorPx = cursorToRectPx(screen)
+            val hovering = cursorPx != null &&
+                cursorPx[1] >= (screen.contentHeightPx - TASKBAR_HOVER_ZONE_PX)
+            if (hovering != taskbarHoverPrev(i)) {
+                setTaskbarHoverPrev(i, hovering)
+                WorkspaceController.notifyTaskbarHover(i, hovering)
+            }
         }
 
         // App-window pass — each launched activity is a separate trusted display sampled
@@ -856,7 +881,6 @@ class WorkspaceRenderer(
         // window quads are at the same world Z; we just disabled depth test above so the
         // later-drawn window pixels win. Minimised windows skip the draw but keep their
         // texture updates so restore is instant.
-        val frameNowMs = android.os.SystemClock.uptimeMillis()
         // Modal-state snapshot — these don't change during a frame and are read once
         // per window in the loop below. Avoid the volatile reads on the inner path.
         val drawerOpen = WorkspaceController.isDrawerOpen
@@ -886,36 +910,20 @@ class WorkspaceRenderer(
                 drawExternalQuad(window.ui.textureId, window.ui.textureMatrix)
             }
 
-            // Fullscreen floating chrome — extend the toolbar's visible deadline
-            // whenever the cursor sits in the slot's top hover band, then overlay
-            // the chrome rect on top of the activity quad while the deadline hasn't
-            // elapsed. The chrome view itself lives in the slot's Presentation,
-            // already laid out at chromeOverlayRect, so we just re-sample that
-            // sub-region of the slot texture — same trick as drawSlotModalOverlay.
+            // Fullscreen floating chrome — always overlaid on top of the activity
+            // quad. The chrome view itself lives in the slot's Presentation, already
+            // laid out at chromeOverlayRect, so we just re-sample that sub-region of
+            // the slot texture — same trick as drawSlotModalOverlay.
             if (window.mode == WorkspaceController.WindowMode.FULLSCREEN) {
-                val cursorPx = cursorToRectPx(slotScreen)
-                if (cursorPx != null && cursorPx[1] < AppWindow.CHROME_HOVER_ZONE_PX) {
-                    val wasHidden = frameNowMs >= window.chromeShownUntilMs
-                    window.chromeShownUntilMs = frameNowMs + AppWindow.CHROME_HOVER_HOLD_MS
-                    if (wasHidden) {
-                        Log.i(
-                            TAG,
-                            "fullscreen chrome wakes: pkg=${window.packageName} " +
-                                "py=${cursorPx[1].toInt()} zone=${AppWindow.CHROME_HOVER_ZONE_PX}",
-                        )
-                    }
-                }
-                if (frameNowMs < window.chromeShownUntilMs) {
-                    val slotUi = if (window.slotIdx == 0) desktop
-                    else extraScreens.getOrNull(window.slotIdx - 1)
-                    if (slotUi != null) {
-                        val cr = window.chromeOverlayRect(slotScreen.contentWidthPx)
-                        drawSlotModalOverlay(
-                            slotScreen,
-                            slotUi,
-                            WorkspaceController.ModalBounds(cr[0], cr[1], cr[2], cr[3]),
-                        )
-                    }
+                val slotUi = if (window.slotIdx == 0) desktop
+                else extraScreens.getOrNull(window.slotIdx - 1)
+                if (slotUi != null) {
+                    val cr = window.chromeOverlayRect(slotScreen.contentWidthPx)
+                    drawSlotModalOverlay(
+                        slotScreen,
+                        slotUi,
+                        WorkspaceController.ModalBounds(cr[0], cr[1], cr[2], cr[3]),
+                    )
                 }
             }
 
@@ -1514,28 +1522,6 @@ class WorkspaceRenderer(
             val slot = layout.screens.getOrNull(window.slotIdx) ?: return@add
             window.setState(nextMode, slot.contentWidthPx, slot.contentHeightPx, WINDOW_TASKBAR_PX)
             notifyWindowBoundsForSlot(window.slotIdx)
-            // After entering FULLSCREEN, generously hold the floating chrome
-            // visible so the user can find it. The first bump fires now on
-            // the GL thread, but the slot Presentation's chrome view is still
-            // re-laying out (main thread, posted) into its new floating bounds
-            // — so the first few frames sample stale pixels from the old
-            // chrome strip. Post a second bump 250 ms later (on the main
-            // thread, then back to GL via glTasks) so the visibility window
-            // straddles the layout pass; the user reliably gets ~3 s of fresh
-            // toolbar content after the layout settles.
-            if (window.mode == WorkspaceController.WindowMode.FULLSCREEN) {
-                val nowMs = android.os.SystemClock.uptimeMillis()
-                window.chromeShownUntilMs = nowMs + FULLSCREEN_INITIAL_SHOW_MS
-                mainHandler.postDelayed({
-                    glTasks.add {
-                        window.chromeShownUntilMs =
-                            android.os.SystemClock.uptimeMillis() +
-                                FULLSCREEN_INITIAL_SHOW_MS
-                    }
-                }, 250L)
-            } else {
-                window.chromeShownUntilMs = 0L
-            }
             Log.i(TAG, "toggleMaximizeWindow: $packageName -> mode=${window.mode}")
         }
     }
@@ -2490,9 +2476,8 @@ class WorkspaceRenderer(
         // then scaled up to the bare display's dims — that handles FULLSCREEN
         // (activity rect = full slot, bare display still its launch-time size)
         // and NORMAL / MAXIMIZED (activity rect == bare display dims) with one
-        // formula. The chrome rect is the floating toolbar in FULLSCREEN (only
-        // active while the hover-driven shown deadline hasn't elapsed) or the
-        // full-width strip otherwise.
+        // formula. The chrome rect is the floating toolbar in FULLSCREEN or the
+        // full-width strip otherwise — always present.
         if (!anyModalOpen) {
             val window = windowOnSlotAt(screenIdx, px[0], px[1])
             val winDisplayId = window?.displayId
@@ -2506,24 +2491,10 @@ class WorkspaceRenderer(
                 val inChrome =
                     px[0] >= cr[0] && px[0] < cr[0] + cr[2] &&
                         px[1] >= cr[1] && px[1] < cr[1] + cr[3]
-                val chromeActive =
-                    window.mode != WorkspaceController.WindowMode.FULLSCREEN ||
-                        android.os.SystemClock.uptimeMillis() < window.chromeShownUntilMs
-                if (inChrome && chromeActive) {
+                if (inChrome) {
                     // Chrome hit — fall through to the slot's Presentation
                     // dispatchTap so the ImageButtons receive the click in-process.
                 } else {
-                    // Activity click in FULLSCREEN collapses the floating
-                    // toolbar — but only when the click is clearly *below*
-                    // the chrome's hover band. A click in the top zone is
-                    // where the user goes to *reach* the chrome; dismissing
-                    // it on the way up would make the toolbar look like it
-                    // flickered, not auto-showed.
-                    if (window.mode == WorkspaceController.WindowMode.FULLSCREEN &&
-                        px[1] >= AppWindow.CHROME_HOVER_ZONE_PX
-                    ) {
-                        window.chromeShownUntilMs = 0L
-                    }
                     val act = window.activityRect()
                     val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
                     val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
@@ -2609,10 +2580,7 @@ class WorkspaceRenderer(
                 val inChrome =
                     px[0] >= cr[0] && px[0] < cr[0] + cr[2] &&
                         px[1] >= cr[1] && px[1] < cr[1] + cr[3]
-                val chromeActive =
-                    window.mode != WorkspaceController.WindowMode.FULLSCREEN ||
-                        android.os.SystemClock.uptimeMillis() < window.chromeShownUntilMs
-                if (!(inChrome && chromeActive)) {
+                if (!inChrome) {
                     val act = window.activityRect()
                     val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
                     val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
@@ -3533,15 +3501,22 @@ class WorkspaceRenderer(
         const val CURSOR_LOG_EVERY = 8
 
         /**
-         * Vertical pixel band along the bottom of a slot reserved for the
          * Window placement bands inside a slot (slot's pixel coords): the activity quad
          * occupies the slot minus a chrome strip at the top and the taskbar strip at the
-         * bottom. Chrome ≈ `DesktopPresentation.CHROME_HEIGHT_DP` (36 dp) at the slot's
-         * DENSITY_DPI=200 (≈45 px); taskbar ≈ dp(58) at the same density (≈73 px). The
+         * bottom. Chrome ≈ `DesktopPresentation.CHROME_HEIGHT_DP` (39 dp) at the slot's
+         * DENSITY_DPI=200 (≈49 px); taskbar ≈ dp(58) at the same density (≈73 px). The
          * window quad is sized to hug right up against both bands.
          */
-        const val WINDOW_CHROME_PX = 32
+        const val WINDOW_CHROME_PX = 48
         const val WINDOW_TASKBAR_PX = 73
+
+        /**
+         * Bottom band of the slot (in slot-local pixels) where cursor presence counts
+         * as "hover" for the auto-hide taskbar — fairly generous (200 ≈ 17% of a
+         * 1200-tall slot) so the taskbar reveals before the cursor reaches the bar
+         * itself, giving the slide-in a moment to play.
+         */
+        const val TASKBAR_HOVER_ZONE_PX = 200
 
         /**
          * Slot-bottom band that's treated as "the taskbar zone" when resolving a
@@ -3577,13 +3552,6 @@ class WorkspaceRenderer(
          * → TILED_LEFT; `x > slotW - SNAP_EDGE_PX` → TILED_RIGHT.
          */
         const val SNAP_EDGE_PX = 40
-
-        /**
-         * Initial show duration for the floating chrome toolbar after entering
-         * FULLSCREEN — longer than the hover-hold window so the user has time
-         * to spot the toolbar before it auto-hides waiting for hover.
-         */
-        const val FULLSCREEN_INITIAL_SHOW_MS = 5000L
 
         /**
          * Retry budget for waiting on a window's bare trusted display id after

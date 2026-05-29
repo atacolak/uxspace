@@ -239,12 +239,13 @@ class WindowChromeView(context: Context) : FrameLayout(context) {
 
         /**
          * Chrome button size in dp. Height is intentionally smaller than the
-         * chrome strip (36 dp tall) so the parent LinearLayout's CENTER
-         * gravity has slack to vertically centre the button. Width matches
-         * the prior button size so the four-button row still totals to the
-         * fullscreen toolbar's [AppWindow.FULLSCREEN_TOOLBAR_WIDTH_PX].
+         * chrome strip ([DesktopPresentation.CHROME_HEIGHT_DP] tall) so the
+         * parent LinearLayout's CENTER gravity has slack to vertically centre
+         * the button. Width matches the prior button size so the four-button
+         * row still totals to the fullscreen toolbar's
+         * [AppWindow.FULLSCREEN_TOOLBAR_WIDTH_PX].
          */
         const val BUTTON_WIDTH_DP = 48
-        const val BUTTON_HEIGHT_DP = 20
+        const val BUTTON_HEIGHT_DP = 30
     }
 }
