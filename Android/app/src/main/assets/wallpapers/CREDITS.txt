@@ -1,21 +1,32 @@
-Bundled workspace wallpapers — NASA imagery (public domain)
-===========================================================
+Bundled workspace wallpapers — credits & licenses
+==================================================
 
-Source: NASA Scientific Visualization Studio — "Cosmic Wallpapers"
-        https://svs.gsfc.nasa.gov/14866
+High-resolution public astronomy imagery, downscaled to <=3840 px and
+re-encoded to JPEG for bundling. Originals are larger; see the URLs below.
 
-NASA media are generally not copyrighted and may be used for any purpose
-(see NASA's media usage guidelines). Mission/instrument credit, where known:
+  nasa_whirlpool.jpg   Whirlpool Galaxy (M51)
+      NASA, ESA, S. Beckwith (STScI) & the Hubble Heritage Team (STScI/AURA)
+      ESA/Hubble — https://esahubble.org/images/heic0506a/   (CC BY 4.0)
 
-  nasa_whirlpool.jpg    Whirlpool Galaxy (M51)                NASA
-  nasa_rosette.jpg      Rosette Nebula                        NASA / WISE
-  nasa_arp142.jpg       Arp 142 (the Penguin & the Egg)       NASA, ESA, CSA (JWST)
-  nasa_m81_m82.jpg      Messier 81 & Messier 82               NASA
-  nasa_cepheus.jpg      Cepheus B & C                         NASA / JPL-Caltech (Spitzer)
-  nasa_w39.jpg          W39 star-forming region               NASA / JPL-Caltech (Spitzer, WISE)
-  nasa_ngc1929.jpg      NGC 1929                              NASA (Spitzer, Chandra, ESO)
-  nasa_cw_leonis.jpg    CW Leonis                             NASA (GALEX)
-  nasa_tess_southern.jpg TESS Southern Sky (Sector 12)        NASA
+  nasa_rosette.jpg     Rosette Nebula (DECam)
+      KPNO/NOIRLab/NSF/AURA; processing T.A. Rector, M. Zamani & D. de Martin
+      NOIRLab — https://noirlab.edu/public/images/noirlab2424a/   (CC BY 4.0)
 
-Images were downscaled/re-encoded to JPEG for bundling; originals are at the
-URL above. NASA does not endorse this project.
+  nasa_arp142.jpg      Interacting galaxies Arp 142 (the Penguin & the Egg)
+      NASA, ESA, CSA, STScI (JWST)
+      ESA/Webb — https://esawebb.org/images/weic2420a/   (CC BY 4.0)
+
+  nasa_m81.jpg         Messier 81 (Bode's Galaxy)
+      NASA, ESA & the Hubble Heritage Team (STScI/AURA)
+      ESA/Hubble — https://esahubble.org/images/heic0710a/   (CC BY 4.0)
+
+  nasa_cw_leonis.jpg   Carbon star CW Leonis
+      NASA, ESA, T. Ueta (Univ. of Denver), H. Kim (KASI)
+      ESA/Hubble — https://esahubble.org/images/heic2112a/   (CC BY 4.0)
+
+  nasa_ngc1929.jpg     NGC 1929 / superbubble N44 (Large Magellanic Cloud)
+      X-ray: NASA/CXC/Univ. of Mich./S. Oey;  IR: NASA/JPL;  Optical: ESO/WFI/2.2-m
+      Chandra — https://chandra.harvard.edu/photo/2012/n1929/   (public domain)
+
+CC BY 4.0 (ESA/Hubble, ESA/Webb, ESO/NOIRLab): free to use with the credit line
+above. Chandra/NASA imagery is public domain. None of these endorse this project.

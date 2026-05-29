@@ -57,12 +57,9 @@ object DesktopWallpaperStore {
         "wallpapers/nasa_whirlpool.jpg",
         "wallpapers/nasa_rosette.jpg",
         "wallpapers/nasa_arp142.jpg",
-        "wallpapers/nasa_m81_m82.jpg",
-        "wallpapers/nasa_cepheus.jpg",
-        "wallpapers/nasa_w39.jpg",
-        "wallpapers/nasa_ngc1929.jpg",
+        "wallpapers/nasa_m81.jpg",
         "wallpapers/nasa_cw_leonis.jpg",
-        "wallpapers/nasa_tess_southern.jpg",
+        "wallpapers/nasa_ngc1929.jpg",
     )
 
     @Volatile
