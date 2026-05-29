@@ -149,7 +149,7 @@ uxspace::tracking::ViewMode    g_viewMode = uxspace::tracking::ViewMode::PINNED;
 uxspace::spatial::layouts::Single g_layout;     // W3 will swap this for layout cycling
 constexpr int                  kHotkeyRecenter = 2;
 
-// PINNED-mode screen-band presets. In PINNED, Win+Shift+Z cycles
+// PINNED-mode screen-band presets. In PINNED, Ctrl+Alt+Z cycles
 // through this fixed set; in FREE the slider stays continuous over
 // kScreenBandMin..kScreenBandMax with step kScreenBandStep.
 //
@@ -173,10 +173,10 @@ float g_freeScreenBand    = 0.90f; // remembered FREE band
 // declared near CycleScreenBand for early callers.
 constexpr wchar_t kSettingsKey[] = L"Software\\UxSpace\\App";
 
-// App-side anchor: stores the head pose at the moment of Win+Shift+C.
+// App-side anchor: stores the head pose at the moment of Ctrl+Alt+C.
 // All subsequent poses are reported as pose * inverse(anchor) so the
 // wearer's current physical direction becomes "facing forward" without
-// touching the SDK's tracking origin (unlike Win+Shift+R, which calls
+// touching the SDK's tracking origin (unlike Ctrl+Alt+R, which calls
 // xr_device_provider_reset_origin_carina). Useful for "form up around
 // me" semantics in multi-monitor layouts (W3 stage E).
 uxspace::tracking::HeadPose g_anchorPose;  // identity by default
@@ -190,13 +190,13 @@ uxspace::tracking::HeadPose g_anchorPose;  // identity by default
 uxspace::tracking::HeadPose g_smoothedPose;       // tracks latest, valid==false until first sample
 constexpr float             kPoseSmoothAlpha = 0.30f;
 
-// Set when Win+Shift is held (no other modifiers required) — used to
+// Set when Ctrl+Alt is held (no other modifiers required) — used to
 // show the key-legend overlay so the wearer can discover bindings in
 // situ. Recomputed each frame from GetAsyncKeyState; cheap enough.
-bool g_winShiftHeld = false;
+bool g_ctrlAltHeld = false;
 
 // GDI-rendered legend bitmap, uploaded once to a D3D11 texture. Drawn
-// as a Surface3D in a separate PINNED render pass when Win+Shift is
+// as a Surface3D in a separate PINNED render pass when Ctrl+Alt is
 // held, so the wearer sees the hotkey list anchored to the bottom-left
 // of their view without it being affected by head tracking or zoom.
 struct LegendOverlay {
@@ -293,7 +293,7 @@ bool BuildLegendTexture(ID3D11Device* device) {
 }
 float                g_screenBandTarget = 0.90f;       // mirror of g_scene.screenBand for UI
 
-// --- Zoom (Win+Shift+wheel over the UxSpace virtual monitor) -------------
+// --- Zoom (Ctrl+Alt+wheel over the UxSpace virtual monitor) -------------
 //
 // The hook runs in the thread that installs it (the main thread). Wheel
 // events are delivered via the message pump, so we share state with the
@@ -629,11 +629,13 @@ bool CursorInRect(POINT p, const RECT& r) {
     return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
 }
 
-bool WinAndShiftHeld() {
-    const bool winDown   = (GetAsyncKeyState(VK_LWIN)  & 0x8000)
-                        || (GetAsyncKeyState(VK_RWIN)  & 0x8000);
-    const bool shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-    return winDown && shiftDown;
+// Ctrl+Alt is the cross-platform hotkey modifier. Was originally Ctrl+Alt, but Samsung
+// One UI hard-binds Meta to the launcher's app-drawer shortcut on the Android companion,
+// so the same combo opens the drawer every time. Ctrl+Alt is free on both platforms.
+bool CtrlAndAltHeld() {
+    const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool altDown  = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;
+    return ctrlDown && altDown;
 }
 
 // True when 6DoF head tracking is actually driving the camera (tracker
@@ -652,7 +654,7 @@ void ToggleViewMode();
 void RecenterTracker();
 void AnchorAtCurrentPose();
 
-// Global hotkeys, all gated on Win+Shift held + a key press transition:
+// Global hotkeys, all gated on Ctrl+Alt held + a key press transition:
 //   Z       → cycle screen-band preset (0.80 / 0.85 / 0.90 / 1.00 / 1.20 / 1.30)
 //   + / =   → zoom in by kZoomStep (covers both shifted and unshifted)
 //   - / _   → zoom out by kZoomStep
@@ -675,39 +677,39 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (up)   { held[vk] = false; }
         if (down && !held[vk]) {
             held[vk] = true;
-            if (WinAndShiftHeld()) {
+            if (CtrlAndAltHeld()) {
                 switch (vk) {
                 case 'Z':
-                    uxspace::log::info("hotkey: Win+Shift+Z (cycle screen band).");
+                    uxspace::log::info("hotkey: Ctrl+Alt+Z (cycle screen band).");
                     CycleScreenBand();
                     return 1;
                 case 'X':
-                    uxspace::log::info("hotkey: Win+Shift+X (toggle view mode).");
+                    uxspace::log::info("hotkey: Ctrl+Alt+X (toggle view mode).");
                     ToggleViewMode();
                     return 1;
                 case 'R':
-                    uxspace::log::info("hotkey: Win+Shift+R (SDK recenter).");
+                    uxspace::log::info("hotkey: Ctrl+Alt+R (SDK recenter).");
                     RecenterTracker();
                     return 1;
                 case 'C':
-                    uxspace::log::info("hotkey: Win+Shift+C (anchor at current pose).");
+                    uxspace::log::info("hotkey: Ctrl+Alt+C (anchor at current pose).");
                     AnchorAtCurrentPose();
                     return 1;
                 case VK_OEM_PLUS:
                 case VK_ADD:
                     if (IsDofActive()) {
-                        uxspace::log::info("hotkey: Win+Shift++ ignored — DOF active (zoom disabled).");
+                        uxspace::log::info("hotkey: Ctrl+Alt++ ignored — DOF active (zoom disabled).");
                     } else {
-                        uxspace::log::info("hotkey: Win+Shift++ (zoom in).");
+                        uxspace::log::info("hotkey: Ctrl+Alt++ (zoom in).");
                         AdjustZoom(+kZoomStep);
                     }
                     return 1;
                 case VK_OEM_MINUS:
                 case VK_SUBTRACT:
                     if (IsDofActive()) {
-                        uxspace::log::info("hotkey: Win+Shift+- ignored — DOF active (zoom disabled).");
+                        uxspace::log::info("hotkey: Ctrl+Alt+- ignored — DOF active (zoom disabled).");
                     } else {
-                        uxspace::log::info("hotkey: Win+Shift+- (zoom out).");
+                        uxspace::log::info("hotkey: Ctrl+Alt+- (zoom out).");
                         AdjustZoom(-kZoomStep);
                     }
                     return 1;
@@ -724,7 +726,7 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
         const auto* info = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
         const RECT  rect = g_vscreen.desktopRect();
         const bool  inside = g_vscreen.present() && CursorInRect(info->pt, rect);
-        if (inside && WinAndShiftHeld()) {
+        if (inside && CtrlAndAltHeld()) {
             if (IsDofActive()) {
                 // Don't consume — let the underlying app scroll. Zoom is
                 // intentionally inert while 6DoF is driving the camera.
@@ -764,7 +766,7 @@ void UpdateZoomFromCursor() {
 
 // Updates g_zoomFocusUV from the cursor's current position when the
 // cursor is on the UxSpace virtual monitor; otherwise keeps the last
-// focus. Used by the keyboard zoom hotkeys (Win+Shift++ / Win+Shift+-)
+// focus. Used by the keyboard zoom hotkeys (Ctrl+Alt++ / Ctrl+Alt+-)
 // so a quick keyboard zoom-in re-centres on whatever the user is
 // looking at via the cursor.
 void RefreshZoomFocusFromCursor() {
@@ -789,7 +791,7 @@ void AdjustZoom(float delta) {
 
 // Snap g_pinnedPresetIndex to the preset closest to a given band value.
 // Used when the user transitions FREE -> PINNED at a band that isn't in
-// the preset list, so the next Win+Shift+Z press feels predictable
+// the preset list, so the next Ctrl+Alt+Z press feels predictable
 // (it advances from a known starting point rather than wherever fmod
 // arithmetic happened to leave us).
 int NearestPinnedPresetIndex(float band) {
@@ -1114,7 +1116,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_HOTKEY:
         if (wp == kHotkeyTogglePseudo3D) {
             g_pseudo3D = !g_pseudo3D;
-            uxspace::log::info("hotkey: Win+Shift+D pseudo-3D -> %s.",
+            uxspace::log::info("hotkey: Ctrl+Alt+D pseudo-3D -> %s.",
                                g_pseudo3D ? "ON" : "off");
             SaveSettings();
         }
@@ -1220,14 +1222,14 @@ void DrawHotkeysWindow() {
             ImGui::TableNextColumn(); ImGui::TextUnformatted(scope);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(action);
         };
-        row("Win+Shift+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x). PINNED only.");
-        row("Win+Shift++",     "global", "Zoom in by 0.25x (keyboard). PINNED only.");
-        row("Win+Shift+-",     "global", "Zoom out by 0.25x. PINNED only.");
-        row("Win+Shift+Z",     "global", "Screen size +0.10 (0.70..2.00, wraps).");
-        row("Win+Shift+D",     "global", "Toggle pseudo-3D per-window layering.");
-        row("Win+Shift+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
-        row("Win+Shift+R",     "global", "Recenter: SDK reset_origin (hard reset of tracking).");
-        row("Win+Shift+C",     "global", "Centre displays: app-side anchor at current pose (no SDK call).");
+        row("Ctrl+Alt+Wheel", "global", "Zoom over the UxSpace virtual monitor (1.0x-4.0x). PINNED only.");
+        row("Ctrl+Alt++",     "global", "Zoom in by 0.25x (keyboard). PINNED only.");
+        row("Ctrl+Alt+-",     "global", "Zoom out by 0.25x. PINNED only.");
+        row("Ctrl+Alt+Z",     "global", "Screen size +0.10 (0.70..2.00, wraps).");
+        row("Ctrl+Alt+D",     "global", "Toggle pseudo-3D per-window layering.");
+        row("Ctrl+Alt+X",     "global", "Toggle view mode: PINNED (head-locked) <-> FREE (world-locked).");
+        row("Ctrl+Alt+R",     "global", "Recenter: SDK reset_origin (hard reset of tracking).");
+        row("Ctrl+Alt+C",     "global", "Centre displays: app-side anchor at current pose (no SDK call).");
         ImGui::EndTable();
     }
     ImGui::End();
@@ -1375,10 +1377,10 @@ void DrawDevUI(HWND devWnd) {
     ImGui::SetNextWindowSize(ImVec2(520, 460), ImGuiCond_FirstUseEver);
     ImGui::Begin("UxSpace");
 
-    // Screen size — continuous slider. Win+Shift+Z steps by 0.10 with wrap.
+    // Screen size — continuous slider. Ctrl+Alt+Z steps by 0.10 with wrap.
     // Values <= 1.0 letterbox; > 1.0 zoom the displayed quad ("closer").
     g_screenBandTarget = g_scene.screenBand;
-    if (ImGui::SliderFloat("Screen size (Win+Shift+Z = +0.1)",
+    if (ImGui::SliderFloat("Screen size (Ctrl+Alt+Z = +0.1)",
                            &g_screenBandTarget,
                            sp::kScreenBandMin, sp::kScreenBandMax, "%.2f")) {
         g_scene.screenBand = g_screenBandTarget;
@@ -1393,12 +1395,12 @@ void DrawDevUI(HWND devWnd) {
     }
     ImGui::Separator();
 
-    // Zoom (Win+Shift+wheel over the UxSpace virtual monitor).
+    // Zoom (Ctrl+Alt+wheel over the UxSpace virtual monitor).
     ImGui::Text("Zoom: %.2fx", g_zoomLevel);
     if (IsDofActive()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
-                           "disabled (DOF active — toggle PINNED with Win+Shift+X to zoom)");
+                           "disabled (DOF active — toggle PINNED with Ctrl+Alt+X to zoom)");
     } else if (g_zoomLevel > 1.0001f) {
         ImGui::SameLine();
         ImGui::TextDisabled("focus (%.2f, %.2f)", g_zoomFocusUV.x, g_zoomFocusUV.y);
@@ -1406,7 +1408,7 @@ void DrawDevUI(HWND devWnd) {
         if (ImGui::SmallButton("Reset")) g_zoomLevel = 1.0f;
     } else {
         ImGui::SameLine();
-        ImGui::TextDisabled("Win+Shift+wheel over the UxSpace display to zoom (max 4.00x)");
+        ImGui::TextDisabled("Ctrl+Alt+wheel over the UxSpace display to zoom (max 4.00x)");
     }
     ImGui::Separator();
 
@@ -1471,7 +1473,7 @@ void DrawDevUI(HWND devWnd) {
         if (ImGui::SmallButton("Stop###tracker")) g_tracker.stop();
 
         const auto& p = g_camera.headPose;
-        ImGui::Text("View: %s   (Win+Shift+X to toggle, Win+Shift+R to recenter)",
+        ImGui::Text("View: %s   (Ctrl+Alt+X to toggle, Ctrl+Alt+R to recenter)",
                     g_camera.mode == ViewMode::FREE ? "FREE" : "PINNED");
         ImGui::Text("Pose: pos=[%+.3f %+.3f %+.3f] q=[%+.3f %+.3f %+.3f %+.3f] valid=%d",
                     p.position.x, p.position.y, p.position.z,
@@ -1559,7 +1561,7 @@ void DrawDevUI(HWND devWnd) {
         SaveSettings();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("Win+Shift+D toggles globally");
+    ImGui::TextDisabled("Ctrl+Alt+D toggles globally");
     if (g_pseudo3D) {
         if (g_zoomLevel > 1.0001f) {
             ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
@@ -1602,11 +1604,11 @@ void DrawDevUI(HWND devWnd) {
     DrawHotkeysWindow();
     DrawDisplayLayoutWindow();
 
-    // Key legend — visible while Win+Shift is held. MVP: dev-window
+    // Key legend — visible while Ctrl+Alt is held. MVP: dev-window
     // floating panel; the glasses-framebuffer version of the same
     // panel is the next iteration (needs GDI-text-to-texture or a
     // second ImGui context).
-    if (g_winShiftHeld) {
+    if (g_ctrlAltHeld) {
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         const ImVec2 pos { vp->WorkPos.x + 12,
                            vp->WorkPos.y + vp->WorkSize.y - 220 };
@@ -1616,7 +1618,7 @@ void DrawDevUI(HWND devWnd) {
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoNav      | ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Win+Shift+...");
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Ctrl+Alt+...");
         ImGui::Separator();
         auto kv = [](const char* k, const char* v) {
             ImGui::TextUnformatted(k);
@@ -1706,8 +1708,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
     CreateDevPreview(g_d3d.device.Get(), kDevPreviewWidth, kDevPreviewHeight, g_devPreview);
 
-    // GDI -> texture for the Win+Shift hotkey legend (drawn as a Surface3D
-    // overlay on the glasses framebuffer while Win+Shift is held). One-shot
+    // GDI -> texture for the Ctrl+Alt hotkey legend (drawn as a Surface3D
+    // overlay on the glasses framebuffer while Ctrl+Alt is held). One-shot
     // build; the texture is reused for every overlay pass.
     if (!BuildLegendTexture(g_d3d.device.Get())) {
         uxspace::log::warn("legend: BuildLegendTexture failed; glasses-side hotkey legend disabled.");
@@ -1718,7 +1720,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Surfaces are rebuilt every frame by UpdateScene(): back plane + (if
     // pseudo-3D is on and we're not zoomed) per-window quads. Screen-size
     // initial value comes from g_scene.screenBand's default (0.90); the
-    // slider + Win+Shift+Z mutate it at runtime.
+    // slider + Ctrl+Alt+Z mutate it at runtime.
 
     // Try the glasses up-front; user can rescan via the UI later.
     TryOpenGlasses();
@@ -1758,8 +1760,8 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     // Global low-level hooks for the zoom gestures:
-    //   - Win+Shift+wheel over the UxSpace display: continuous zoom (mouse hook)
-    //   - Win+Shift+Z:                              cycle screen band (keyboard hook)
+    //   - Ctrl+Alt+wheel over the UxSpace display: continuous zoom (mouse hook)
+    //   - Ctrl+Alt+Z:                              cycle screen band (keyboard hook)
     // Both live for the lifetime of the app.
     g_mouseHook    = SetWindowsHookExW(WH_MOUSE_LL,    &LowLevelMouseProc,
                                        GetModuleHandleW(nullptr), 0);
@@ -1767,7 +1769,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                        GetModuleHandleW(nullptr), 0);
 
     // W1.5: focus-history listener for per-window depth ordering, and
-    // Win+Shift+D global toggle for pseudo-3D layering. RegisterHotKey is
+    // Ctrl+Alt+D global toggle for pseudo-3D layering. RegisterHotKey is
     // cleaner than a low-level keyboard hook for a non-wheel chord — the
     // OS delivers WM_HOTKEY to our window without the keystroke ever
     // reaching another app.
@@ -1776,7 +1778,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                      nullptr, &WinEventProc, 0, 0,
                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     RememberFocusedWindow(GetForegroundWindow()); // seed so first frame has order
-    RegisterHotKey(hwnd, kHotkeyTogglePseudo3D, MOD_WIN | MOD_SHIFT, 'D');
+    RegisterHotKey(hwnd, kHotkeyTogglePseudo3D, MOD_CONTROL | MOD_ALT, 'D');
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1811,7 +1813,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                ok ? "true" : "false",
                                g_tracker.isConnected() ? 1 : 0);
             // Default to FREE on first successful connect so the wearer
-            // gets head tracking out of the box; explicit Win+Shift+X
+            // gets head tracking out of the box; explicit Ctrl+Alt+X
             // toggles back to PINNED.
             if (ok && g_viewMode != uxspace::tracking::ViewMode::FREE) {
                 const auto prev = g_viewMode;
@@ -1840,7 +1842,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // recycles its SRV on ACCESS_LOST, so the pointer is only valid
         // this frame.
         UpdateZoomFromCursor();
-        g_winShiftHeld = WinAndShiftHeld();
+        g_ctrlAltHeld = CtrlAndAltHeld();
 
         // Push the tracker's latest head pose into the camera. If the
         // user has requested FREE but the tracker isn't producing,
@@ -1850,7 +1852,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         // Low-pass smoothing is applied to the raw sample before the
         // anchor transform so the smoothing constant has the same meaning
         // regardless of anchor state. The pose is then reported relative
-        // to g_anchorPose (set by Win+Shift+C). For an identity anchor
+        // to g_anchorPose (set by Ctrl+Alt+C). For an identity anchor
         // (default), relative == absolute. For a captured anchor:
         // relativePos = absPos - anchorPos and relativeRot = absRot *
         // conj(anchorRot).
@@ -1898,12 +1900,12 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         // Render to glasses (if open). Stereo or mono depending on whether
         // the framebuffer reports an SBS-aspect mode; see GlassesOutput.h.
-        // Overlay the hotkey legend on top when Win+Shift is held — the
+        // Overlay the hotkey legend on top when Ctrl+Alt is held — the
         // wearer sees the bindings without taking the glasses off.
         if (g_glasses.opened()) {
             const bool stereo = g_glasses.isStereoMode();
             RenderStereoTo(g_glasses.rtv(), g_glasses.width(), g_glasses.height(), stereo);
-            if (g_winShiftHeld) {
+            if (g_ctrlAltHeld) {
                 RenderLegendOverlay(g_glasses.rtv(), g_glasses.width(), g_glasses.height(), stereo);
             }
             g_glasses.swap()->Present(1, 0);
@@ -1911,7 +1913,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
         // Render to the dev SBS preview (always — useful even without glasses).
         RenderStereoTo(g_devPreview.rtv.Get(), kDevPreviewWidth, kDevPreviewHeight, /*stereo*/true);
-        if (g_winShiftHeld) {
+        if (g_ctrlAltHeld) {
             RenderLegendOverlay(g_devPreview.rtv.Get(),
                                 kDevPreviewWidth, kDevPreviewHeight, /*stereo*/true);
         }
