@@ -153,6 +153,11 @@ class HeadTracking(
         polling = true
         lastPoseAtMs = 0L
         streaming = false
+        // Drop any stale recenter reference from a previous session. On reconnect the
+        // Carina VIO re-initialises with a fresh internal origin, so the first pose of
+        // THIS session must become the new reference — otherwise raw poses in the new
+        // frame get recentred against the old origin and the horizon tilts/drifts.
+        haveRef = false
         pollThread = Thread {
             while (polling) {
                 if (NativeGlasses.isPoseFresh()) {
