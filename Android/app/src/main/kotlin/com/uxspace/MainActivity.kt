@@ -271,6 +271,12 @@ class MainActivity : ComponentActivity() {
 
         binding.setupButton.setOnClickListener { onSetupAction() }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
+        // Long-press = full glasses reconnect (helper + display + head tracking), a heavier
+        // recovery than the tap's DOF-only retry.
+        binding.viewModeButton.setOnLongClickListener { attemptGlassesReconnect(); true }
+        // The in-view toolbar's DOF-retry button routes here too, so both report success /
+        // failure the same way. (WorkspacePresentation no longer owns this hook.)
+        WorkspaceController.retryHeadTracking = { mainHandler.post { attemptReconnectDof() } }
         binding.captureButton.setOnClickListener { onCapture() }
         binding.captureButton.setOnLongClickListener {
             if (WorkspaceController.isRunning) {
@@ -456,13 +462,72 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleViewMode() {
-        if (!WorkspaceController.headTrackingActive) return
+        // DOF down → this button is the reconnect affordance (tap = retry DOF; long-press =
+        // full glasses reconnect). Always reachable here on the phone control panel and
+        // mirrored by the in-view toolbar's DOF-retry button.
+        if (!WorkspaceController.headTrackingActive) {
+            attemptReconnectDof()
+            return
+        }
         val next = when (WorkspaceController.currentViewMode) {
             WorkspaceRenderer.ViewMode.PINNED -> WorkspaceRenderer.ViewMode.FREE
             WorkspaceRenderer.ViewMode.FREE -> WorkspaceRenderer.ViewMode.PINNED
         }
         WorkspaceController.setViewMode(next)
         renderViewModeButton()
+    }
+
+    /** Pending DOF-reconnect outcome check; replaced on each new attempt. */
+    private val dofReconnectOutcome = Runnable {
+        if (WorkspaceController.headTrackingActive) {
+            Toast.makeText(this, "Head tracking connected", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(
+                this,
+                "Head tracking reconnect failed — try unplugging and replugging the glasses",
+                Toast.LENGTH_LONG,
+            ).show()
+            WorkspaceController.announceInView("Head tracking unavailable", 4_000L)
+        }
+    }
+
+    /**
+     * Retry head tracking (tap on the reconnect button). Full SDK + USB restart, then
+     * report the outcome: if no pose stream has come up within [DOF_RECONNECT_TIMEOUT_MS]
+     * we toast that the reconnect failed. Recovers a tracker that connected but never
+     * produced a pose (LIBUSB_ERROR_NO_DEVICE, Carina VIO not converging, …).
+     */
+    private fun attemptReconnectDof() {
+        if (WorkspaceController.headTrackingActive) return
+        val pres = presentation
+        if (pres == null) {
+            Toast.makeText(this, "No glasses connected", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.i("UxSpace/Main", "attemptReconnectDof: restarting head tracking")
+        Toast.makeText(this, "Reconnecting head tracking…", Toast.LENGTH_SHORT).show()
+        WorkspaceController.announceInView("Reconnecting head tracking…", DOF_RECONNECT_TIMEOUT_MS)
+        pres.restartHeadTracking()
+        mainHandler.removeCallbacks(dofReconnectOutcome)
+        mainHandler.postDelayed(dofReconnectOutcome, DOF_RECONNECT_TIMEOUT_MS)
+    }
+
+    /**
+     * Long-press on the reconnect button: a full glasses reconnect — re-bootstrap the
+     * shell-uid helper (recovers a dead binder, which otherwise blocks the desktop's
+     * trusted VirtualDisplay), re-claim the glasses display / rebuild the workspace
+     * Presentation, then restart head tracking. The heavier hammer for when the desktop
+     * itself didn't come up, not just DOF.
+     */
+    private fun attemptGlassesReconnect() {
+        Log.i("UxSpace/Main", "attemptGlassesReconnect: helper + display + head tracking")
+        Toast.makeText(this, "Reconnecting glasses…", Toast.LENGTH_SHORT).show()
+        WorkspaceController.announceInView("Reconnecting glasses…", DOF_RECONNECT_TIMEOUT_MS)
+        PrivilegedService.ensureRunning()
+        syncGlasses()
+        presentation?.restartHeadTracking()
+        mainHandler.removeCallbacks(dofReconnectOutcome)
+        mainHandler.postDelayed(dofReconnectOutcome, DOF_RECONNECT_TIMEOUT_MS)
     }
 
     /**
@@ -472,19 +537,23 @@ class MainActivity : ComponentActivity() {
      * the WorkspaceController listeners and on resume.
      */
     private fun renderToolbarStates() {
-        val tracking = WorkspaceController.headTrackingActive
         val free = WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.FREE
-        binding.viewModeButton.isEnabled = tracking
-        binding.viewModeButton.alpha = if (tracking) 1f else DISABLED_ALPHA
+        // viewModeButton is always actionable: lock/unlock toggle when DOF is live, a
+        // reconnect button when it is down — so it is never grayed out (the icon, set in
+        // renderViewModeButton, signals which role it is in).
+        binding.viewModeButton.isEnabled = true
+        binding.viewModeButton.alpha = 1f
+        renderViewModeButton()
         binding.layoutButton.isEnabled = free
         binding.layoutButton.alpha = if (free) 1f else DISABLED_ALPHA
     }
 
     private fun renderViewModeButton() {
         binding.viewModeButton.setImageResource(
-            when (WorkspaceController.currentViewMode) {
-                WorkspaceRenderer.ViewMode.PINNED -> R.drawable.ic_pin
-                WorkspaceRenderer.ViewMode.FREE -> R.drawable.ic_pin_off
+            when {
+                !WorkspaceController.headTrackingActive -> R.drawable.ic_dof_retry
+                WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.PINNED -> R.drawable.ic_pin
+                else -> R.drawable.ic_pin_off
             },
         )
     }
@@ -863,6 +932,11 @@ class MainActivity : ComponentActivity() {
         /** USB Vendor ID assigned to VITURE Technology — used in [onNewIntent] to
          *  tell a glasses USB attach apart from any other device's attach. */
         const val VITURE_VENDOR_ID = 0x35ca
+
+        /** How long after a reconnect attempt to check whether the pose stream came
+         *  up; if [WorkspaceController.headTrackingActive] is still false we report the
+         *  reconnect failed. Long enough to cover SDK re-init + Carina VIO warm-up. */
+        const val DOF_RECONNECT_TIMEOUT_MS = 8_000L
 
         /** Delay between a real keyboard appearing and the proactive glasses USB
          *  rescan. ~1.5s lets the BT pairing's peak USB churn finish before we

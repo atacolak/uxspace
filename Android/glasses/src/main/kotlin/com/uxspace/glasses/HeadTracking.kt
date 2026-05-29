@@ -22,6 +22,21 @@ class HeadTracking(
     context: Context,
     /** Receives each recentred head-orientation quaternion as (w, x, y, z). */
     private val onPose: (Float, Float, Float, Float) -> Unit,
+    /**
+     * Receives each recentred head *position* as (x, y, z) metres in the gravity-aligned,
+     * heading-recentred world frame — only on tracking paths that actually report 6DOF
+     * position (Carina VIO). Null / never called on orientation-only paths (native
+     * on-glasses DOF, Gen1/2 host IMU), so the camera stays at the origin there.
+     */
+    private val onPosition: ((Float, Float, Float) -> Unit)? = null,
+    /**
+     * Whether to run the Carina device in 6DOF (positional parallax) or 3DOF
+     * (orientation-only). Read once per [start] / reconnect — the DOF type must be set
+     * before SDK init, so toggling it takes effect on the next reconnect, not live.
+     * 6DOF streams px,py,pz for parallax but runs the cameras continuously; 3DOF is the
+     * lighter, orientation-only path. Defaults to 3DOF when not supplied.
+     */
+    private val use6Dof: () -> Boolean = { false },
 ) {
     private val appContext = context.applicationContext
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "uxspace-tracking") }
@@ -53,6 +68,24 @@ class HeadTracking(
     private var refX = 0f
     private var refY = 0f
     private var refZ = 0f
+    // Yaw-only twist of the reference orientation, normalised to (cos, sin) about world Y.
+    // Recentre cancels HEADING only — pitch/roll stay gravity-anchored — so a head yaw is
+    // always a rotation about true vertical and never bleeds into roll (no scene tilt).
+    private var refYawCos = 1f
+    private var refYawSin = 0f
+
+    // Reference position for recentre (Carina 6DOF only); the first pose fills it in.
+    @Volatile private var haveRefPos = false
+    private var refPx = 0f
+    private var refPy = 0f
+    private var refPz = 0f
+
+    /**
+     * Whether the active tracking path reports 6DOF position. True only on the Carina VIO
+     * poll path (`pose[0..2]` = px,py,pz); false on orientation-only paths, where those
+     * three floats are roll/pitch/yaw and must not be fed as a camera translation.
+     */
+    @Volatile private var providesPosition = false
 
     /**
      * Begin tracking: locate the glasses on USB and request permission. Idempotent — if
@@ -123,22 +156,34 @@ class HeadTracking(
         val type = NativeGlasses.getDeviceType()
         val carina = type == NativeGlasses.DEVICE_TYPE_CARINA
 
-        // Carina needs its DOF type set after create and before initialize; 3DOF is enough
-        // for orientation-only head tracking.
+        // Carina needs its DOF type set after create and before initialize. 6DOF (the SDK
+        // default) additionally streams px,py,pz for positional parallax but runs the
+        // cameras continuously; 3DOF is the lighter, orientation-only path. Controlled by
+        // the [use6Dof] setting and applied here on each (re)connect.
+        val want6Dof = carina && !nativeDof && use6Dof()
         if (carina && !nativeDof) {
-            NativeGlasses.setDofTypeCarina(false)
+            NativeGlasses.setDofTypeCarina(want6Dof)
         }
         NativeGlasses.registerStateCallback()
         NativeGlasses.initialize()
         NativeGlasses.start()
 
+        // Position parallax is only available when Carina runs in 6DOF (then pose[0..2] is
+        // px,py,pz). In 3DOF — and on the native-DOF / Gen1/2 paths — those floats aren't a
+        // usable world position, so we don't feed them and the camera stays at the origin.
+        providesPosition = false
         when {
             nativeDof -> {
                 Log.i(TAG, "tracking path: native on-glasses DOF")
                 NativeGlasses.setupNativeDofDevice()
             }
             carina -> {
-                Log.i(TAG, "tracking path: Carina VIO (deviceType=$type)")
+                Log.i(
+                    TAG,
+                    "tracking path: Carina VIO (deviceType=$type) " +
+                        if (want6Dof) "— 6DOF, position/parallax on" else "— 3DOF, orientation only",
+                )
+                providesPosition = want6Dof
                 NativeGlasses.startCarinaPollThread()
             }
             else -> {
@@ -158,12 +203,17 @@ class HeadTracking(
         // THIS session must become the new reference — otherwise raw poses in the new
         // frame get recentred against the old origin and the horizon tilts/drifts.
         haveRef = false
+        haveRefPos = false
         pollThread = Thread {
             while (polling) {
                 if (NativeGlasses.isPoseFresh()) {
                     val pose = NativeGlasses.getPose()
                     // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
-                    if (pose.size >= 7) feedPose(pose[3], pose[4], pose[5], pose[6])
+                    if (pose.size >= 7) {
+                        feedPose(pose[3], pose[4], pose[5], pose[6])
+                        // pose[0..2] is the world position (px, py, pz) on Carina only.
+                        if (providesPosition) feedPosition(pose[0], pose[1], pose[2])
+                    }
                 }
                 checkStreamWatchdog()
                 try {
@@ -196,7 +246,7 @@ class HeadTracking(
         }
     }
 
-    /** Recentre against the reference orientation, then deliver the result via [onPose]. */
+    /** Recentre heading against the reference orientation, then deliver via [onPose]. */
     private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
         lastPoseAtMs = System.currentTimeMillis()
         if (!streaming) {
@@ -206,15 +256,58 @@ class HeadTracking(
         }
         if (!haveRef) {
             refW = w; refX = x; refY = y; refZ = z
+            // Yaw-only twist of the reference about world Y: normalise (w, 0, y, 0). Storing
+            // the unit (cos, sin) lets recentre and parallax share one heading rotation.
+            val n = kotlin.math.sqrt(w * w + y * y)
+            if (n > 1e-6f) { refYawCos = w / n; refYawSin = y / n }
+            else { refYawCos = 1f; refYawSin = 0f }
             haveRef = true
         }
-        // effective = conjugate(reference) * raw
-        val cw = refW; val cx = -refX; val cy = -refY; val cz = -refZ
-        val ew = cw * w - cx * x - cy * y - cz * z
-        val ex = cw * x + cx * w + cy * z - cz * y
-        val ey = cw * y - cx * z + cy * w + cz * x
-        val ez = cw * z + cx * y - cy * x + cz * w
+        // YAW-ONLY recentre: effective = conjugate(refYawTwist) * raw.
+        //
+        // We cancel only the reference HEADING (rotation about world/gravity Y), leaving
+        // pitch and roll exactly as Carina reports them — gravity-anchored. Because the
+        // recentre rotation is purely about world Y, a head yaw is always a rotation about
+        // true vertical and can never bleed into roll, so the scene no longer tilts as you
+        // pan ("screens angled vertically"). The earlier full-orientation recentre folded
+        // the reference's pitch into the yaw axis, which is what caused the tilt.
+        //
+        // Keeping pitch truthful also defines a single rigid, gravity-aligned world frame,
+        // which is what positional parallax ([feedPosition]) needs to stay consistent.
+        // conjugate(refYawTwist) = (cos, 0, -sin, 0).
+        val c = refYawCos; val s = refYawSin
+        val ew = c * w + s * y
+        val ex = c * x - s * z
+        val ey = c * y - s * w
+        val ez = c * z + s * x
         onPose(ew, ex, ey, ez)
+    }
+
+    /**
+     * Recentre the 6DOF head position and deliver it via [onPosition]. The raw Carina
+     * position is in the VIO world frame (gravity-aligned, OpenGL axes, origin at VIO
+     * init); we subtract the reference position and rotate the displacement by the inverse
+     * reference heading so it lands in the same heading-recentred frame the orientation
+     * uses. Result: physically moving your head translates the camera through the fixed
+     * workspace — real positional parallax. Only called on 6DOF (Carina) paths.
+     */
+    private fun feedPosition(px: Float, py: Float, pz: Float) {
+        if (!haveRefPos) {
+            refPx = px; refPy = py; refPz = pz
+            haveRefPos = true
+        }
+        val dx = px - refPx
+        val dy = py - refPy
+        val dz = pz - refPz
+        // Rotate the world displacement by -refYaw about Y (same heading recentre as the
+        // orientation). cos/sin here are the full-angle terms derived from the half-angle
+        // (cos, sin) twist: cosθ = c²−s², sinθ = 2cs.
+        val c = refYawCos; val s = refYawSin
+        val cosT = c * c - s * s
+        val sinT = 2f * c * s
+        val rx = cosT * dx - sinT * dz
+        val rz = sinT * dx + cosT * dz
+        onPosition?.invoke(rx, dy, rz)
     }
 
     private companion object {

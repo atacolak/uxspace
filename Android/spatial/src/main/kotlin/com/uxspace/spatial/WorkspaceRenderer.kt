@@ -99,6 +99,13 @@ class WorkspaceRenderer(
     @Volatile private var headY = 0f
     @Volatile private var headZ = 0f
 
+    // Head position (metres) in the heading-recentred world frame, relative to the recentre
+    // origin. Non-zero only on 6DOF (Carina) tracking; drives positional parallax in FREE
+    // view. Orientation-only paths never call [setHeadPosition], so these stay 0.
+    @Volatile private var headPosX = 0f
+    @Volatile private var headPosY = 0f
+    @Volatile private var headPosZ = 0f
+
     /**
      * "Recenter" anchor — a rotation post-multiplied onto the head pose before it drives the
      * FREE-mode view matrix. Identity by default; [recenterScene] sets it to the inverse of
@@ -182,18 +189,32 @@ class WorkspaceRenderer(
         arrayOf(
             HudButton(
                 "lock", cx = -0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                // Dual-role button. With DOF live it is the lock/unlock (PINNED ↔ FREE)
+                // toggle. With DOF down it becomes a "retry head tracking" button — FREE is
+                // meaningless without head input, so rather than sit grayed-out the button
+                // offers a way to recover a tracker that never came up (e.g. Carina VIO
+                // failing to converge) without unplugging the glasses.
                 iconResIdProvider = {
                     val icons = WorkspaceController.toolbarIcons
-                    if (icons == null) 0
-                    else if (viewMode == ViewMode.PINNED) icons.lock else icons.unlock
+                    when {
+                        icons == null -> 0
+                        !WorkspaceController.headTrackingActive -> icons.dofRetry
+                        viewMode == ViewMode.PINNED -> icons.lock
+                        else -> icons.unlock
+                    }
                 },
-                // FREE only makes sense with head tracking — without DOF, the camera
-                // would just sit still even after the unlock. Same as the Windows
-                // app's "DOF active" gate around the view-mode toggle.
-                enabled = { WorkspaceController.headTrackingActive },
+                // Always tappable now: lock toggle when DOF is up, retry when it is down.
+                enabled = { true },
             ) {
-                val next = if (viewMode == ViewMode.PINNED) ViewMode.FREE else ViewMode.PINNED
-                WorkspaceController.setViewMode(next)
+                if (WorkspaceController.headTrackingActive) {
+                    val next = if (viewMode == ViewMode.PINNED) ViewMode.FREE else ViewMode.PINNED
+                    WorkspaceController.setViewMode(next)
+                } else {
+                    // Routes to MainActivity.attemptReconnectDof, which restarts tracking
+                    // and toasts / announces the success-or-failure outcome.
+                    Log.i(TAG, "toolbar: DOF-retry tapped — re-attempting head tracking")
+                    WorkspaceController.retryHeadTracking?.invoke()
+                }
             },
             HudButton(
                 "zoom", cx = -0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
@@ -319,6 +340,17 @@ class WorkspaceRenderer(
         headX = x
         headY = y
         headZ = z
+    }
+
+    /**
+     * Feed the recentred head position (metres) for positional parallax. Only 6DOF tracking
+     * paths call this; the camera translates with the head in FREE view so the workspace
+     * shows real parallax. Safe to call from any thread.
+     */
+    fun setHeadPosition(x: Float, y: Float, z: Float) {
+        headPosX = x
+        headPosY = y
+        headPosZ = z
     }
 
     /** Switch how the scene tracks the head. Safe to call from any thread. */
@@ -502,20 +534,68 @@ class WorkspaceRenderer(
                 Log.w(TAG, "alignVerticalToHead: head pose is zero — no anchor set")
                 return@add
             }
-            // anchor = head⁻¹ (conjugate / |head|² for a unit quaternion). Effective view
-            // rotation = head * anchor, so right now that product is identity → scene
-            // straight ahead. As the user moves, the offset is preserved.
-            val inv = 1f / norm
-            anchorW = w0 * inv
-            anchorX = -x0 * inv
-            anchorY = -y0 * inv
-            anchorZ = -z0 * inv
+            // Recenter so the screen currently taking the most view space sits straight
+            // ahead and face-on — not the middle of the virtual space. In a multi-screen
+            // layout the middle is the seam between screens, so aiming there leaves every
+            // screen off-axis and yawed relative to the gaze, which reads as "angled". Side
+            // screens are yawed to face the origin/eye, so centring the camera on the
+            // dominant screen makes it fronto-parallel.
+            //
+            // Pick the dominant screen from the LIVE gaze: effective = head ⊗ current anchor;
+            // score each screen by foreshortened apparent size (world area / distance²) ×
+            // how centred its direction is in the gaze (dot with forward). The one filling
+            // the most of the field of view wins; fall back to the configured main screen
+            // if the gaze faces away from the scene.
+            val ew = w0 * anchorW - x0 * anchorX - y0 * anchorY - z0 * anchorZ
+            val ex = w0 * anchorX + x0 * anchorW + y0 * anchorZ - z0 * anchorY
+            val ey = w0 * anchorY - x0 * anchorZ + y0 * anchorW + z0 * anchorX
+            val ez = w0 * anchorZ + x0 * anchorY - y0 * anchorX + z0 * anchorW
+            val fwdX = -2f * (ex * ez + ew * ey)
+            val fwdY = 2f * (ew * ex - ey * ez)
+            val fwdZ = -1f + 2f * (ex * ex + ey * ey)
+            var chosenIdx = -1
+            var bestScore = 0f
+            layout.screens.forEachIndexed { i, screen ->
+                val rr = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
+                val d2 = rr[0] * rr[0] + rr[1] * rr[1] + rr[2] * rr[2]
+                if (d2 < 1e-4f) return@forEachIndexed
+                val cosA = (fwdX * rr[0] + fwdY * rr[1] + fwdZ * rr[2]) /
+                    kotlin.math.sqrt(d2)
+                if (cosA <= 0f) return@forEachIndexed          // screen behind / beside gaze
+                val apparent = rr[3] * rr[4] / d2               // ∝ solid angle it subtends
+                val score = cosA * apparent
+                if (score > bestScore) { bestScore = score; chosenIdx = i }
+            }
+            if (chosenIdx < 0) {
+                chosenIdx = WorkspaceController.mainScreenIdx()
+                    .coerceIn(0, layout.screens.size - 1)
+            }
+            val r = Screen.worldRect(layout.screens[chosenIdx], desktopHalfWidth, desktopHalfHeight)
+            val cx = r[0]; val cy = r[1]; val cz = r[2]
+            // Look-rotation that aims world-forward (−Z) at the screen centre with no roll:
+            // yaw about world Y to the screen's azimuth, then pitch about X to its elevation.
+            // Roll-free and gravity-level, so a subsequent head yaw stays tilt-free.
+            val horiz = kotlin.math.sqrt(cx * cx + cz * cz)
+            val theta = kotlin.math.atan2(-cx, -cz)   // azimuth: left screen (cx<0) → +θ
+            val phi = kotlin.math.atan2(cy, horiz)     // elevation: below eye (cy<0) → −φ
+            val cyq = kotlin.math.cos(theta / 2f); val syq = kotlin.math.sin(theta / 2f)
+            val cpq = kotlin.math.cos(phi / 2f); val spq = kotlin.math.sin(phi / 2f)
+            // R_look = qYaw(θ) ⊗ qPitch(φ)
+            val rw = cyq * cpq; val rx = cyq * spq; val ry = syq * cpq; val rz = -syq * spq
+            // anchor = head⁻¹ ⊗ R_look, so effective = head·anchor = R_look right now (camera
+            // looks at the main screen) and world-frame head deltas compose on top afterwards.
+            val invN = 1f / norm
+            val pw = w0 * invN; val px = -x0 * invN; val py = -y0 * invN; val pz = -z0 * invN
+            anchorW = pw * rw - px * rx - py * ry - pz * rz
+            anchorX = pw * rx + px * rw + py * rz - pz * ry
+            anchorY = pw * ry - px * rz + py * rw + pz * rx
+            anchorZ = pw * rz + px * ry - py * rx + pz * rw
             Log.i(
                 TAG,
-                "alignVerticalToHead: head=(${"%.3f".format(w0)},${"%.3f".format(x0)}," +
-                    "${"%.3f".format(y0)},${"%.3f".format(z0)}) -> " +
-                    "anchor=(${"%.3f".format(anchorW)},${"%.3f".format(anchorX)}," +
-                    "${"%.3f".format(anchorY)},${"%.3f".format(anchorZ)})",
+                "alignVerticalToHead: centre on screen[$chosenIdx] " +
+                    "world=(${"%.2f".format(cx)},${"%.2f".format(cy)},${"%.2f".format(cz)}) " +
+                    "θ=${"%.1f".format(Math.toDegrees(theta.toDouble()))}° " +
+                    "φ=${"%.1f".format(Math.toDegrees(phi.toDouble()))}°",
             )
         }
         noteInput()
@@ -3476,6 +3556,18 @@ class WorkspaceRenderer(
         out[4] = xy - wz; out[5] = 1f - (xx + zz); out[6] = yz + wx; out[7] = 0f
         out[8] = xz + wy; out[9] = yz - wx; out[10] = 1f - (xx + yy); out[11] = 0f
         out[12] = 0f; out[13] = 0f; out[14] = 0f; out[15] = 1f
+
+        // Positional parallax (6DOF tracking only): translate the camera with the head so
+        // moving physically shifts the viewpoint through the fixed workspace. The camera
+        // sits at headPos (scaled + clamped to bound VIO drift); post-multiplying T(-cam)
+        // gives view·p = R·(p - cam), the standard view transform for a translated camera.
+        // headPos is 0 on orientation-only paths, so this is a no-op there.
+        if (PARALLAX_SCALE != 0f && (headPosX != 0f || headPosY != 0f || headPosZ != 0f)) {
+            val cx = (headPosX * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            val cy = (headPosY * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            val cz = (headPosZ * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            Matrix.translateM(out, 0, -cx, -cy, -cz)
+        }
     }
 
     /**
@@ -3509,6 +3601,20 @@ class WorkspaceRenderer(
 
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f
+
+        /**
+         * Positional-parallax gain. 1.0 = true-to-life (1 cm of head motion moves the camera
+         * 1 cm against a workspace placed in metres). Lower it to damp the effect or to mute
+         * VIO position jitter; 0 disables parallax (orientation-only camera).
+         */
+        const val PARALLAX_SCALE = 1.0f
+
+        /**
+         * Hard clamp (metres) on camera displacement from the recentre origin. Carina VIO
+         * position drifts slowly; without a bound the workspace could creep away over a long
+         * session. Bounds the camera to a box around the origin big enough for natural sway.
+         */
+        const val PARALLAX_MAX_M = 0.5f
 
         /** Default render band — the glasses' top/bottom edges are uncomfortable to view. */
         const val DEFAULT_SCREEN_BAND = 0.83f

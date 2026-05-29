@@ -38,14 +38,20 @@ class WorkspacePresentation(
         // headTrackingActive flag on start/stop transitions, which (a) ungrays the FREE
         // toggle in the toolbars and (b) auto-reverts to PINNED when DOF dies.
         val renderer = view.workspaceRenderer
-        headTracking = HeadTracking(context) { w, x, y, z ->
-            renderer.setHeadPose(w, x, y, z)
-        }.also { tracking ->
+        headTracking = HeadTracking(
+            context,
+            onPose = { w, x, y, z -> renderer.setHeadPose(w, x, y, z) },
+            onPosition = { x, y, z -> renderer.setHeadPosition(x, y, z) },
+            use6Dof = { WorkspaceController.carina6Dof },
+        ).also { tracking ->
             tracking.onStreamingChanged = { streaming ->
                 WorkspaceController.headTrackingActive = streaming
             }
             tracking.start()
         }
+        // The DOF-retry button's hook (WorkspaceController.retryHeadTracking) is owned by
+        // MainActivity, which routes it through restartHeadTracking() and reports the
+        // success / failure outcome — so we don't wire it here.
     }
 
     override fun onStart() {

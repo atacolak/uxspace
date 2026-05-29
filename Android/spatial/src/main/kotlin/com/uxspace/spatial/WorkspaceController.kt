@@ -109,6 +109,17 @@ object WorkspaceController {
     @Volatile
     var sdkRecenter: (() -> Unit)? = null
 
+    /**
+     * Re-attempt head tracking (full SDK + USB teardown, then a fresh start). Wired by
+     * [com.uxspace.spatial.WorkspacePresentation], which owns the HeadTracking instance.
+     * Invoked by the in-view toolbar's DOF-retry button — the lock button turns into this
+     * while [headTrackingActive] is false — so the user can recover a tracker that never
+     * came up (e.g. Carina VIO failing to converge) without unplugging the glasses. No-op
+     * when unwired (no workspace shown).
+     */
+    @Volatile
+    var retryHeadTracking: (() -> Unit)? = null
+
     /** Forward a pinch scale factor (1.0 = identity) into the workspace zoom. */
     fun pinch(scaleFactor: Float) {
         renderer?.requestPinch(scaleFactor)
@@ -304,6 +315,8 @@ object WorkspaceController {
         val recenter: Int,
         val layout: Int,
         val settings: Int,
+        /** Shown in the lock button's place while DOF is down — taps re-attempt tracking. */
+        val dofRetry: Int,
     )
 
     @Volatile
@@ -968,6 +981,9 @@ object WorkspaceController {
     @Volatile var longPressMs: Long = 500L
     @Volatile var pinchEnabled: Boolean = true
     @Volatile var autoRecenterOnUnlock: Boolean = true
+    /** Carina 6DOF (positional parallax) vs 3DOF (orientation only). Read by HeadTracking
+     *  on each reconnect via [WorkspacePresentation]; applies on the next reconnect. */
+    @Volatile var carina6Dof: Boolean = false
     @Volatile var snapZonesEnabled: Boolean = true
     @Volatile var resizeHandlesEnabled: Boolean = true
     @Volatile var recordingFrameInterval: Int = 12
@@ -1145,9 +1161,18 @@ object WorkspaceController {
      * [layoutAnnouncementExpiresAtMs] each frame.
      */
     fun announceLayout(name: String) {
-        layoutAnnouncement = name
+        announceInView(name, LAYOUT_ANNOUNCE_MS)
+    }
+
+    /**
+     * Show an arbitrary transient message overlay in the glasses view for [durationMs].
+     * Used for layout names and for head-tracking reconnect status, so feedback is visible
+     * in-view (not only as a phone toast). Idempotent; resets the timer each call.
+     */
+    fun announceInView(text: String, durationMs: Long = LAYOUT_ANNOUNCE_MS) {
+        layoutAnnouncement = text
         layoutAnnouncementExpiresAtMs =
-            android.os.SystemClock.uptimeMillis() + LAYOUT_ANNOUNCE_MS
+            android.os.SystemClock.uptimeMillis() + durationMs
     }
 
     private val LAYOUT_ANNOUNCE_MS = 2_000L
