@@ -188,7 +188,7 @@ class WorkspaceRenderer(
     private val toolbarButtons: Array<HudButton> by lazy {
         arrayOf(
             HudButton(
-                "lock", cx = -0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "lock", cx = -0.35f, halfW = TOOLBAR_BUTTON_HALF_W,
                 // Dual-role button. With DOF live it is the lock/unlock (PINNED ↔ FREE)
                 // toggle. With DOF down it becomes a "retry head tracking" button — FREE is
                 // meaningless without head input, so rather than sit grayed-out the button
@@ -217,19 +217,19 @@ class WorkspaceRenderer(
                 }
             },
             HudButton(
-                "zoom", cx = -0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "zoom", cx = -0.21f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.zoom ?: 0 },
             ) {
                 WorkspaceController.cycleScreenBand()
             },
             HudButton(
-                "recenter", cx = 0.00f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "recenter", cx = -0.07f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.recenter ?: 0 },
             ) {
                 WorkspaceController.alignVerticalToHead()
             },
             HudButton(
-                "layout", cx = 0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "layout", cx = 0.07f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.layout ?: 0 },
                 // PINNED always renders SINGLE; cycleLayout is a no-op there, so the
                 // button is dead weight when locked.
@@ -238,7 +238,7 @@ class WorkspaceRenderer(
                 WorkspaceController.cycleLayout()
             },
             HudButton(
-                "settings", cx = 0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "settings", cx = 0.21f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.settings ?: 0 },
             ) {
                 // Always open on the *main* screen of the active layout, regardless of
@@ -249,6 +249,23 @@ class WorkspaceRenderer(
                 val openHere = WorkspaceController.isSettingsOpen &&
                     WorkspaceController.settingsOnScreen == slot
                 WorkspaceController.setSettingsOpen(!openHere, slot)
+            },
+            HudButton(
+                "capture", cx = 0.35f, halfW = TOOLBAR_BUTTON_HALF_W,
+                // Toggles frame-sequence recording; the icon flips to a red dot while
+                // recording so it doubles as an in-view recording indicator. (A one-shot
+                // screenshot is a tap on the phone control panel's capture button.)
+                iconResIdProvider = {
+                    val icons = WorkspaceController.toolbarIcons
+                    when {
+                        icons == null -> 0
+                        WorkspaceController.isRecording -> icons.recordOn
+                        else -> icons.capture
+                    }
+                },
+            ) {
+                val on = WorkspaceController.toggleRecording()
+                Log.i(TAG, "toolbar: capture button toggled recording -> $on")
             },
         )
     }
@@ -1104,6 +1121,7 @@ class WorkspaceRenderer(
             pendingPinch = 1f
         }
         drawToolbar()
+        drawRecordingIndicator()
         if (WorkspaceController.legendVisible) drawLegend()
         drawLayoutAnnouncement()
         drawCursor()
@@ -3008,6 +3026,33 @@ class WorkspaceRenderer(
     }
 
     /**
+     * Draw a small red dot just left of the in-view toolbar whenever a capture recording
+     * is running, so it's always obvious the framebuffer-readback recording is active —
+     * even while the toolbar itself is auto-hidden to its peek line. NDC-positioned; the
+     * unit [circleFan] is scaled by an aspect-corrected MVP so it stays round.
+     */
+    private fun drawRecordingIndicator() {
+        if (!recording) return
+        Matrix.setIdentityM(mvpMatrix, 0)
+        mvpMatrix[0] = REC_DOT_RADIUS                  // NDC x radius
+        mvpMatrix[5] = REC_DOT_RADIUS * surfaceAspect  // y radius (aspect-corrected → round)
+        mvpMatrix[12] = REC_DOT_CX
+        mvpMatrix[13] = REC_DOT_CY
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(solidProgram)
+        circleFan.position(0)
+        GLES20.glVertexAttribPointer(solidAPosition, 3, GLES20.GL_FLOAT, false, 0, circleFan)
+        GLES20.glEnableVertexAttribArray(solidAPosition)
+        GLES20.glUniformMatrix4fv(solidUMvp, 1, false, mvpMatrix, 0)
+        GLES20.glUniform4f(solidUColor, 0.90f, 0.12f, 0.12f, 0.95f)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, CIRCLE_HINT_SEGMENTS + 2)
+        GLES20.glDisableVertexAttribArray(solidAPosition)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    /**
      * GL texture for the given drawable, lazily uploaded the first time it's needed.
      * Returns null when no icon set has been registered or the resource resolves to
      * 0. Call on the GL thread.
@@ -3643,6 +3688,12 @@ class WorkspaceRenderer(
         const val TOOLBAR_Y = -0.90f
         const val TOOLBAR_HALF_W = 0.42f
         const val TOOLBAR_HALF_H = 0.06f
+
+        // Recording indicator — a red dot just left of the toolbar, shown whenever a
+        // recording is running (independent of the toolbar's expand/collapse state).
+        const val REC_DOT_CX = -0.50f
+        const val REC_DOT_CY = TOOLBAR_Y
+        const val REC_DOT_RADIUS = 0.018f
 
         /**
          * NDC half-width of a button's *hit region* — wider than the icon so the cursor

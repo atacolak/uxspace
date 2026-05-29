@@ -277,14 +277,26 @@ class MainActivity : ComponentActivity() {
         // The in-view toolbar's DOF-retry button routes here too, so both report success /
         // failure the same way. (WorkspacePresentation no longer owns this hook.)
         WorkspaceController.retryHeadTracking = { mainHandler.post { attemptReconnectDof() } }
-        binding.captureButton.setOnClickListener { onCapture() }
+        // Tap = one-shot screenshot; long-press = start/stop frame-sequence recording.
+        binding.captureButton.setOnClickListener { onSnapshot() }
         binding.captureButton.setOnLongClickListener {
             if (WorkspaceController.isRunning) {
-                WorkspaceController.capture()
-                Toast.makeText(this, "Single snapshot", Toast.LENGTH_SHORT).show()
+                val on = WorkspaceController.toggleRecording()
+                Toast.makeText(
+                    this,
+                    if (on) "Recording started" else "Recording stopped",
+                    Toast.LENGTH_SHORT,
+                ).show()
                 true
-            } else false
+            } else {
+                Toast.makeText(this, R.string.waiting_for_glasses, Toast.LENGTH_SHORT).show()
+                false
+            }
         }
+        // Keep the capture button's icon in sync with recording state, whichever toolbar
+        // toggled it (phone long-press or the in-view capture button).
+        WorkspaceController.addRecordingListener(recordingListener)
+        renderCaptureButton(WorkspaceController.isRecording)
         binding.layoutButton.setOnClickListener {
             // The button is grayed and isEnabled=false in PINNED via renderToolbarStates,
             // but isEnabled toggling alone doesn't block click in all paths — keep the
@@ -558,20 +570,25 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun onCapture() {
+    /** Tap on the capture button → save one screenshot of the current workspace frame. */
+    private fun onSnapshot() {
         if (!WorkspaceController.isRunning) {
             Toast.makeText(this, R.string.waiting_for_glasses, Toast.LENGTH_SHORT).show()
             return
         }
-        // Tap toggles recording — frame sequence into the captures directory at
-        // RECORDING_FRAME_INTERVAL (5 fps). A long-press still does a single snapshot
-        // when one-shot debugging is enough.
-        val recording = WorkspaceController.toggleRecording()
-        Toast.makeText(
-            this,
-            if (recording) "Recording started" else "Recording stopped",
-            Toast.LENGTH_SHORT,
-        ).show()
+        WorkspaceController.capture()
+        Toast.makeText(this, "Screenshot saved", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Recording-state listener — flips the capture button to a red dot while recording. */
+    private val recordingListener: (Boolean) -> Unit = { rec ->
+        mainHandler.post { renderCaptureButton(rec) }
+    }
+
+    private fun renderCaptureButton(recording: Boolean) {
+        binding.captureButton.setImageResource(
+            if (recording) R.drawable.ic_record_on else R.drawable.ic_capture,
+        )
     }
 
     /** Show or hide the system keyboard. Keystroke routing into the focused app is M4. */
@@ -638,6 +655,7 @@ class MainActivity : ComponentActivity() {
         presentation = null
         setWorkspaceServiceRunning(false)
         PrivilegedService.removeListener(privilegeListener)
+        WorkspaceController.removeRecordingListener(recordingListener)
         WorkspaceController.removeZoomListener(zoomHudListener)
         if (WorkspaceController.pickWallpaperFromDevice != null) {
             WorkspaceController.pickWallpaperFromDevice = null

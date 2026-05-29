@@ -317,6 +317,10 @@ object WorkspaceController {
         val settings: Int,
         /** Shown in the lock button's place while DOF is down — taps re-attempt tracking. */
         val dofRetry: Int,
+        /** In-view capture button — toggles frame-sequence recording. */
+        val capture: Int,
+        /** Red dot shown in the capture button's place while recording is running. */
+        val recordOn: Int,
     )
 
     @Volatile
@@ -1197,16 +1201,26 @@ object WorkspaceController {
         renderer?.requestCapture()
     }
 
-    /** Toggle frame-sequence recording — saves a PNG every Nth render frame until stopped. */
+    /** Toggle frame-sequence recording — saves a PNG every Nth render frame until stopped.
+     *  Notifies [recordingListeners] so every surface (phone button, in-view toolbar) can
+     *  reflect the new state regardless of which one toggled it. */
     fun toggleRecording(): Boolean {
         val r = renderer ?: return false
         val next = !r.isRecording()
         r.setRecording(next)
+        recordingListeners.forEach { runCatching { it(next) } }
         return next
     }
 
     /** Whether a recording is currently in progress. */
     val isRecording: Boolean get() = renderer?.isRecording() == true
+
+    private val recordingListeners =
+        java.util.concurrent.CopyOnWriteArrayList<(recording: Boolean) -> Unit>()
+
+    /** Notified (on the caller's thread) whenever recording starts or stops. */
+    fun addRecordingListener(l: (recording: Boolean) -> Unit) { recordingListeners.add(l) }
+    fun removeRecordingListener(l: (recording: Boolean) -> Unit) { recordingListeners.remove(l) }
 
     /** Move the workspace cursor by a fraction of the touchpad's width. */
     fun moveCursor(dxFraction: Float, dyFraction: Float) {

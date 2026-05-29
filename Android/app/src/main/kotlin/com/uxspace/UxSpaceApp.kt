@@ -125,6 +125,8 @@ class UxSpaceApp : Application() {
             layout = R.drawable.ic_layout,
             settings = R.drawable.ic_settings,
             dofRetry = R.drawable.ic_dof_retry,
+            capture = R.drawable.ic_capture,
+            recordOn = R.drawable.ic_record_on,
         )
         WorkspaceController.mainScreenForLayout = { layout ->
             WorkspaceSettings.mainScreenFor(layout)
