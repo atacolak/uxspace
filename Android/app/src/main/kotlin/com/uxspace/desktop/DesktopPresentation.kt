@@ -992,15 +992,14 @@ class DesktopPresentation(
         val gestures = GestureDetector(
             context,
             object : GestureDetector.SimpleOnGestureListener() {
-                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                // onSingleTapUp (not onSingleTapConfirmed): the cursor delivers each
+                // click as a synthesized DOWN+UP, and the confirmed variant defers
+                // ~300 ms waiting for a double-tap that never reliably arrives — so a
+                // single click felt dead. Fire restore/focus immediately on the up.
+                // (Double-tap-to-close was a leftover from the old single-display
+                // model; closing now lives on the window chrome's Close button.)
+                override fun onSingleTapUp(e: MotionEvent): Boolean {
                     WorkspaceController.focusApp(packageName)
-                    return true
-                }
-
-                override fun onDoubleTap(e: MotionEvent): Boolean {
-                    // Double-tap = close. (Old single-display model used this to un-maximise
-                    // a maximised window; the slot model has no maximised state.)
-                    WorkspaceController.closeAppByPackage(packageName)
                     return true
                 }
 

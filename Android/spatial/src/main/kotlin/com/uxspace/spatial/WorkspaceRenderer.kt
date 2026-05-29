@@ -131,6 +131,14 @@ class WorkspaceRenderer(
     private var cursorUHalfSize = 0
     private var cursorUColor = 0
 
+    // Solid-colour 3D program — fills geometry with a flat uColor in world space
+    // (uMvp), used for the FULLSCREEN toolbar's circular reveal hint.
+    private var solidProgram = 0
+    private var solidAPosition = 0
+    private var solidUMvp = 0
+    private var solidUColor = 0
+    private lateinit var circleFan: java.nio.FloatBuffer
+
     // HUD-icon program: textured quads in NDC space, used for the in-view toolbar.
     private var hudProgram = 0
     private var hudAPosition = 0
@@ -762,10 +770,16 @@ class WorkspaceRenderer(
         hudUColor = GLES20.glGetUniformLocation(hudProgram, "uColor")
         hudUTexture = GLES20.glGetUniformLocation(hudProgram, "uTexture")
 
+        solidProgram = buildProgram(SOLID_VERTEX_SHADER, SOLID_FRAGMENT_SHADER)
+        solidAPosition = GLES20.glGetAttribLocation(solidProgram, "aPosition")
+        solidUMvp = GLES20.glGetUniformLocation(solidProgram, "uMvp")
+        solidUColor = GLES20.glGetUniformLocation(solidProgram, "uColor")
+
         screenQuad = directBufferOf(SCREEN_QUAD_VERTICES)
         cursorArrow = directBufferOf(CURSOR_ARROW_VERTICES)
         scrimQuad = directBufferOf(SCRIM_QUAD_VERTICES)
         hudQuad = directBufferOf(HUD_QUAD_VERTICES)
+        circleFan = directBufferOf(buildCircleFanVertices(CIRCLE_HINT_SEGMENTS))
         // GL context just came up — any cached icon texture ids are stale.
         iconTextures.clear()
 
@@ -910,20 +924,40 @@ class WorkspaceRenderer(
                 drawExternalQuad(window.ui.textureId, window.ui.textureMatrix)
             }
 
-            // Fullscreen floating chrome — always overlaid on top of the activity
-            // quad. The chrome view itself lives in the slot's Presentation, already
-            // laid out at chromeOverlayRect, so we just re-sample that sub-region of
-            // the slot texture — same trick as drawSlotModalOverlay.
+            // Fullscreen floating chrome — auto-hidden, revealed only while the
+            // cursor is over its top-left zone (expanded by a small margin so the
+            // buttons stay reachable). The chrome view lives in the slot's
+            // Presentation laid out at chromeOverlayRect; when revealed we re-sample
+            // that sub-region of the slot texture and draw it on top of the activity
+            // quad. Skipping the draw leaves the toolbar covered by the activity =
+            // hidden, so on launch (cursor elsewhere) it stays out of the way.
             if (window.mode == WorkspaceController.WindowMode.FULLSCREEN) {
                 val slotUi = if (window.slotIdx == 0) desktop
                 else extraScreens.getOrNull(window.slotIdx - 1)
                 if (slotUi != null) {
                     val cr = window.chromeOverlayRect(slotScreen.contentWidthPx)
-                    drawSlotModalOverlay(
-                        slotScreen,
-                        slotUi,
-                        WorkspaceController.ModalBounds(cr[0], cr[1], cr[2], cr[3]),
-                    )
+                    val cur = cursorToRectPx(slotScreen)
+                    val m = FULLSCREEN_TOOLBAR_REVEAL_MARGIN_PX
+                    val overToolbar = cur != null &&
+                        cur[0] >= cr[0] - m && cur[0] < cr[0] + cr[2] + m &&
+                        cur[1] >= cr[1] - m && cur[1] < cr[1] + cr[3] + m
+                    if (overToolbar) {
+                        drawSlotModalOverlay(
+                            slotScreen,
+                            slotUi,
+                            WorkspaceController.ModalBounds(cr[0], cr[1], cr[2], cr[3]),
+                        )
+                    } else {
+                        // Hidden — show a semi-opaque circle hint where the toolbar
+                        // will appear (centred on the toolbar rect, diameter = half
+                        // its height) so the reveal target is discoverable.
+                        drawSlotCircleHint(
+                            slotScreen,
+                            cr[0] + cr[2] / 2f,
+                            cr[1] + cr[3] / 2f,
+                            cr[3] / 2f,
+                        )
+                    }
                 }
             }
 
@@ -1610,10 +1644,74 @@ class WorkspaceRenderer(
         buildModelRectYawed(modelMatrix, mCx, mCy, slotCz, mW, mH, slot.yawDeg)
         Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
         Matrix.setIdentityM(modalSubM, 0)
-        Matrix.translateM(modalSubM, 0, u0, v0, 0f)
+        // Texture V is inverted relative to pixel-Y — the slot's SurfaceTexture
+        // carries a vertical flip in textureMatrix — so the sampled sub-rect's V
+        // range must be mirrored: a strip at pixel rows [v0,v1] (v0 = top) maps to
+        // quad-UV [1-v1, 1-v0]. Vertically-centred modals (drawer / settings /
+        // audio) are unaffected because their range is symmetric about 0.5; the
+        // top-pinned FULLSCREEN chrome toolbar previously sampled the *bottom* of
+        // the slot (taskbar / wallpaper) and painted it over the app's top-left.
+        Matrix.translateM(modalSubM, 0, u0, 1f - v1, 0f)
         Matrix.scaleM(modalSubM, 0, u1 - u0, v1 - v0, 1f)
         Matrix.multiplyMM(modalComposedTexM, 0, slotUi.textureMatrix, 0, modalSubM, 0)
         drawExternalQuad(slotUi.textureId, modalComposedTexM)
+    }
+
+    /**
+     * Unit-circle triangle-fan: a centre vertex plus [segments]+1 perimeter
+     * vertices at radius 1 in the XY plane (z=0). Scaled to the desired world
+     * size by [buildModelRectYawed] (which halves w/h), so passing diameter =
+     * 2·radius gives a circle of that diameter.
+     */
+    private fun buildCircleFanVertices(segments: Int): FloatArray {
+        val verts = FloatArray((segments + 2) * 3)
+        var i = 0
+        verts[i++] = 0f; verts[i++] = 0f; verts[i++] = 0f
+        for (s in 0..segments) {
+            val a = (s.toDouble() / segments) * 2.0 * Math.PI
+            verts[i++] = Math.cos(a).toFloat()
+            verts[i++] = Math.sin(a).toFloat()
+            verts[i++] = 0f
+        }
+        return verts
+    }
+
+    /**
+     * Draw the FULLSCREEN toolbar's reveal hint — a semi-opaque circle on the
+     * slot quad, centred on the (hidden) toolbar's rect so it sits exactly where
+     * the toolbar appears on hover. [centerPxX]/[centerPxY] and [diameterPx] are
+     * slot-local pixels; the circle is alpha-blended over the activity quad.
+     */
+    private fun drawSlotCircleHint(
+        slot: Screen,
+        centerPxX: Float,
+        centerPxY: Float,
+        diameterPx: Float,
+    ) {
+        val slotRect = Screen.worldRect(slot, desktopHalfWidth, desktopHalfHeight)
+        val slotCx = slotRect[0]; val slotCy = slotRect[1]; val slotCz = slotRect[2]
+        val slotW = slotRect[3];  val slotH = slotRect[4]
+        val slotPxW = slot.contentWidthPx.toFloat()
+        val slotPxH = slot.contentHeightPx.toFloat()
+        val cx = slotCx + (centerPxX / slotPxW - 0.5f) * slotW
+        val cy = slotCy + (0.5f - centerPxY / slotPxH) * slotH  // V flips Y.
+        val dW = slotW * (diameterPx / slotPxW)
+        val dH = slotH * (diameterPx / slotPxH)
+        buildModelRectYawed(modelMatrix, cx, cy, slotCz, dW, dH, slot.yawDeg)
+        Matrix.multiplyMM(mvpMatrix, 0, viewProjection, 0, modelMatrix, 0)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(solidProgram)
+        circleFan.position(0)
+        GLES20.glVertexAttribPointer(solidAPosition, 3, GLES20.GL_FLOAT, false, 0, circleFan)
+        GLES20.glEnableVertexAttribArray(solidAPosition)
+        GLES20.glUniformMatrix4fv(solidUMvp, 1, false, mvpMatrix, 0)
+        GLES20.glUniform4f(
+            solidUColor, CIRCLE_HINT_R, CIRCLE_HINT_G, CIRCLE_HINT_B, CIRCLE_HINT_A,
+        )
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, CIRCLE_HINT_SEGMENTS + 2)
+        GLES20.glDisableVertexAttribArray(solidAPosition)
+        GLES20.glDisable(GLES20.GL_BLEND)
     }
 
     /**
@@ -3519,6 +3617,15 @@ class WorkspaceRenderer(
         const val TASKBAR_HOVER_ZONE_PX = 200
 
         /**
+         * Slack (slot-local px) added around the FULLSCREEN chrome toolbar's
+         * top-left rect when deciding whether the cursor is "over" it. The
+         * toolbar is auto-hidden and only drawn while the cursor is within this
+         * expanded zone, so the margin keeps the buttons' edges reachable
+         * without the toolbar flickering away mid-click.
+         */
+        const val FULLSCREEN_TOOLBAR_REVEAL_MARGIN_PX = 24
+
+        /**
          * Slot-bottom band that's treated as "the taskbar zone" when resolving a
          * drag-from-drawer drop. Matches [WINDOW_TASKBAR_PX] so a drop on the bar
          * cancels instead of pinning a shortcut behind the taskbar.
@@ -3641,6 +3748,36 @@ class WorkspaceRenderer(
                 gl_FragColor = uColor;
             }
         """
+
+        // Solid-colour 3D program — flat uColor geometry transformed by uMvp.
+        const val SOLID_VERTEX_SHADER = """
+            uniform mat4 uMvp;
+            attribute vec4 aPosition;
+            void main() {
+                gl_Position = uMvp * aPosition;
+            }
+        """
+
+        const val SOLID_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform vec4 uColor;
+            void main() {
+                gl_FragColor = uColor;
+            }
+        """
+
+        /** Triangle-fan segment count for the FULLSCREEN toolbar's reveal-hint circle. */
+        const val CIRCLE_HINT_SEGMENTS = 48
+
+        /**
+         * Semi-opaque RGBA of the reveal-hint dot shown where the FULLSCREEN toolbar
+         * will appear. A frosted neutral so it reads on both light and dark apps;
+         * its diameter matches the toolbar height.
+         */
+        const val CIRCLE_HINT_R = 0.88f
+        const val CIRCLE_HINT_G = 0.90f
+        const val CIRCLE_HINT_B = 0.96f
+        const val CIRCLE_HINT_A = 0.42f
 
         // HUD icon: textured NDC quad. Sampled texture is multiplied by uColor so the
         // same white-on-transparent material-symbols bitmap can be tinted per state

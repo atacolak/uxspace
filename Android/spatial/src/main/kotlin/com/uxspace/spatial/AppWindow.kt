@@ -125,13 +125,14 @@ class AppWindow(
      * surface.
      *  - NORMAL / MAXIMIZED: a full-width strip above the activity at the window's
      *    outer top (`xPx, yPx, widthPx, chromePx`).
-     *  - FULLSCREEN: a thin toolbar pinned to the slot's top-left corner, just wide
+     *  - FULLSCREEN: a thin toolbar pinned to the slot's top-centre, just wide
      *    enough for the four buttons (back / minimise / maximise / close).
      */
     fun chromeOverlayRect(slotWidthPx: Int): IntArray = when (mode) {
         WorkspaceController.WindowMode.FULLSCREEN -> {
             val w = FULLSCREEN_TOOLBAR_WIDTH_PX.coerceAtMost(slotWidthPx)
-            intArrayOf(0, 0, w, chromePx)
+            val x = ((slotWidthPx - w) / 2).coerceAtLeast(0)
+            intArrayOf(x, 0, w, chromePx)
         }
         else -> intArrayOf(xPx, yPx, widthPx, chromePx)
     }
@@ -207,11 +208,13 @@ class AppWindow(
 
         /**
          * Slot-local pixel width of the floating chrome toolbar shown in
-         * FULLSCREEN — exactly four 48 dp buttons wide (back / minimize /
+         * FULLSCREEN — exactly four 34 dp buttons wide (back / minimize /
          * maximize / close), no padding, so the row fills the toolbar with
-         * no slack. Slot density is 200 dpi, so 4 × 48 dp = 192 dp = 240 px.
+         * no slack. Slot density is 200 dpi, so 4 × 34 dp = 136 dp = 168 px.
+         * Button size is [com.uxspace.desktop.WindowChromeView]'s
+         * BUTTON_WIDTH_DP (30% smaller than the original 48 dp).
          */
-        const val FULLSCREEN_TOOLBAR_WIDTH_PX = 240
+        const val FULLSCREEN_TOOLBAR_WIDTH_PX = 168
 
         /**
          * Outer window bounds `[x, y, width, height]` (slot-local pixels) for a window

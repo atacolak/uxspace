@@ -80,6 +80,12 @@ class WindowChromeView(context: Context) : FrameLayout(context) {
         val titleGesture = android.view.GestureDetector(
             context,
             object : android.view.GestureDetector.SimpleOnGestureListener() {
+                // Must return true: it makes the title bar the registered touch
+                // target for the gesture, so the synthesized ACTION_UP from
+                // UiScreen.dispatchTap is delivered and recorded. Without it the
+                // UP is dropped, the first tap never completes, and the second
+                // tap is never paired — so onDoubleTap never fires.
+                override fun onDown(e: android.view.MotionEvent): Boolean = true
                 override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
                     fireMaximize()
                     return true
@@ -122,13 +128,7 @@ class WindowChromeView(context: Context) : FrameLayout(context) {
         toolbar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(UxSpaceTheme.windowChromeCompactBg)
-                // 1 px magenta stroke so the toolbar's real layout bounds are
-                // visible in captures — for diagnosing vertical centering of
-                // the buttons inside.
-                setStroke(1, 0xFFFF00FF.toInt())
-            }
+            setBackgroundColor(UxSpaceTheme.windowChromeCompactBg)
         }
         toolBack = chromeButton(R.drawable.ic_back, "Back") { fireBack() }
         toolMin = chromeButton(R.drawable.ic_minimize, "Minimize") { fireMinimize() }
@@ -241,11 +241,14 @@ class WindowChromeView(context: Context) : FrameLayout(context) {
          * Chrome button size in dp. Height is intentionally smaller than the
          * chrome strip ([DesktopPresentation.CHROME_HEIGHT_DP] tall) so the
          * parent LinearLayout's CENTER gravity has slack to vertically centre
-         * the button. Width matches the prior button size so the four-button
-         * row still totals to the fullscreen toolbar's
-         * [AppWindow.FULLSCREEN_TOOLBAR_WIDTH_PX].
+         * the button. The four-button row width must stay in step with the
+         * fullscreen toolbar's [AppWindow.FULLSCREEN_TOOLBAR_WIDTH_PX]:
+         * 4 × 34 dp at the slot's 200 dpi (density 1.25) = 168 px.
+         *
+         * Sized down 30% from the original 48 × 30 dp for a less bulky control
+         * cluster on the right of the window chrome.
          */
-        const val BUTTON_WIDTH_DP = 48
-        const val BUTTON_HEIGHT_DP = 30
+        const val BUTTON_WIDTH_DP = 34
+        const val BUTTON_HEIGHT_DP = 21
     }
 }

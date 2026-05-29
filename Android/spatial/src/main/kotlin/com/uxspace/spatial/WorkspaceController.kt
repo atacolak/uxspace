@@ -806,7 +806,7 @@ object WorkspaceController {
         renderer?.focusApp(packageName)
     }
 
-    /** Close an app — a taskbar-icon double-tap. */
+    /** Close an app — fired by the window chrome's Close button. */
     fun closeAppByPackage(packageName: String) {
         renderer?.closeAppByPackage(packageName)
     }
