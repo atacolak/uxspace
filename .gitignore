@@ -1,0 +1,11 @@
+# Proprietary VITURE SDK — must NOT be committed or redistributed.
+# Download from https://www.viture.com/developer (kept outside the repo).
+/Viture/
+
+# IDE / editor
+/.idea/
+
+# Local SQLite history scratch at the monorepo root
+/history.db
+/history.db-shm
+/history.db-wal
