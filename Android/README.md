@@ -389,3 +389,7 @@ its own device's wireless-debugging service without a separate Shizuku install.
 
 Apache-2.0 — see [LICENSE](LICENSE). The vendored VITURE SDK is **not** covered by
 this licence; obtain and use it under VITURE's terms.
+
+## Contact
+
+Maintained by Demian Vladi — [demianvladi@gmail.com](mailto:demianvladi@gmail.com).

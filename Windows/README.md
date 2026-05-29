@@ -137,3 +137,7 @@ is not part of this repository.
   what carries over from Android, the new `:driver` module.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — W0–W5 milestones in detail.
 - [`CLAUDE.md`](CLAUDE.md) — architecture invariants, build landmines, fork lineage.
+
+## Contact
+
+Maintained by Demian Vladi — [demianvladi@gmail.com](mailto:demianvladi@gmail.com).

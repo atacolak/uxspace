@@ -76,3 +76,7 @@ The Android project is licensed under the Apache License 2.0 (`Android/LICENSE`)
 Windows `driver/` is a fork of Microsoft's `IddSampleDriver` and retains its MIT license
 (`Windows/driver/UPSTREAM_LICENSE`). The VITURE SDK is proprietary and is not part of
 this repository.
+
+## Contact
+
+Maintained by Demian Vladi — [demianvladi@gmail.com](mailto:demianvladi@gmail.com).
