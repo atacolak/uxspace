@@ -3519,9 +3519,9 @@ class WorkspaceRenderer(
         /** Hard upper bound on the render band — beyond 1.0 the scene crops top/bottom. */
         const val MAX_SCREEN_BAND = 2.5f
 
-        /** Pinch zoom clamps the projection scale into this range — 80% to 200%. */
+        /** Pinch zoom clamps the projection scale into this range — 80% to 300%. */
         const val WORKSPACE_ZOOM_MIN = 0.8f
-        const val WORKSPACE_ZOOM_MAX = 2.0f
+        const val WORKSPACE_ZOOM_MAX = 3.0f
 
         /** Initial workspace zoom for both PINNED and FREE modes — 120% on startup. */
         const val DEFAULT_WORKSPACE_ZOOM = 1.2f
