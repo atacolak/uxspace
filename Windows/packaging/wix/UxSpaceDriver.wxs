@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  UxSpace driver MSI. Ships the signed IddCx driver + its self-signed
+  .cer + devcon.exe + install/uninstall PS1 scripts to a per-machine
+  location, then runs InstallDriver.ps1 as an elevated deferred custom
+  action that imports the cert, calls pnputil, and creates the root
+  devnode. Uninstall reverses the devnode/store steps.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="UxSpace Driver"
+           Manufacturer="DVladi"
+           Version="$(var.Version)"
+           UpgradeCode="b6d2f9a8-3c41-4d80-a8e1-77c12e8e9b21"
+           Scope="perMachine"
+           InstallerVersion="500">
+    <SummaryInformation Description="UxSpace IddCx virtual display driver (test-signed)."/>
+    <MajorUpgrade DowngradeErrorMessage="A newer version of UxSpace Driver is already installed."/>
+    <Media Id="1" Cabinet="UxSpaceDriver.cab" EmbedCab="yes"/>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="UxSpaceDriver">
+        <!-- One component per file: WiX 4+ auto-assigns the per-file
+             component a deterministic GUID derived from its install
+             path, which is the supported pattern for non-versioned and
+             mixed-versioned file sets. -->
+        <Component Id="CompDriverDll" Bitness="always64">
+          <File Source="$(var.DriverDir)\UxSpaceDriver.dll"/>
+        </Component>
+        <Component Id="CompDriverInf" Bitness="always64">
+          <File Source="$(var.DriverDir)\UxSpaceDriver.inf"/>
+        </Component>
+        <Component Id="CompDriverCat" Bitness="always64">
+          <File Source="$(var.DriverDir)\UxSpaceDriver.cat"/>
+        </Component>
+        <Component Id="CompDriverCer" Bitness="always64">
+          <File Source="$(var.DriverDir)\UxSpaceDriver.cer"/>
+        </Component>
+        <Component Id="CompDevcon" Bitness="always64">
+          <File Source="$(var.DriverDir)\devcon.exe"/>
+        </Component>
+        <Component Id="CompInstallScript" Bitness="always64">
+          <File Source="$(var.DriverDir)\InstallDriver.ps1"/>
+        </Component>
+        <Component Id="CompUninstallScript" Bitness="always64">
+          <File Source="$(var.DriverDir)\UninstallDriver.ps1"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Deferred actions run elevated as SYSTEM at installation time. -->
+    <CustomAction Id="InstallDriver"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "[INSTALLFOLDER]InstallDriver.ps1"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check"/>
+    <CustomAction Id="UninstallDriver"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "[INSTALLFOLDER]UninstallDriver.ps1"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore"/>
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallDriver"   After="InstallFiles" Condition="NOT Installed"/>
+      <Custom Action="UninstallDriver" Before="RemoveFiles" Condition="Installed AND REMOVE=&quot;ALL&quot;"/>
+    </InstallExecuteSequence>
+
+    <Feature Id="DriverFeature" Title="UxSpace Driver" Level="1">
+      <ComponentRef Id="CompDriverDll"/>
+      <ComponentRef Id="CompDriverInf"/>
+      <ComponentRef Id="CompDriverCat"/>
+      <ComponentRef Id="CompDriverCer"/>
+      <ComponentRef Id="CompDevcon"/>
+      <ComponentRef Id="CompInstallScript"/>
+      <ComponentRef Id="CompUninstallScript"/>
+    </Feature>
+  </Package>
+</Wix>
