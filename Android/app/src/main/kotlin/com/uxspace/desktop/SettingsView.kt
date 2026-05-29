@@ -634,7 +634,15 @@ class SettingsView(context: Context) : LinearLayout(context) {
         addView(spacer(dp(14)))
 
         addView(sectionLabel("App display"))
-        addView(buildAppDpiRow())
+        addView(
+            tunedSliderRow(
+                label = "Window DPI",
+                min = WorkspaceSettings.APP_DISPLAY_DPI_MIN.toFloat(),
+                max = WorkspaceSettings.APP_DISPLAY_DPI_MAX.toFloat(),
+                current = WorkspaceSettings.appDisplayDpi().toFloat(),
+                format = { snapAppDpi(it).toString() },
+            ) { WorkspaceSettings.setAppDisplayDpi(snapAppDpi(it)) },
+        )
         addView(
             TextView(context).apply {
                 text = "Applies to newly-launched windows. Existing windows keep their DPI."
@@ -660,28 +668,11 @@ class SettingsView(context: Context) : LinearLayout(context) {
         )
     }
 
-    private val appDpiButtons = mutableMapOf<Int, TextView>()
-
-    private fun buildAppDpiRow(): View = LinearLayout(context).apply {
-        orientation = HORIZONTAL
-        appDpiButtons.clear()
-        val current = WorkspaceSettings.appDisplayDpi()
-        WorkspaceSettings.APP_DISPLAY_DPI_PRESETS.forEachIndexed { i, dpi ->
-            val btn = pillButton(dpi.toString()) {
-                WorkspaceSettings.setAppDisplayDpi(dpi)
-                renderAppDpi()
-            }
-            val lp = weightedLp()
-            if (i > 0) lp.marginStart = dp(6)
-            addView(btn, lp)
-            appDpiButtons[dpi] = btn
-        }
-        post { renderAppDpi() }
-    }
-
-    private fun renderAppDpi() {
-        val current = WorkspaceSettings.appDisplayDpi()
-        appDpiButtons.forEach { (dpi, btn) -> stylePill(btn, dpi == current) }
+    /** Snap a raw slider value to the nearest [WorkspaceSettings.APP_DISPLAY_DPI_STEP]. */
+    private fun snapAppDpi(v: Float): Int {
+        val step = WorkspaceSettings.APP_DISPLAY_DPI_STEP
+        return (Math.round(v / step) * step)
+            .coerceIn(WorkspaceSettings.APP_DISPLAY_DPI_MIN, WorkspaceSettings.APP_DISPLAY_DPI_MAX)
     }
 
     // endregion

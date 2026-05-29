@@ -57,11 +57,13 @@ object WorkspaceSettings {
     const val DEFAULT_APP_DISPLAY_DPI = 200
 
     /**
-     * Density-DPI values the Windows tab offers. Lower numbers mean less pixel-per-dp
-     * → UI looks smaller; higher numbers blow it up. 200 is the current default and
-     * sits between Android's stock `mdpi` (160) and `hdpi` (240) buckets.
+     * Density-DPI range the Windows tab's slider offers. Lower numbers mean less
+     * pixel-per-dp → app UI looks smaller; higher numbers blow it up. 200 (the
+     * default) sits between Android's stock `mdpi` (160) and `hdpi` (240) buckets.
      */
-    val APP_DISPLAY_DPI_PRESETS: IntArray = intArrayOf(120, 160, 200, 240, 320, 420)
+    const val APP_DISPLAY_DPI_MIN = 60
+    const val APP_DISPLAY_DPI_MAX = 240
+    const val APP_DISPLAY_DPI_STEP = 10
 
     @Volatile
     private lateinit var prefs: SharedPreferences
@@ -227,10 +229,18 @@ object WorkspaceSettings {
     fun setTaskbarAutoHide(v: Boolean) = putBoolean(KEY_TASKBAR_AUTO_HIDE, v)
 
     /** Density-DPI used when creating a per-app trusted VirtualDisplay. */
-    fun appDisplayDpi(): Int =
-        if (::prefs.isInitialized) prefs.getInt(KEY_APP_DISPLAY_DPI, DEFAULT_APP_DISPLAY_DPI)
-        else DEFAULT_APP_DISPLAY_DPI
-    fun setAppDisplayDpi(v: Int) = putInt(KEY_APP_DISPLAY_DPI, v)
+    fun appDisplayDpi(): Int {
+        val raw = if (::prefs.isInitialized) {
+            prefs.getInt(KEY_APP_DISPLAY_DPI, DEFAULT_APP_DISPLAY_DPI)
+        } else {
+            DEFAULT_APP_DISPLAY_DPI
+        }
+        // Clamp into the current slider range so a value persisted under the old
+        // wider presets (e.g. 320 / 420) maps into bounds.
+        return raw.coerceIn(APP_DISPLAY_DPI_MIN, APP_DISPLAY_DPI_MAX)
+    }
+    fun setAppDisplayDpi(v: Int) =
+        putInt(KEY_APP_DISPLAY_DPI, v.coerceIn(APP_DISPLAY_DPI_MIN, APP_DISPLAY_DPI_MAX))
 
     /** Wipe every value back to defaults. Used by the About tab's "Reset" button. */
     fun resetAll() {

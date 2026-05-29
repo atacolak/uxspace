@@ -142,7 +142,7 @@ class UiScreen(
         // Per-app DPI is user-configurable in the Windows tab; the UI's own
         // displays (start / startTrusted) keep the fixed [DENSITY_DPI] so the
         // workspace chrome / taskbar size doesn't shift around per-app.
-        val appDpi = WorkspaceController.appDisplayDpi.coerceIn(80, 640)
+        val appDpi = WorkspaceController.appDisplayDpi.coerceIn(60, 640)
         val displayId = createTrusted(displayName, width, height, appDpi, surface)
         if (displayId == null) {
             if (attempt >= MAX_TRUSTED_ATTEMPTS) {
