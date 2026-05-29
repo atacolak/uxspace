@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import android.opengl.Matrix
@@ -20,6 +21,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
@@ -289,6 +292,28 @@ class WorkspaceRenderer(
     @Volatile private var captureRequested = false
     @Volatile private var recording = false
     private var recordingFrameCounter = 0
+
+    // --- Async capture pipeline ---------------------------------------------------------
+    // glReadPixels into a Pixel-Buffer Object returns immediately (no GPU stall); the bytes
+    // are mapped and consumed one capture later, then the heavy work (row-flip → ARGB,
+    // bitmap, debug overlay, PNG encode, file write) runs on a single worker thread. Buffers
+    // are reused; [captureBusy] caps it at one in-flight capture so encodes can't pile up
+    // and the reusable buffers are never written while the worker reads them.
+    private var capturePboId = 0
+    private var capturePboW = 0
+    private var capturePboH = 0
+    @Volatile private var captureReadbackPending = false
+    private var capturePendingSnapshot = false
+    private val captureBusy = AtomicBoolean(false)
+    private val captureExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "uxspace-capture").apply { isDaemon = true }
+    }
+    /** RGBA, bottom-up — copied out of the mapped PBO on the GL thread, read by the worker. */
+    private var captureWorkBuf = ByteArray(0)
+    /** ARGB top-down scratch — worker thread only. */
+    private var capturePixels = IntArray(0)
+    /** Reused output bitmap — worker thread only. */
+    private var captureBitmap: Bitmap? = null
     @Volatile private var pendingScroll = 0f
 
     /**
@@ -838,6 +863,12 @@ class WorkspaceRenderer(
             layoutAnnouncementTextureId = 0
             layoutAnnouncementCachedText = null
         }
+        // Capture PBO belongs to the now-gone context — zero it so ensureCapturePbo
+        // recreates on the next capture (the id from the old context is invalid here).
+        capturePboId = 0
+        capturePboW = 0
+        capturePboH = 0
+        captureReadbackPending = false
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -1126,16 +1157,20 @@ class WorkspaceRenderer(
         drawLayoutAnnouncement()
         drawCursor()
 
-        if (captureRequested) {
-            captureRequested = false
-            saveFrameCapture()
-        }
-        if (recording) {
-            val interval = WorkspaceController.recordingFrameInterval.coerceAtLeast(1)
-            if (recordingFrameCounter % interval == 0) {
-                saveFrameCapture()
+        // Capture pipeline: first consume any async readback issued on an earlier frame
+        // (no GPU stall — the data is long since ready), then issue a new readback if a
+        // snapshot was requested or a recording sample is due. One in flight at a time.
+        consumeCaptureReadback()
+        val interval = WorkspaceController.recordingFrameInterval.coerceAtLeast(1)
+        val recordingDue = recording && (recordingFrameCounter % interval == 0)
+        recordingFrameCounter++
+        if (!captureReadbackPending && !captureBusy.get()) {
+            if (captureRequested) {
+                captureRequested = false
+                issueCaptureReadback(snapshot = true)
+            } else if (recordingDue) {
+                issueCaptureReadback(snapshot = false)
             }
-            recordingFrameCounter++
         }
     }
 
@@ -3488,73 +3523,124 @@ class WorkspaceRenderer(
         return floatArrayOf(worldPoint[0] / w, worldPoint[1] / w, worldPoint[2] / w)
     }
 
-    /** Read back the just-rendered frame and save it as a PNG, for off-device inspection. */
-    private fun saveFrameCapture() {
-        val w = surfaceWidth
-        val h = surfaceHeight
+    /** (Re)create the readback PBO + reusable CPU buffers for the current surface size.
+     *  GL thread only. Surface size is stable for a session, so this runs ~once. */
+    private fun ensureCapturePbo(w: Int, h: Int) {
+        if (capturePboId != 0 && capturePboW == w && capturePboH == h) return
+        if (capturePboId != 0) {
+            GLES30.glDeleteBuffers(1, intArrayOf(capturePboId), 0)
+            capturePboId = 0
+        }
+        val ids = IntArray(1)
+        GLES30.glGenBuffers(1, ids, 0)
+        capturePboId = ids[0]
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, w * h * 4, null, GLES30.GL_STREAM_READ)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+        capturePboW = w; capturePboH = h
+        captureWorkBuf = ByteArray(w * h * 4)
+        capturePixels = IntArray(w * h)
+        captureBitmap = null
+        captureReadbackPending = false
+    }
+
+    /** Kick off an async framebuffer readback into the PBO — returns immediately, no GPU
+     *  stall. The pixels are picked up by [consumeCaptureReadback] on a later frame. */
+    private fun issueCaptureReadback(snapshot: Boolean) {
+        val w = surfaceWidth; val h = surfaceHeight
         if (w == 0 || h == 0) return
-        val buffer = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
-        GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
-        val rgba = ByteArray(w * h * 4)
-        buffer.rewind()
-        buffer.get(rgba)
-        // glReadPixels rows run bottom-to-top; flip into top-down opaque ARGB pixels.
-        val pixels = IntArray(w * h)
-        for (y in 0 until h) {
-            val src = (h - 1 - y) * w * 4
-            val dst = y * w
-            for (x in 0 until w) {
-                val i = src + x * 4
-                val r = rgba[i].toInt() and 0xFF
-                val g = rgba[i + 1].toInt() and 0xFF
-                val b = rgba[i + 2].toInt() and 0xFF
-                pixels[dst + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        ensureCapturePbo(w, h)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        // Offset 0 into the bound PIXEL_PACK_BUFFER — the read DMAs in the background.
+        GLES30.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+        captureReadbackPending = true
+        capturePendingSnapshot = snapshot
+    }
+
+    /** Map the previously-issued readback, copy it into a reusable buffer, and hand it to
+     *  the encode worker. The map doesn't stall: the read was issued frames ago. GL thread. */
+    private fun consumeCaptureReadback() {
+        if (!captureReadbackPending) return
+        captureReadbackPending = false
+        val w = capturePboW; val h = capturePboH
+        if (w == 0 || h == 0 || capturePboId == 0) return
+        val bytes = w * h * 4
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        val mapped = GLES30.glMapBufferRange(
+            GLES30.GL_PIXEL_PACK_BUFFER, 0, bytes, GLES30.GL_MAP_READ_BIT,
+        ) as? ByteBuffer
+        if (mapped != null && captureBusy.compareAndSet(false, true)) {
+            mapped.order(ByteOrder.nativeOrder()).position(0)
+            mapped.get(captureWorkBuf, 0, bytes)
+            // Snapshot the overlay inputs on the GL thread so the worker touches no live state.
+            val snapshot = capturePendingSnapshot
+            val cx = cursorX; val cy = cursorY
+            val overlay = WorkspaceController.captureDebugOverlay
+            val info = "cursor=(${"%.3f".format(cx)},${"%.3f".format(cy)})  " +
+                "layout=${layout.displayName}  screens=${layout.screens.size}"
+            captureExecutor.execute { encodeAndSaveCapture(w, h, cx, cy, overlay, info, snapshot) }
+        }
+        GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+    }
+
+    /** Worker-thread: flip the RGBA bytes to top-down ARGB, draw the optional debug overlay,
+     *  PNG-encode and write the file. Reuses [capturePixels] / [captureBitmap]; clears
+     *  [captureBusy] when done so the next frame can issue another capture. */
+    private fun encodeAndSaveCapture(
+        w: Int, h: Int, cursorPxNdcX: Float, cursorPxNdcY: Float,
+        overlay: Boolean, info: String, snapshot: Boolean,
+    ) {
+        try {
+            val src = captureWorkBuf
+            val px = capturePixels
+            // glReadPixels rows run bottom-to-top; flip into top-down opaque ARGB pixels.
+            for (y in 0 until h) {
+                val s = (h - 1 - y) * w * 4
+                val d = y * w
+                for (x in 0 until w) {
+                    val i = s + x * 4
+                    val r = src[i].toInt() and 0xFF
+                    val g = src[i + 1].toInt() and 0xFF
+                    val b = src[i + 2].toInt() and 0xFF
+                    px[d + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
             }
-        }
-        // Mutable bitmap — we draw a debug overlay on it below. `createBitmap(pixels…)`
-        // produces an immutable bitmap that Canvas refuses, so allocate then setPixels.
-        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
-        // Annotate the capture with what the renderer *thinks* the cursor is doing —
-        // a red circle at the cursor's internal NDC position, plus the coords + the
-        // current press target. Lets us compare the rendered cursor sprite against the
-        // logical state when the two seem to disagree. Gated by a setting so user-
-        // visible captures (e.g. for sharing) can come out clean.
-        val canvas = android.graphics.Canvas(bitmap)
-        val cursorPxX = (cursorX + 1f) / 2f * w
-        val cursorPxY = (1f - cursorY) / 2f * h
-        val ringPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.RED
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = 3f
-        }
-        if (WorkspaceController.captureDebugOverlay) {
-            canvas.drawCircle(cursorPxX, cursorPxY, 28f, ringPaint)
-        }
-        val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.YELLOW
-            textSize = 22f
-            setShadowLayer(3f, 0f, 0f, android.graphics.Color.BLACK)
-        }
-        if (WorkspaceController.captureDebugOverlay) {
-            val info = "cursor=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)})  layout=${layout.displayName}  screens=${layout.screens.size}"
-            canvas.drawText(info, 12f, h - 16f, textPaint)
-        }
-        Thread {
+            var bmp = captureBitmap
+            if (bmp == null || bmp.width != w || bmp.height != h) {
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                captureBitmap = bmp
+            }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            if (overlay) {
+                val canvas = Canvas(bmp)
+                val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 3f
+                }
+                canvas.drawCircle((cursorPxNdcX + 1f) / 2f * w, (1f - cursorPxNdcY) / 2f * h, 28f, ringPaint)
+                val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.YELLOW; textSize = 22f
+                    setShadowLayer(3f, 0f, 0f, Color.BLACK)
+                }
+                canvas.drawText(info, 12f, h - 16f, textPaint)
+            }
             val dir = File(appContext.getExternalFilesDir(null), "captures").apply { mkdirs() }
             val file = File(dir, "uxspace-${System.currentTimeMillis()}.png")
             val ok = runCatching {
-                FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }.isSuccess
             Log.i(TAG, if (ok) "capture saved: ${file.absolutePath}" else "capture save failed")
-            mainHandler.post {
-                Toast.makeText(
-                    appContext,
-                    if (ok) "Workspace captured" else "Capture failed",
-                    Toast.LENGTH_SHORT,
-                ).show()
+            // Only toast for one-shot snapshots (the phone already toasts on tap, and a
+            // per-frame toast would spam during recording) — and always surface failures.
+            if (snapshot && ok) {
+                mainHandler.post { Toast.makeText(appContext, "Workspace captured", Toast.LENGTH_SHORT).show() }
+            } else if (!ok) {
+                mainHandler.post { Toast.makeText(appContext, "Capture failed", Toast.LENGTH_SHORT).show() }
             }
-        }.start()
+        } finally {
+            captureBusy.set(false)
+        }
     }
 
     private fun bindQuad(quad: FloatBuffer, positionHandle: Int, texCoordHandle: Int) {
