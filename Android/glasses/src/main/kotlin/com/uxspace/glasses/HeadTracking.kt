@@ -59,6 +59,17 @@ class HeadTracking(
     @Volatile private var lastPoseAtMs = 0L
     @Volatile private var streaming = false
 
+    // Initial-pose watchdog: a tracker can connect (USB opens, SDK starts) yet never deliver
+    // a single pose — Carina VIO failing to converge, or the IMU endpoint wedged
+    // (LIBUSB_ERROR_NO_DEVICE). [checkStreamWatchdog] can't catch that (it only acts after a
+    // first pose has arrived), so without this nothing recovers and DOF just stays dead. We
+    // time from [pollStartedAtMs]; if no pose lands within [INITIAL_POSE_TIMEOUT_MS] we tear
+    // the session down and re-open, up to [MAX_AUTO_RETRIES] times per user-initiated start.
+    @Volatile private var firstPoseArrived = false
+    @Volatile private var pollStartedAtMs = 0L
+    @Volatile private var autoRetryCount = 0
+    @Volatile private var autoRestartScheduled = false
+
     /** Fires when the pose stream starts or stops. Posted from the poll thread. */
     var onStreamingChanged: ((streaming: Boolean) -> Unit)? = null
 
@@ -105,10 +116,19 @@ class HeadTracking(
             // re-entry can succeed. The display side of the glasses can come up before
             // the USB IMU endpoint enumerates; without retry that brief race kills DOF
             // for the whole session.
+            //
+            // Clear the auto-restart latch here: if this start() is the tail of an
+            // auto-restart whose device vanished, leaving it set would make the NEXT
+            // genuine start() preserve the (spent) retry count instead of resetting it,
+            // permanently disabling auto-retry for the session.
+            autoRestartScheduled = false
             Log.i(TAG, "no VITURE glasses found on USB — head tracking off (will retry on USB attach)")
             return
         }
         started = true
+        // A fresh user-initiated start (or USB attach) — give the auto-retry budget back,
+        // unless this start() is itself an auto-restart (which preserves the running count).
+        if (!autoRestartScheduled) autoRetryCount = 0
         Log.i(TAG, "found glasses, pid=0x${device.productId.toString(16)}")
         glassesUsb.open(device)
     }
@@ -198,6 +218,9 @@ class HeadTracking(
         polling = true
         lastPoseAtMs = 0L
         streaming = false
+        firstPoseArrived = false
+        autoRestartScheduled = false
+        pollStartedAtMs = System.currentTimeMillis()
         // Drop any stale recenter reference from a previous session. On reconnect the
         // Carina VIO re-initialises with a fresh internal origin, so the first pose of
         // THIS session must become the new reference — otherwise raw poses in the new
@@ -210,11 +233,13 @@ class HeadTracking(
                     val pose = NativeGlasses.getPose()
                     // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
                     if (pose.size >= 7) {
+                        firstPoseArrived = true
                         feedPose(pose[3], pose[4], pose[5], pose[6])
                         // pose[0..2] is the world position (px, py, pz) on Carina only.
                         if (providesPosition) feedPosition(pose[0], pose[1], pose[2])
                     }
                 }
+                checkInitialPoseWatchdog()
                 checkStreamWatchdog()
                 try {
                     Thread.sleep(POLL_INTERVAL_MS)
@@ -226,6 +251,69 @@ class HeadTracking(
             name = "uxspace-pose"
             start()
         }
+    }
+
+    /**
+     * Detect a tracker that connected but never produced its FIRST pose, and auto-recover.
+     * Carina VIO sometimes fails to converge, and the IMU endpoint can come up wedged
+     * (LIBUSB_ERROR_NO_DEVICE / repeated "get GL pose failed") — in both cases poses never
+     * start, so [checkStreamWatchdog] (which only acts after a first pose) can't help and DOF
+     * stays dead until the user manually replugs. Here, if no pose has arrived within
+     * [INITIAL_POSE_TIMEOUT_MS] of [startPolling], we tear the SDK + USB session down and
+     * re-open it, up to [MAX_AUTO_RETRIES] times per user-initiated start. Runs on the poll
+     * thread; the restart hops to [worker] so we don't join our own thread.
+     */
+    private fun checkInitialPoseWatchdog() {
+        if (!polling || firstPoseArrived || autoRestartScheduled || pollStartedAtMs == 0L) return
+        val sinceMs = System.currentTimeMillis() - pollStartedAtMs
+        if (sinceMs < INITIAL_POSE_TIMEOUT_MS) return
+        if (autoRetryCount >= MAX_AUTO_RETRIES) {
+            // Give up auto-retrying; leave the session as-is so the user's manual reconnect
+            // (or a USB re-attach) still works. Log once — guard so we don't spam.
+            if (!autoRestartScheduled) {
+                autoRestartScheduled = true  // reuse as a latch to silence repeats
+                Log.w(
+                    TAG,
+                    "no first pose after $sinceMs ms and $autoRetryCount auto-retries — " +
+                        "giving up (manual reconnect still available)",
+                )
+            }
+            return
+        }
+        autoRestartScheduled = true
+        autoRetryCount++
+        Log.w(
+            TAG,
+            "no first pose after $sinceMs ms — auto-restarting tracking " +
+                "(attempt $autoRetryCount/$MAX_AUTO_RETRIES)",
+        )
+        worker.execute {
+            runCatching { restartInternal() }
+                .onFailure { Log.e(TAG, "auto-restart failed", it) }
+        }
+    }
+
+    /**
+     * Tear down and re-open the SDK + USB session in place, preserving the auto-retry count
+     * (so the budget spans the whole recovery, not each attempt). Runs on [worker].
+     */
+    private fun restartInternal() {
+        Log.i(TAG, "restartInternal: tearing down SDK/USB for auto-retry")
+        polling = false
+        pollThread?.interrupt()
+        pollThread = null
+        runCatching { NativeGlasses.stopCarinaPollThread() }
+        runCatching { NativeGlasses.stop() }
+        runCatching { NativeGlasses.shutdown() }
+        runCatching { NativeGlasses.destroy() }
+        runCatching { connection?.close() }
+        connection = null
+        usb?.release()
+        usb = null
+        started = false
+        // autoRestartScheduled stays true so start() preserves autoRetryCount across this
+        // re-open; startPolling() clears it once the new session's poll loop is live.
+        start()
     }
 
     /**
@@ -316,5 +404,14 @@ class HeadTracking(
         /** A live pose stream emits at >=60 Hz; a 1.5 s gap is far past any normal lull
          *  and is the threshold for declaring DOF dead. */
         const val STREAM_STALL_TIMEOUT_MS = 1500L
+
+        /** How long after [startPolling] to wait for the FIRST pose before assuming the
+         *  tracker came up dead and auto-restarting. Generous enough to cover Carina VIO
+         *  warm-up (it can take ~1-2 s to converge) without nagging on a healthy start. */
+        const val INITIAL_POSE_TIMEOUT_MS = 4000L
+
+        /** Auto-restart attempts per user-initiated start before giving up and leaving
+         *  recovery to a manual reconnect / USB re-attach. */
+        const val MAX_AUTO_RETRIES = 3
     }
 }
