@@ -47,6 +47,16 @@ class HeadTracking(
     @Volatile private var polling = false
     private var pollThread: Thread? = null
 
+    /**
+     * Serialises the SDK/USB lifecycle ([start] / [stop] / [restartInternal]). The native
+     * SDK handle is a process-wide singleton, and these can now be driven concurrently from
+     * three places — the main thread (USB-attach → restartHeadTracking, the reconnect
+     * button), the tracking [worker], and the auto-retry on the poll thread. Without this
+     * lock two of them can interleave create/destroy on the same handle and wedge or crash
+     * the native side (the double-start the MainActivity.onNewIntent comment warns about).
+     */
+    private val lifecycleLock = Any()
+
     // Guards against a double start(): one HeadTracking owns one SDK session, and the native
     // SDK handle is a process-wide singleton.
     @Volatile private var started = false
@@ -104,7 +114,7 @@ class HeadTracking(
      * USB enumeration lagged behind the display, calling again retries. The expected retry
      * trigger is `USB_DEVICE_ATTACHED` in [com.uxspace.MainActivity].
      */
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
         if (started) {
             Log.d(TAG, "start() ignored — head tracking already started")
             return
@@ -137,18 +147,23 @@ class HeadTracking(
     fun isStarted(): Boolean = started
 
     /** Stop tracking and release the SDK + USB. */
-    fun stop() {
+    fun stop() = synchronized(lifecycleLock) {
         started = false
         polling = false
+        // Cancel any pending/in-flight auto-restart: the user asked to stop, so a queued
+        // restartInternal must not bring tracking back. It checks this flag under the lock.
+        autoRestartScheduled = false
         pollThread?.interrupt()
         pollThread = null
         worker.execute {
-            runCatching { NativeGlasses.stopCarinaPollThread() }
-            runCatching { NativeGlasses.stop() }
-            runCatching { NativeGlasses.shutdown() }
-            runCatching { NativeGlasses.destroy() }
-            runCatching { connection?.close() }
-            connection = null
+            synchronized(lifecycleLock) {
+                runCatching { NativeGlasses.stopCarinaPollThread() }
+                runCatching { NativeGlasses.stop() }
+                runCatching { NativeGlasses.shutdown() }
+                runCatching { NativeGlasses.destroy() }
+                runCatching { connection?.close() }
+                connection = null
+            }
         }
         usb?.release()
         usb = null
@@ -297,7 +312,13 @@ class HeadTracking(
      * Tear down and re-open the SDK + USB session in place, preserving the auto-retry count
      * (so the budget spans the whole recovery, not each attempt). Runs on [worker].
      */
-    private fun restartInternal() {
+    private fun restartInternal() = synchronized(lifecycleLock) {
+        // If a deliberate stop() landed between scheduling this and acquiring the lock,
+        // don't resurrect tracking the user asked to end.
+        if (!autoRestartScheduled) {
+            Log.i(TAG, "restartInternal: superseded by stop() — skipping")
+            return
+        }
         Log.i(TAG, "restartInternal: tearing down SDK/USB for auto-retry")
         polling = false
         pollThread?.interrupt()
