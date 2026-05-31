@@ -463,13 +463,21 @@ class MainActivity : ComponentActivity() {
                     "pid=0x${"%04x".format(dev?.productId ?: 0)} name=${dev?.productName}",
             )
             syncGlasses()
-            // VITURE attach intent → force-restart tracking. This is the path the
-            // post-rescan attach comes through, where the prior SDK session was
-            // bound to a USB device the kernel just unbound; a plain retry would
-            // early-out on started=true. For non-VITURE attaches, the cheap retry
-            // is enough (covers the original DisplayPort-before-IMU race).
-            if (dev?.vendorId == VITURE_VENDOR_ID) presentation?.restartHeadTracking()
-            else presentation?.retryHeadTracking()
+            // A VITURE attach that arrives while DOF is already live is a spurious
+            // re-attach (e.g. a sibling USB interface enumerating) — force-restarting
+            // then would needlessly tear down a healthy session and re-enter the SDK/USB
+            // lifecycle, risking the very races the lifecycle lock now guards. Only act
+            // when tracking is NOT currently streaming.
+            if (!WorkspaceController.headTrackingActive) {
+                // VITURE attach → force-restart: the post-rescan attach comes through here
+                // with the prior SDK session bound to a USB device the kernel just unbound,
+                // so a plain retry would early-out on started=true. Non-VITURE attaches just
+                // need the cheap retry (covers the DisplayPort-before-IMU enumeration race).
+                if (dev?.vendorId == VITURE_VENDOR_ID) presentation?.restartHeadTracking()
+                else presentation?.retryHeadTracking()
+            } else {
+                Log.i("UxSpace/Main", "USB attach ignored — head tracking already live")
+            }
         }
     }
 
