@@ -232,12 +232,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // FLAG_NOT_FOCUSABLE was kept here to prevent the workspace Presentation
-        // from being rehomed onto this activity, but that rehoming had a different
-        // root cause — GlassesDisplay.find picking our own `uxspace-app-*` virtual
-        // display as "the glasses" — which is now fixed. The flag also blocks
-        // mouse / keyboard input dispatch, leading to ANRs ("Application does
-        // not have a focused window") when a BT mouse is connected. Leave it off.
+        // DO NOT add FLAG_NOT_FOCUSABLE here, and do NOT make this window hold input
+        // focus by any other means (e.g. Pointer Capture). This activity sits on
+        // display 0; the workspace + launched apps live on secondary/glasses displays.
+        // The flag was originally added to stop a trackpad tap from flipping the
+        // top-focused display to 0 (which made Samsung One UI's GameBooster pause the
+        // launched app on its secondary display and tear down its input channel). But
+        // holding/denying focus here breaks three things, so the flag is OFF and the
+        // window stays focusable:
+        //   1. Secondary-display apps — if THIS window takes input focus, display 0
+        //      becomes top-focused, the app's secondary display loses focus, and
+        //      GameBooster pauses it. (We now feed launched apps via *injected* input
+        //      on trusted displays, not focus-based dispatch, so a momentary tap-flip
+        //      no longer kills them — but a window that *holds* focus still would.)
+        //   2. Input/ANR — the flag blocks mouse/keyboard dispatch, causing
+        //      "Application does not have a focused window" ANRs when a BT mouse is up.
+        //   3. Pseudo-root bootstrap — the privileged helper is launched via the
+        //      wireless-debugging pairing flow (docs/PRIVILEGE.md); the in-app
+        //      pairing-code field needs keyboard focus, which the flag starves.
+        // The mouse-roaming problem the flag/Pointer-Capture would "solve" is instead
+        // handled WITHOUT focus, by EVIOCGRAB in the privileged helper (PrivilegedServer
+        // .HotkeyMonitor) — the only approach compatible with all three constraints.
         // window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -351,11 +366,14 @@ class MainActivity : ComponentActivity() {
         binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
         binding.trackpad.onDragCancel = { WorkspaceController.cancelDrag() }
         binding.trackpad.onLongPress = { WorkspaceController.longPress() }
-        // Mouse goes only through dispatchGenericMotionEvent below in absolute mode.
-        // Pointer capture would give us raw deltas (no phone-screen edge clamping),
-        // but it needs window input focus — which FLAG_NOT_FOCUSABLE denies, and
-        // that flag is non-negotiable: without it the glasses' Presentation gets
-        // rehomed onto this activity and the user sees the phone UI in the glasses.
+        // Cursor motion + clicks come from the privileged helper's raw-evdev path
+        // (PrivilegedService.mouseDeltaHandler); only the wheel still routes through
+        // dispatchGenericMotionEvent below. Pointer Capture would also give raw,
+        // unclamped deltas — but it requires this window to HOLD input focus, which is
+        // forbidden here (it pauses secondary-display apps via GameBooster, ANRs the
+        // BT mouse, and starves the pseudo-root pairing field; see the onCreate note).
+        // EVIOCGRAB in the helper achieves the same "system never sees the mouse"
+        // without focus, so it is the path we use — Pointer Capture is NOT an option.
 
         WorkspaceController.pickWallpaperFromDevice = { desktopIdx ->
             pendingWallpaperDesktopIdx = desktopIdx
@@ -887,9 +905,11 @@ class MainActivity : ComponentActivity() {
      * mouse event is consumed (`return true`) so it doesn't double-fire on
      * the trackpad view or any phone-side UI.
      *
-     * (Pointer capture would have given us raw deltas directly, but it needs
-     * window focus, and `FLAG_NOT_FOCUSABLE` is non-negotiable here — without
-     * it the glasses' Presentation gets rehomed onto this activity.)
+     * (Pointer Capture would have given us raw deltas directly, but it requires this
+     * window to hold input focus — which is forbidden: a focused window on display 0
+     * makes it top-focused, so GameBooster pauses secondary-display apps; it also ANRs
+     * the BT mouse and starves the pseudo-root pairing field. See the onCreate note.
+     * The privileged helper's EVIOCGRAB gets the raw deltas with no focus instead.)
      */
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) {

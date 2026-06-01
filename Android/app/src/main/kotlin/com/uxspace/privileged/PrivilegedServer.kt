@@ -712,6 +712,15 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             // gesture pill, the status bar, anywhere the cursor wanders. With it,
             // the kernel only delivers mouse events to this reader; the workspace
             // cursor + click are the only consumers.
+            //
+            // Why EVIOCGRAB and not the "proper" Pointer Capture: Pointer Capture
+            // requires MainActivity's window to HOLD input focus, which is forbidden —
+            // a focused window on display 0 becomes top-focused, so Samsung GameBooster
+            // pauses the launched apps on their secondary displays and tears down their
+            // input channels (it also ANRs the BT mouse and starves the pseudo-root
+            // pairing field; see MainActivity.onCreate). EVIOCGRAB takes the device at
+            // the kernel level WITHOUT touching Android's focus system — the only
+            // approach compatible with secondary-display apps + the privileged bootstrap.
             // Strategy-gated. The legacy SYSFS detector decides here, at open time.
             // The MOTION detector instead defers to readLoop, which grabs once the
             // node proves itself a pointer from its own event stream (the only path
