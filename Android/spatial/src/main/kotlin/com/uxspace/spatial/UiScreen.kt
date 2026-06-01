@@ -277,20 +277,38 @@ class UiScreen(
         event.recycle()
     }
 
-    /** Release the Presentation, VirtualDisplay, and Surface/GL resources. GL thread. */
+    /**
+     * Release the Presentation, VirtualDisplay, and Surface resources. Safe to call from
+     * the GL thread (the screen must already be out of the render set).
+     *
+     * Teardown order matters and must be single-threaded. A [Presentation] is a Dialog
+     * whose window registers a system-gesture-exclusion on its display; if the
+     * VirtualDisplay is released *before* the dialog is dismissed, the window-decor
+     * teardown then unregisters that exclusion against an already-invalid display and the
+     * system logs `IllegalArgumentException: ... invalid display: N`. The old code posted
+     * the dismiss to the main thread but released the display synchronously here, losing
+     * the ordering. So run the whole teardown on the main thread, in dependency order:
+     * dismiss the dialog (display still valid) → release the display → release its output
+     * Surface → release the SurfaceTexture. Surface/SurfaceTexture.release() are
+     * thread-safe; the GL texture [textureId] is freed separately on the GL thread.
+     */
     fun release() {
         if (released) return
         released = true
-        // A Presentation is a Dialog — it must be dismissed on the main thread.
-        presentation?.let { p -> mainHandler.post { p.dismiss() } }
+        val p = presentation
+        val vd = virtualDisplay
+        val tid = trustedDisplayId
         presentation = null
-        virtualDisplay?.release()
         virtualDisplay = null
-        // Trusted display owned by the privileged helper — released over that channel.
-        trustedDisplayId?.let { WorkspaceController.releaseVirtualDisplay?.invoke(it) }
         trustedDisplayId = null
-        surface.release()
-        surfaceTexture.release()
+        mainHandler.post {
+            p?.dismiss()
+            vd?.release()
+            // Trusted display owned by the privileged helper — released over that channel.
+            tid?.let { WorkspaceController.releaseVirtualDisplay?.invoke(it) }
+            surface.release()
+            surfaceTexture.release()
+        }
     }
 
     private companion object {
