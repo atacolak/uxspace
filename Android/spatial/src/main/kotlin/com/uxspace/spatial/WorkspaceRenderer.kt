@@ -772,7 +772,7 @@ class WorkspaceRenderer(
         // Log every Nth move so we can see the workspace NDC reach against the
         // input deltas. Includes the input dx/dy so it's clear how much input
         // mapped to how much cursor delta on the way to its current position.
-        if (moveLogCounter++ % CURSOR_LOG_EVERY == 0) {
+        if (CURSOR_DIAG && moveLogCounter++ % CURSOR_LOG_EVERY == 0) {
             Log.i(
                 TAG,
                 "moveCursor: in=(${"%.4f".format(dxFraction)},${"%.4f".format(dyFraction)})*${"%.2f".format(sens)} " +
@@ -3367,7 +3367,7 @@ class WorkspaceRenderer(
         if (screen.yawDeg == 0f) {
             val result = cursorToRectPx(cx, cy, cz, w, h, screen.contentWidthPx, screen.contentHeightPx)
             flatCursorDiagFrame++
-            if (flatCursorDiagFrame % 120 == 0 && result != null) {
+            if (CURSOR_DIAG && flatCursorDiagFrame % 120 == 0 && result != null) {
                 Log.i(
                     TAG,
                     "flat-cursor: ndc=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)}) " +
@@ -3473,7 +3473,7 @@ class WorkspaceRenderer(
             (1f - v) * screen.contentHeightPx,
         )
         curvedCursorDiagFrame++
-        if (curvedCursorDiagFrame % 60 == 0) {
+        if (CURSOR_DIAG && curvedCursorDiagFrame % 60 == 0) {
             Log.i(
                 TAG,
                 "curved-cursor: ndc=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)}) " +
@@ -3840,6 +3840,13 @@ class WorkspaceRenderer(
 
         /** Cursor moves arrive at touchpad / mouse polling rate; one in N gets logged. */
         const val CURSOR_LOG_EVERY = 8
+
+        /**
+         * Master switch for the per-move / per-frame cursor diagnostics — `moveCursor`,
+         * `flat-cursor`, and `curved-cursor`. Off by default: they flood logcat at input
+         * and frame rate. Flip to true when debugging cursor → screen-pixel mapping.
+         */
+        const val CURSOR_DIAG = false
 
         /**
          * Window placement bands inside a slot (slot's pixel coords): the activity quad
