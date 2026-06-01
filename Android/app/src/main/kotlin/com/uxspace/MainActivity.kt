@@ -232,12 +232,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // FLAG_NOT_FOCUSABLE was kept here to prevent the workspace Presentation
-        // from being rehomed onto this activity, but that rehoming had a different
-        // root cause — GlassesDisplay.find picking our own `uxspace-app-*` virtual
-        // display as "the glasses" — which is now fixed. The flag also blocks
-        // mouse / keyboard input dispatch, leading to ANRs ("Application does
-        // not have a focused window") when a BT mouse is connected. Leave it off.
+        // DO NOT add FLAG_NOT_FOCUSABLE here, and do NOT make this window hold input
+        // focus by any other means (e.g. Pointer Capture). This activity sits on
+        // display 0; the workspace + launched apps live on secondary/glasses displays.
+        // The flag was originally added to stop a trackpad tap from flipping the
+        // top-focused display to 0 (which made Samsung One UI's GameBooster pause the
+        // launched app on its secondary display and tear down its input channel). But
+        // holding/denying focus here breaks three things, so the flag is OFF and the
+        // window stays focusable:
+        //   1. Secondary-display apps — if THIS window takes input focus, display 0
+        //      becomes top-focused, the app's secondary display loses focus, and
+        //      GameBooster pauses it. (We now feed launched apps via *injected* input
+        //      on trusted displays, not focus-based dispatch, so a momentary tap-flip
+        //      no longer kills them — but a window that *holds* focus still would.)
+        //   2. Input/ANR — the flag blocks mouse/keyboard dispatch, causing
+        //      "Application does not have a focused window" ANRs when a BT mouse is up.
+        //   3. Pseudo-root bootstrap — the privileged helper is launched via the
+        //      wireless-debugging pairing flow (docs/PRIVILEGE.md); the in-app
+        //      pairing-code field needs keyboard focus, which the flag starves.
+        // The mouse-roaming problem the flag/Pointer-Capture would "solve" is instead
+        // handled WITHOUT focus, by EVIOCGRAB in the privileged helper (PrivilegedServer
+        // .HotkeyMonitor) — the only approach compatible with all three constraints.
         // window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -271,14 +286,32 @@ class MainActivity : ComponentActivity() {
 
         binding.setupButton.setOnClickListener { onSetupAction() }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
-        binding.captureButton.setOnClickListener { onCapture() }
+        // Long-press = full glasses reconnect (helper + display + head tracking), a heavier
+        // recovery than the tap's DOF-only retry.
+        binding.viewModeButton.setOnLongClickListener { attemptGlassesReconnect(); true }
+        // The in-view toolbar's DOF-retry button routes here too, so both report success /
+        // failure the same way. (WorkspacePresentation no longer owns this hook.)
+        WorkspaceController.retryHeadTracking = { mainHandler.post { attemptReconnectDof() } }
+        // Tap = one-shot screenshot; long-press = start/stop frame-sequence recording.
+        binding.captureButton.setOnClickListener { onSnapshot() }
         binding.captureButton.setOnLongClickListener {
             if (WorkspaceController.isRunning) {
-                WorkspaceController.capture()
-                Toast.makeText(this, "Single snapshot", Toast.LENGTH_SHORT).show()
+                val on = WorkspaceController.toggleRecording()
+                Toast.makeText(
+                    this,
+                    if (on) "Recording started" else "Recording stopped",
+                    Toast.LENGTH_SHORT,
+                ).show()
                 true
-            } else false
+            } else {
+                Toast.makeText(this, R.string.waiting_for_glasses, Toast.LENGTH_SHORT).show()
+                false
+            }
         }
+        // Keep the capture button's icon in sync with recording state, whichever toolbar
+        // toggled it (phone long-press or the in-view capture button).
+        WorkspaceController.addRecordingListener(recordingListener)
+        renderCaptureButton(WorkspaceController.isRecording)
         binding.layoutButton.setOnClickListener {
             // The button is grayed and isEnabled=false in PINNED via renderToolbarStates,
             // but isEnabled toggling alone doesn't block click in all paths — keep the
@@ -333,11 +366,14 @@ class MainActivity : ComponentActivity() {
         binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
         binding.trackpad.onDragCancel = { WorkspaceController.cancelDrag() }
         binding.trackpad.onLongPress = { WorkspaceController.longPress() }
-        // Mouse goes only through dispatchGenericMotionEvent below in absolute mode.
-        // Pointer capture would give us raw deltas (no phone-screen edge clamping),
-        // but it needs window input focus — which FLAG_NOT_FOCUSABLE denies, and
-        // that flag is non-negotiable: without it the glasses' Presentation gets
-        // rehomed onto this activity and the user sees the phone UI in the glasses.
+        // Cursor motion + clicks come from the privileged helper's raw-evdev path
+        // (PrivilegedService.mouseDeltaHandler); only the wheel still routes through
+        // dispatchGenericMotionEvent below. Pointer Capture would also give raw,
+        // unclamped deltas — but it requires this window to HOLD input focus, which is
+        // forbidden here (it pauses secondary-display apps via GameBooster, ANRs the
+        // BT mouse, and starves the pseudo-root pairing field; see the onCreate note).
+        // EVIOCGRAB in the helper achieves the same "system never sees the mouse"
+        // without focus, so it is the path we use — Pointer Capture is NOT an option.
 
         WorkspaceController.pickWallpaperFromDevice = { desktopIdx ->
             pendingWallpaperDesktopIdx = desktopIdx
@@ -445,24 +481,91 @@ class MainActivity : ComponentActivity() {
                     "pid=0x${"%04x".format(dev?.productId ?: 0)} name=${dev?.productName}",
             )
             syncGlasses()
-            // VITURE attach intent → force-restart tracking. This is the path the
-            // post-rescan attach comes through, where the prior SDK session was
-            // bound to a USB device the kernel just unbound; a plain retry would
-            // early-out on started=true. For non-VITURE attaches, the cheap retry
-            // is enough (covers the original DisplayPort-before-IMU race).
-            if (dev?.vendorId == VITURE_VENDOR_ID) presentation?.restartHeadTracking()
-            else presentation?.retryHeadTracking()
+            // A VITURE attach that arrives while DOF is already live is a spurious
+            // re-attach (e.g. a sibling USB interface enumerating) — force-restarting
+            // then would needlessly tear down a healthy session and re-enter the SDK/USB
+            // lifecycle, risking the very races the lifecycle lock now guards. Only act
+            // when tracking is NOT currently streaming.
+            if (!WorkspaceController.headTrackingActive) {
+                // VITURE attach → force-restart: the post-rescan attach comes through here
+                // with the prior SDK session bound to a USB device the kernel just unbound,
+                // so a plain retry would early-out on started=true. Non-VITURE attaches just
+                // need the cheap retry (covers the DisplayPort-before-IMU enumeration race).
+                if (dev?.vendorId == VITURE_VENDOR_ID) presentation?.restartHeadTracking()
+                else presentation?.retryHeadTracking()
+            } else {
+                Log.i("UxSpace/Main", "USB attach ignored — head tracking already live")
+            }
         }
     }
 
     private fun toggleViewMode() {
-        if (!WorkspaceController.headTrackingActive) return
+        // DOF down → this button is the reconnect affordance (tap = retry DOF; long-press =
+        // full glasses reconnect). Always reachable here on the phone control panel and
+        // mirrored by the in-view toolbar's DOF-retry button.
+        if (!WorkspaceController.headTrackingActive) {
+            attemptReconnectDof()
+            return
+        }
         val next = when (WorkspaceController.currentViewMode) {
             WorkspaceRenderer.ViewMode.PINNED -> WorkspaceRenderer.ViewMode.FREE
             WorkspaceRenderer.ViewMode.FREE -> WorkspaceRenderer.ViewMode.PINNED
         }
         WorkspaceController.setViewMode(next)
         renderViewModeButton()
+    }
+
+    /** Pending DOF-reconnect outcome check; replaced on each new attempt. */
+    private val dofReconnectOutcome = Runnable {
+        if (WorkspaceController.headTrackingActive) {
+            Toast.makeText(this, "Head tracking connected", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(
+                this,
+                "Head tracking reconnect failed — try unplugging and replugging the glasses",
+                Toast.LENGTH_LONG,
+            ).show()
+            WorkspaceController.announceInView("Head tracking unavailable", 4_000L)
+        }
+    }
+
+    /**
+     * Retry head tracking (tap on the reconnect button). Full SDK + USB restart, then
+     * report the outcome: if no pose stream has come up within [DOF_RECONNECT_TIMEOUT_MS]
+     * we toast that the reconnect failed. Recovers a tracker that connected but never
+     * produced a pose (LIBUSB_ERROR_NO_DEVICE, Carina VIO not converging, …).
+     */
+    private fun attemptReconnectDof() {
+        if (WorkspaceController.headTrackingActive) return
+        val pres = presentation
+        if (pres == null) {
+            Toast.makeText(this, "No glasses connected", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Log.i("UxSpace/Main", "attemptReconnectDof: restarting head tracking")
+        Toast.makeText(this, "Reconnecting head tracking…", Toast.LENGTH_SHORT).show()
+        WorkspaceController.announceInView("Reconnecting head tracking…", DOF_RECONNECT_TIMEOUT_MS)
+        pres.restartHeadTracking()
+        mainHandler.removeCallbacks(dofReconnectOutcome)
+        mainHandler.postDelayed(dofReconnectOutcome, DOF_RECONNECT_TIMEOUT_MS)
+    }
+
+    /**
+     * Long-press on the reconnect button: a full glasses reconnect — re-bootstrap the
+     * shell-uid helper (recovers a dead binder, which otherwise blocks the desktop's
+     * trusted VirtualDisplay), re-claim the glasses display / rebuild the workspace
+     * Presentation, then restart head tracking. The heavier hammer for when the desktop
+     * itself didn't come up, not just DOF.
+     */
+    private fun attemptGlassesReconnect() {
+        Log.i("UxSpace/Main", "attemptGlassesReconnect: helper + display + head tracking")
+        Toast.makeText(this, "Reconnecting glasses…", Toast.LENGTH_SHORT).show()
+        WorkspaceController.announceInView("Reconnecting glasses…", DOF_RECONNECT_TIMEOUT_MS)
+        PrivilegedService.ensureRunning()
+        syncGlasses()
+        presentation?.restartHeadTracking()
+        mainHandler.removeCallbacks(dofReconnectOutcome)
+        mainHandler.postDelayed(dofReconnectOutcome, DOF_RECONNECT_TIMEOUT_MS)
     }
 
     /**
@@ -472,37 +575,46 @@ class MainActivity : ComponentActivity() {
      * the WorkspaceController listeners and on resume.
      */
     private fun renderToolbarStates() {
-        val tracking = WorkspaceController.headTrackingActive
         val free = WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.FREE
-        binding.viewModeButton.isEnabled = tracking
-        binding.viewModeButton.alpha = if (tracking) 1f else DISABLED_ALPHA
+        // viewModeButton is always actionable: lock/unlock toggle when DOF is live, a
+        // reconnect button when it is down — so it is never grayed out (the icon, set in
+        // renderViewModeButton, signals which role it is in).
+        binding.viewModeButton.isEnabled = true
+        binding.viewModeButton.alpha = 1f
+        renderViewModeButton()
         binding.layoutButton.isEnabled = free
         binding.layoutButton.alpha = if (free) 1f else DISABLED_ALPHA
     }
 
     private fun renderViewModeButton() {
         binding.viewModeButton.setImageResource(
-            when (WorkspaceController.currentViewMode) {
-                WorkspaceRenderer.ViewMode.PINNED -> R.drawable.ic_pin
-                WorkspaceRenderer.ViewMode.FREE -> R.drawable.ic_pin_off
+            when {
+                !WorkspaceController.headTrackingActive -> R.drawable.ic_dof_retry
+                WorkspaceController.currentViewMode == WorkspaceRenderer.ViewMode.PINNED -> R.drawable.ic_pin
+                else -> R.drawable.ic_pin_off
             },
         )
     }
 
-    private fun onCapture() {
+    /** Tap on the capture button → save one screenshot of the current workspace frame. */
+    private fun onSnapshot() {
         if (!WorkspaceController.isRunning) {
             Toast.makeText(this, R.string.waiting_for_glasses, Toast.LENGTH_SHORT).show()
             return
         }
-        // Tap toggles recording — frame sequence into the captures directory at
-        // RECORDING_FRAME_INTERVAL (5 fps). A long-press still does a single snapshot
-        // when one-shot debugging is enough.
-        val recording = WorkspaceController.toggleRecording()
-        Toast.makeText(
-            this,
-            if (recording) "Recording started" else "Recording stopped",
-            Toast.LENGTH_SHORT,
-        ).show()
+        WorkspaceController.capture()
+        Toast.makeText(this, "Screenshot saved", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Recording-state listener — flips the capture button to a red dot while recording. */
+    private val recordingListener: (Boolean) -> Unit = { rec ->
+        mainHandler.post { renderCaptureButton(rec) }
+    }
+
+    private fun renderCaptureButton(recording: Boolean) {
+        binding.captureButton.setImageResource(
+            if (recording) R.drawable.ic_record_on else R.drawable.ic_capture,
+        )
     }
 
     /** Show or hide the system keyboard. Keystroke routing into the focused app is M4. */
@@ -569,6 +681,7 @@ class MainActivity : ComponentActivity() {
         presentation = null
         setWorkspaceServiceRunning(false)
         PrivilegedService.removeListener(privilegeListener)
+        WorkspaceController.removeRecordingListener(recordingListener)
         WorkspaceController.removeZoomListener(zoomHudListener)
         if (WorkspaceController.pickWallpaperFromDevice != null) {
             WorkspaceController.pickWallpaperFromDevice = null
@@ -792,9 +905,11 @@ class MainActivity : ComponentActivity() {
      * mouse event is consumed (`return true`) so it doesn't double-fire on
      * the trackpad view or any phone-side UI.
      *
-     * (Pointer capture would have given us raw deltas directly, but it needs
-     * window focus, and `FLAG_NOT_FOCUSABLE` is non-negotiable here — without
-     * it the glasses' Presentation gets rehomed onto this activity.)
+     * (Pointer Capture would have given us raw deltas directly, but it requires this
+     * window to hold input focus — which is forbidden: a focused window on display 0
+     * makes it top-focused, so GameBooster pauses secondary-display apps; it also ANRs
+     * the BT mouse and starves the pseudo-root pairing field. See the onCreate note.
+     * The privileged helper's EVIOCGRAB gets the raw deltas with no focus instead.)
      */
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) {
@@ -863,6 +978,11 @@ class MainActivity : ComponentActivity() {
         /** USB Vendor ID assigned to VITURE Technology — used in [onNewIntent] to
          *  tell a glasses USB attach apart from any other device's attach. */
         const val VITURE_VENDOR_ID = 0x35ca
+
+        /** How long after a reconnect attempt to check whether the pose stream came
+         *  up; if [WorkspaceController.headTrackingActive] is still false we report the
+         *  reconnect failed. Long enough to cover SDK re-init + Carina VIO warm-up. */
+        const val DOF_RECONNECT_TIMEOUT_MS = 8_000L
 
         /** Delay between a real keyboard appearing and the proactive glasses USB
          *  rescan. ~1.5s lets the BT pairing's peak USB churn finish before we

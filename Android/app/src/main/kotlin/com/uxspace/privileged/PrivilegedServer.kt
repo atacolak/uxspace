@@ -712,7 +712,20 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             // gesture pill, the status bar, anywhere the cursor wanders. With it,
             // the kernel only delivers mouse events to this reader; the workspace
             // cursor + click are the only consumers.
-            if (isMouseDevice(dev.name)) {
+            //
+            // Why EVIOCGRAB and not the "proper" Pointer Capture: Pointer Capture
+            // requires MainActivity's window to HOLD input focus, which is forbidden —
+            // a focused window on display 0 becomes top-focused, so Samsung GameBooster
+            // pauses the launched apps on their secondary displays and tears down their
+            // input channels (it also ANRs the BT mouse and starves the pseudo-root
+            // pairing field; see MainActivity.onCreate). EVIOCGRAB takes the device at
+            // the kernel level WITHOUT touching Android's focus system — the only
+            // approach compatible with secondary-display apps + the privileged bootstrap.
+            // Strategy-gated. The legacy SYSFS detector decides here, at open time.
+            // The MOTION detector instead defers to readLoop, which grabs once the
+            // node proves itself a pointer from its own event stream (the only path
+            // that works for Bluetooth HID mice, whose sysfs caps are unreadable).
+            if (MOUSE_GRAB_STRATEGY == MouseGrabStrategy.SYSFS && isMouseDevice(dev.name)) {
                 grabExclusive(fis, dev.name)
             }
             readers.add(fis)
@@ -724,10 +737,16 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         }
 
         /**
-         * A device reports relative motion (EV_REL bit set in its capabilities
-         * bitmap) — that's the kernel's definition of a mouse. Touchscreens use
-         * EV_ABS instead, so this filter never accidentally grabs the phone's
-         * actual touchscreen and breaks touch input.
+         * Legacy detector for [MouseGrabStrategy.SYSFS]. A device reports relative
+         * motion (EV_REL bit set in its capabilities bitmap) — that's the kernel's
+         * definition of a mouse. Touchscreens use EV_ABS instead, so this filter
+         * never accidentally grabs the phone's actual touchscreen and breaks touch
+         * input.
+         *
+         * Caveat (why [MouseGrabStrategy.MOTION] exists): the capabilities file is
+         * empty / SELinux-unreadable from shell uid for Bluetooth HID mice, so this
+         * returns false for them and their pointer leaks into the system UI. Kept
+         * intact so the old behavior can be plugged back in via [MOUSE_GRAB_STRATEGY].
          */
         private fun isMouseDevice(eventName: String): Boolean {
             val cap = runCatching {
@@ -740,6 +759,41 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         }
 
         /**
+         * New pluggable mouse detector for [MouseGrabStrategy.MOTION]. Identifies a
+         * pointer by what it actually emits rather than by sysfs metadata or device
+         * name — so it works for any mouse on any bus (USB or Bluetooth), for combo
+         * HID devices whose pointer is a separate evdev node, and needs no sysfs.
+         *
+         * A node is declared a pointer once it has reported two-axis relative motion
+         * (REL_X *and* REL_Y) or pressed a mouse button. Requiring *both* axes is
+         * deliberate: this very phone has sensors (ambient-light `als_rear`, the grip
+         * sensors) that abuse REL_X as a data channel — they emit REL_X but never
+         * REL_Y, so they are correctly never grabbed. Stateful; one per reader thread.
+         */
+        private class MotionMouseDetector {
+            private var sawRelX = false
+            private var sawRelY = false
+
+            /** Feed one parsed evdev tuple; returns true once the node looks like a pointer. */
+            fun observe(type: Int, code: Int, value: Int): Boolean {
+                if (type == EV_KEY && value != 0 &&
+                    (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE)
+                ) {
+                    return true
+                }
+                if (type == EV_REL) {
+                    if (code == REL_X) sawRelX = true
+                    else if (code == REL_Y) sawRelY = true
+                }
+                return sawRelX && sawRelY
+            }
+        }
+
+        /** Which detector gates the EVIOCGRAB. Switchable so the new MOTION layer can
+         *  be A/B'd against the legacy SYSFS one and reverted instantly. */
+        private enum class MouseGrabStrategy { SYSFS, MOTION }
+
+        /**
          * Call EVIOCGRAB(1) on the device's FD so the kernel routes its events
          * exclusively to this reader. system_server (the input dispatcher behind
          * the on-screen cursor + click routing) stops receiving anything from
@@ -747,24 +801,59 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
          * grab is dropped automatically when [stop] closes the FD.
          */
         private fun grabExclusive(fis: FileInputStream, devName: String) {
+            // EVIOCGRAB(1) takes a non-null arg pointer to "grab"; ioctlInt passes
+            // &arg, which the evdev handler reads as non-null → exclusive grab.
+            //
+            // ioctlInt is @hide and — critically — is NOT a member of the public
+            // `android.system.Os` facade at all (getMethod there throws
+            // NoSuchMethodException, which silently defeated the grab and let the
+            // pointer roam). It lives on the internal `libcore.io.Os` interface,
+            // whose singleton is `libcore.io.Libcore.os`. Shell uid bypasses the
+            // hidden-API blocklist so reflection reaches it. Try that first, then
+            // fall back to a declared-method lookup on android.system.Os in case a
+            // future build relocates it.
+            val fd = fis.fd
             try {
-                // Os.ioctlInt(FileDescriptor, int, MutableInt) is @hide on the
-                // public SDK; shell uid bypasses the hidden-API blocklist so
-                // reflection works at runtime.
-                val osClass = Class.forName("android.system.Os")
-                val mutableIntClass = android.util.MutableInt::class.java
-                val arg = mutableIntClass.getConstructor(Int::class.javaPrimitiveType)
-                    .newInstance(1)
-                val method = osClass.getMethod(
-                    "ioctlInt",
-                    java.io.FileDescriptor::class.java,
-                    Int::class.javaPrimitiveType,
-                    mutableIntClass,
+                val os = Class.forName("libcore.io.Libcore").getField("os").get(null)
+                // Find ioctlInt on the *concrete* Os impl (BlockGuardOs/ForwardingOs/
+                // Linux), where it actually lives — the public `libcore.io.Os`
+                // interface and `android.system.Os` facade don't expose it on this
+                // build, which is why the earlier interface lookups failed.
+                val ioctlInt = os.javaClass.methods.firstOrNull { it.name == "ioctlInt" }
+                if (ioctlInt == null) {
+                    val ioctlLike = os.javaClass.methods
+                        .filter { it.name.contains("ioctl", ignoreCase = true) }
+                        .joinToString("; ") { m ->
+                            m.name + "(" + m.parameterTypes.joinToString { it.simpleName } + ")"
+                        }
+                    Log.w(
+                        TAG,
+                        "hotkey: no ioctlInt on ${os.javaClass.name} — ioctl-like methods: [$ioctlLike]",
+                    )
+                    Log.w(TAG, "hotkey: EVIOCGRAB unavailable for $devName — system pointer will still roam")
+                    return
+                }
+                // Build args positionally by parameter type: the FileDescriptor, the
+                // request code (first int = EVIOCGRAB), and the arg pointer (MutableInt
+                // holding 1, or a second int = 1) — non-null/non-zero means "grab".
+                var sawCmd = false
+                val args = ioctlInt.parameterTypes.map { p ->
+                    when {
+                        p == java.io.FileDescriptor::class.java -> fd
+                        p == android.util.MutableInt::class.java -> android.util.MutableInt(1)
+                        p == Integer.TYPE && !sawCmd -> { sawCmd = true; EVIOCGRAB }
+                        p == Integer.TYPE -> 1
+                        else -> null
+                    }
+                }.toTypedArray()
+                ioctlInt.invoke(os, *args)
+                Log.i(
+                    TAG,
+                    "hotkey: EVIOCGRAB ok for $devName via " +
+                        "ioctlInt(${ioctlInt.parameterTypes.joinToString { it.simpleName }})",
                 )
-                method.invoke(null, fis.fd, EVIOCGRAB, arg)
-                Log.i(TAG, "hotkey: EVIOCGRAB ok for $devName")
-            } catch (e: Exception) {
-                Log.w(TAG, "hotkey: EVIOCGRAB failed for $devName: ${e.message}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "hotkey: EVIOCGRAB failed for $devName: ${t.message}")
             }
         }
 
@@ -783,6 +872,12 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
         private fun readLoop(fis: FileInputStream, dev: File) {
             val buf = ByteArray(INPUT_EVENT_SIZE)
+            // MOTION strategy: identify the pointer from its own event stream and
+            // EVIOCGRAB on first proof. Null under the legacy SYSFS strategy, which
+            // already decided (and grabbed, or not) at open time.
+            val pointerProbe =
+                if (MOUSE_GRAB_STRATEGY == MouseGrabStrategy.MOTION) MotionMouseDetector() else null
+            var motionGrabbed = false
             try {
                 while (!stopped) {
                     var read = 0
@@ -792,6 +887,14 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                         read += n
                     }
                     handle(buf)
+                    if (pointerProbe != null && !motionGrabbed && pointerProbe.observe(
+                            u16le(buf, OFFSET_TYPE), u16le(buf, OFFSET_CODE), i32le(buf, OFFSET_VALUE),
+                        )
+                    ) {
+                        Log.i(TAG, "hotkey: ${dev.name} proved a pointer — EVIOCGRAB (motion strategy)")
+                        grabExclusive(fis, dev.name)
+                        motionGrabbed = true
+                    }
                 }
             } catch (_: IOException) {
                 // Closed (stop()) or device unplugged — exit cleanly.
@@ -906,6 +1009,25 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         }
 
         companion object {
+            /**
+             * Which mouse-detection layer gates the EVIOCGRAB.
+             *
+             *  - [MouseGrabStrategy.SYSFS] (legacy): probe the node's capability bitmap
+             *    from `/sys/class/input/eventN/device/capabilities/ev` at open time.
+             *    Reliable for the phone's built-in devices but EMPTY/SELinux-locked for
+             *    Bluetooth HID mice — so BT mice are never grabbed and their pointer
+             *    leaks into the system UI (status bar, nav pill, screen edges).
+             *  - [MouseGrabStrategy.MOTION] (new, default): ignore metadata; identify a
+             *    pointer from the events it actually emits — two-axis relative motion
+             *    (REL_X *and* REL_Y) or a mouse button — and grab on first proof. Bus/
+             *    vendor/name independent; sensor-safe (the REL_Y requirement excludes
+             *    REL_X-only sensors). Costs at most one event frame of leaked motion
+             *    before the grab engages.
+             *
+             * Flip to SYSFS to restore the old behavior verbatim.
+             */
+            val MOUSE_GRAB_STRATEGY = MouseGrabStrategy.MOTION
+
             private const val INPUT_DIR = "/dev/input"
 
             // struct input_event on Android 11+ (64-bit user space):

@@ -25,6 +25,7 @@ object WorkspaceSettings {
     private const val KEY_LONG_PRESS_MS = "long_press_ms"
     private const val KEY_PINCH_ENABLED = "pinch_enabled"
     private const val KEY_AUTO_RECENTER_ON_UNLOCK = "auto_recenter_on_unlock"
+    private const val KEY_CARINA_6DOF = "carina_6dof"
 
     /** Default multiplier on per-frame cursor delta; 1.0 = no scaling. */
     const val DEFAULT_CURSOR_SENSITIVITY = 1.0f
@@ -173,6 +174,16 @@ object WorkspaceSettings {
         if (::prefs.isInitialized) prefs.getBoolean(KEY_AUTO_RECENTER_ON_UNLOCK, true) else true
 
     fun setAutoRecenterOnUnlock(value: Boolean) = putBoolean(KEY_AUTO_RECENTER_ON_UNLOCK, value)
+
+    /**
+     * Carina 6DOF head tracking (positional parallax) vs 3DOF (orientation only). Default
+     * 3DOF — the lighter, orientation-only path that matches the reliable baseline; turn on
+     * for head-translation parallax. Applies on the next glasses reconnect.
+     */
+    fun carina6Dof(): Boolean =
+        if (::prefs.isInitialized) prefs.getBoolean(KEY_CARINA_6DOF, false) else false
+
+    fun setCarina6Dof(value: Boolean) = putBoolean(KEY_CARINA_6DOF, value)
 
     // Windows
     fun maxWindowsPerSlot(): Int =

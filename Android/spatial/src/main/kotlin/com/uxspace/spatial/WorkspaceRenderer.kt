@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import android.opengl.Matrix
@@ -20,6 +21,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
@@ -98,6 +101,13 @@ class WorkspaceRenderer(
     @Volatile private var headX = 0f
     @Volatile private var headY = 0f
     @Volatile private var headZ = 0f
+
+    // Head position (metres) in the heading-recentred world frame, relative to the recentre
+    // origin. Non-zero only on 6DOF (Carina) tracking; drives positional parallax in FREE
+    // view. Orientation-only paths never call [setHeadPosition], so these stay 0.
+    @Volatile private var headPosX = 0f
+    @Volatile private var headPosY = 0f
+    @Volatile private var headPosZ = 0f
 
     /**
      * "Recenter" anchor — a rotation post-multiplied onto the head pose before it drives the
@@ -181,34 +191,48 @@ class WorkspaceRenderer(
     private val toolbarButtons: Array<HudButton> by lazy {
         arrayOf(
             HudButton(
-                "lock", cx = -0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "lock", cx = -0.35f, halfW = TOOLBAR_BUTTON_HALF_W,
+                // Dual-role button. With DOF live it is the lock/unlock (PINNED ↔ FREE)
+                // toggle. With DOF down it becomes a "retry head tracking" button — FREE is
+                // meaningless without head input, so rather than sit grayed-out the button
+                // offers a way to recover a tracker that never came up (e.g. Carina VIO
+                // failing to converge) without unplugging the glasses.
                 iconResIdProvider = {
                     val icons = WorkspaceController.toolbarIcons
-                    if (icons == null) 0
-                    else if (viewMode == ViewMode.PINNED) icons.lock else icons.unlock
+                    when {
+                        icons == null -> 0
+                        !WorkspaceController.headTrackingActive -> icons.dofRetry
+                        viewMode == ViewMode.PINNED -> icons.lock
+                        else -> icons.unlock
+                    }
                 },
-                // FREE only makes sense with head tracking — without DOF, the camera
-                // would just sit still even after the unlock. Same as the Windows
-                // app's "DOF active" gate around the view-mode toggle.
-                enabled = { WorkspaceController.headTrackingActive },
+                // Always tappable now: lock toggle when DOF is up, retry when it is down.
+                enabled = { true },
             ) {
-                val next = if (viewMode == ViewMode.PINNED) ViewMode.FREE else ViewMode.PINNED
-                WorkspaceController.setViewMode(next)
+                if (WorkspaceController.headTrackingActive) {
+                    val next = if (viewMode == ViewMode.PINNED) ViewMode.FREE else ViewMode.PINNED
+                    WorkspaceController.setViewMode(next)
+                } else {
+                    // Routes to MainActivity.attemptReconnectDof, which restarts tracking
+                    // and toasts / announces the success-or-failure outcome.
+                    Log.i(TAG, "toolbar: DOF-retry tapped — re-attempting head tracking")
+                    WorkspaceController.retryHeadTracking?.invoke()
+                }
             },
             HudButton(
-                "zoom", cx = -0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "zoom", cx = -0.21f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.zoom ?: 0 },
             ) {
                 WorkspaceController.cycleScreenBand()
             },
             HudButton(
-                "recenter", cx = 0.00f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "recenter", cx = -0.07f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.recenter ?: 0 },
             ) {
                 WorkspaceController.alignVerticalToHead()
             },
             HudButton(
-                "layout", cx = 0.16f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "layout", cx = 0.07f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.layout ?: 0 },
                 // PINNED always renders SINGLE; cycleLayout is a no-op there, so the
                 // button is dead weight when locked.
@@ -217,7 +241,7 @@ class WorkspaceRenderer(
                 WorkspaceController.cycleLayout()
             },
             HudButton(
-                "settings", cx = 0.32f, halfW = TOOLBAR_BUTTON_HALF_W,
+                "settings", cx = 0.21f, halfW = TOOLBAR_BUTTON_HALF_W,
                 iconResIdProvider = { WorkspaceController.toolbarIcons?.settings ?: 0 },
             ) {
                 // Always open on the *main* screen of the active layout, regardless of
@@ -228,6 +252,23 @@ class WorkspaceRenderer(
                 val openHere = WorkspaceController.isSettingsOpen &&
                     WorkspaceController.settingsOnScreen == slot
                 WorkspaceController.setSettingsOpen(!openHere, slot)
+            },
+            HudButton(
+                "capture", cx = 0.35f, halfW = TOOLBAR_BUTTON_HALF_W,
+                // Toggles frame-sequence recording; the icon flips to a red dot while
+                // recording so it doubles as an in-view recording indicator. (A one-shot
+                // screenshot is a tap on the phone control panel's capture button.)
+                iconResIdProvider = {
+                    val icons = WorkspaceController.toolbarIcons
+                    when {
+                        icons == null -> 0
+                        WorkspaceController.isRecording -> icons.recordOn
+                        else -> icons.capture
+                    }
+                },
+            ) {
+                val on = WorkspaceController.toggleRecording()
+                Log.i(TAG, "toolbar: capture button toggled recording -> $on")
             },
         )
     }
@@ -251,6 +292,28 @@ class WorkspaceRenderer(
     @Volatile private var captureRequested = false
     @Volatile private var recording = false
     private var recordingFrameCounter = 0
+
+    // --- Async capture pipeline ---------------------------------------------------------
+    // glReadPixels into a Pixel-Buffer Object returns immediately (no GPU stall); the bytes
+    // are mapped and consumed one capture later, then the heavy work (row-flip → ARGB,
+    // bitmap, debug overlay, PNG encode, file write) runs on a single worker thread. Buffers
+    // are reused; [captureBusy] caps it at one in-flight capture so encodes can't pile up
+    // and the reusable buffers are never written while the worker reads them.
+    private var capturePboId = 0
+    private var capturePboW = 0
+    private var capturePboH = 0
+    @Volatile private var captureReadbackPending = false
+    private var capturePendingSnapshot = false
+    private val captureBusy = AtomicBoolean(false)
+    private val captureExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "uxspace-capture").apply { isDaemon = true }
+    }
+    /** RGBA, bottom-up — copied out of the mapped PBO on the GL thread, read by the worker. */
+    private var captureWorkBuf = ByteArray(0)
+    /** ARGB top-down scratch — worker thread only. */
+    private var capturePixels = IntArray(0)
+    /** Reused output bitmap — worker thread only. */
+    private var captureBitmap: Bitmap? = null
     @Volatile private var pendingScroll = 0f
 
     /**
@@ -319,6 +382,17 @@ class WorkspaceRenderer(
         headX = x
         headY = y
         headZ = z
+    }
+
+    /**
+     * Feed the recentred head position (metres) for positional parallax. Only 6DOF tracking
+     * paths call this; the camera translates with the head in FREE view so the workspace
+     * shows real parallax. Safe to call from any thread.
+     */
+    fun setHeadPosition(x: Float, y: Float, z: Float) {
+        headPosX = x
+        headPosY = y
+        headPosZ = z
     }
 
     /** Switch how the scene tracks the head. Safe to call from any thread. */
@@ -502,20 +576,68 @@ class WorkspaceRenderer(
                 Log.w(TAG, "alignVerticalToHead: head pose is zero — no anchor set")
                 return@add
             }
-            // anchor = head⁻¹ (conjugate / |head|² for a unit quaternion). Effective view
-            // rotation = head * anchor, so right now that product is identity → scene
-            // straight ahead. As the user moves, the offset is preserved.
-            val inv = 1f / norm
-            anchorW = w0 * inv
-            anchorX = -x0 * inv
-            anchorY = -y0 * inv
-            anchorZ = -z0 * inv
+            // Recenter so the screen currently taking the most view space sits straight
+            // ahead and face-on — not the middle of the virtual space. In a multi-screen
+            // layout the middle is the seam between screens, so aiming there leaves every
+            // screen off-axis and yawed relative to the gaze, which reads as "angled". Side
+            // screens are yawed to face the origin/eye, so centring the camera on the
+            // dominant screen makes it fronto-parallel.
+            //
+            // Pick the dominant screen from the LIVE gaze: effective = head ⊗ current anchor;
+            // score each screen by foreshortened apparent size (world area / distance²) ×
+            // how centred its direction is in the gaze (dot with forward). The one filling
+            // the most of the field of view wins; fall back to the configured main screen
+            // if the gaze faces away from the scene.
+            val ew = w0 * anchorW - x0 * anchorX - y0 * anchorY - z0 * anchorZ
+            val ex = w0 * anchorX + x0 * anchorW + y0 * anchorZ - z0 * anchorY
+            val ey = w0 * anchorY - x0 * anchorZ + y0 * anchorW + z0 * anchorX
+            val ez = w0 * anchorZ + x0 * anchorY - y0 * anchorX + z0 * anchorW
+            val fwdX = -2f * (ex * ez + ew * ey)
+            val fwdY = 2f * (ew * ex - ey * ez)
+            val fwdZ = -1f + 2f * (ex * ex + ey * ey)
+            var chosenIdx = -1
+            var bestScore = 0f
+            layout.screens.forEachIndexed { i, screen ->
+                val rr = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
+                val d2 = rr[0] * rr[0] + rr[1] * rr[1] + rr[2] * rr[2]
+                if (d2 < 1e-4f) return@forEachIndexed
+                val cosA = (fwdX * rr[0] + fwdY * rr[1] + fwdZ * rr[2]) /
+                    kotlin.math.sqrt(d2)
+                if (cosA <= 0f) return@forEachIndexed          // screen behind / beside gaze
+                val apparent = rr[3] * rr[4] / d2               // ∝ solid angle it subtends
+                val score = cosA * apparent
+                if (score > bestScore) { bestScore = score; chosenIdx = i }
+            }
+            if (chosenIdx < 0) {
+                chosenIdx = WorkspaceController.mainScreenIdx()
+                    .coerceIn(0, layout.screens.size - 1)
+            }
+            val r = Screen.worldRect(layout.screens[chosenIdx], desktopHalfWidth, desktopHalfHeight)
+            val cx = r[0]; val cy = r[1]; val cz = r[2]
+            // Look-rotation that aims world-forward (−Z) at the screen centre with no roll:
+            // yaw about world Y to the screen's azimuth, then pitch about X to its elevation.
+            // Roll-free and gravity-level, so a subsequent head yaw stays tilt-free.
+            val horiz = kotlin.math.sqrt(cx * cx + cz * cz)
+            val theta = kotlin.math.atan2(-cx, -cz)   // azimuth: left screen (cx<0) → +θ
+            val phi = kotlin.math.atan2(cy, horiz)     // elevation: below eye (cy<0) → −φ
+            val cyq = kotlin.math.cos(theta / 2f); val syq = kotlin.math.sin(theta / 2f)
+            val cpq = kotlin.math.cos(phi / 2f); val spq = kotlin.math.sin(phi / 2f)
+            // R_look = qYaw(θ) ⊗ qPitch(φ)
+            val rw = cyq * cpq; val rx = cyq * spq; val ry = syq * cpq; val rz = -syq * spq
+            // anchor = head⁻¹ ⊗ R_look, so effective = head·anchor = R_look right now (camera
+            // looks at the main screen) and world-frame head deltas compose on top afterwards.
+            val invN = 1f / norm
+            val pw = w0 * invN; val px = -x0 * invN; val py = -y0 * invN; val pz = -z0 * invN
+            anchorW = pw * rw - px * rx - py * ry - pz * rz
+            anchorX = pw * rx + px * rw + py * rz - pz * ry
+            anchorY = pw * ry - px * rz + py * rw + pz * rx
+            anchorZ = pw * rz + px * ry - py * rx + pz * rw
             Log.i(
                 TAG,
-                "alignVerticalToHead: head=(${"%.3f".format(w0)},${"%.3f".format(x0)}," +
-                    "${"%.3f".format(y0)},${"%.3f".format(z0)}) -> " +
-                    "anchor=(${"%.3f".format(anchorW)},${"%.3f".format(anchorX)}," +
-                    "${"%.3f".format(anchorY)},${"%.3f".format(anchorZ)})",
+                "alignVerticalToHead: centre on screen[$chosenIdx] " +
+                    "world=(${"%.2f".format(cx)},${"%.2f".format(cy)},${"%.2f".format(cz)}) " +
+                    "θ=${"%.1f".format(Math.toDegrees(theta.toDouble()))}° " +
+                    "φ=${"%.1f".format(Math.toDegrees(phi.toDouble()))}°",
             )
         }
         noteInput()
@@ -650,7 +772,7 @@ class WorkspaceRenderer(
         // Log every Nth move so we can see the workspace NDC reach against the
         // input deltas. Includes the input dx/dy so it's clear how much input
         // mapped to how much cursor delta on the way to its current position.
-        if (moveLogCounter++ % CURSOR_LOG_EVERY == 0) {
+        if (CURSOR_DIAG && moveLogCounter++ % CURSOR_LOG_EVERY == 0) {
             Log.i(
                 TAG,
                 "moveCursor: in=(${"%.4f".format(dxFraction)},${"%.4f".format(dyFraction)})*${"%.2f".format(sens)} " +
@@ -741,6 +863,12 @@ class WorkspaceRenderer(
             layoutAnnouncementTextureId = 0
             layoutAnnouncementCachedText = null
         }
+        // Capture PBO belongs to the now-gone context — zero it so ensureCapturePbo
+        // recreates on the next capture (the id from the old context is invalid here).
+        capturePboId = 0
+        capturePboW = 0
+        capturePboH = 0
+        captureReadbackPending = false
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -1024,20 +1152,25 @@ class WorkspaceRenderer(
             pendingPinch = 1f
         }
         drawToolbar()
+        drawRecordingIndicator()
         if (WorkspaceController.legendVisible) drawLegend()
         drawLayoutAnnouncement()
         drawCursor()
 
-        if (captureRequested) {
-            captureRequested = false
-            saveFrameCapture()
-        }
-        if (recording) {
-            val interval = WorkspaceController.recordingFrameInterval.coerceAtLeast(1)
-            if (recordingFrameCounter % interval == 0) {
-                saveFrameCapture()
+        // Capture pipeline: first consume any async readback issued on an earlier frame
+        // (no GPU stall — the data is long since ready), then issue a new readback if a
+        // snapshot was requested or a recording sample is due. One in flight at a time.
+        consumeCaptureReadback()
+        val interval = WorkspaceController.recordingFrameInterval.coerceAtLeast(1)
+        val recordingDue = recording && (recordingFrameCounter % interval == 0)
+        recordingFrameCounter++
+        if (!captureReadbackPending && !captureBusy.get()) {
+            if (captureRequested) {
+                captureRequested = false
+                issueCaptureReadback(snapshot = true)
+            } else if (recordingDue) {
+                issueCaptureReadback(snapshot = false)
             }
-            recordingFrameCounter++
         }
     }
 
@@ -2928,6 +3061,33 @@ class WorkspaceRenderer(
     }
 
     /**
+     * Draw a small red dot just left of the in-view toolbar whenever a capture recording
+     * is running, so it's always obvious the framebuffer-readback recording is active —
+     * even while the toolbar itself is auto-hidden to its peek line. NDC-positioned; the
+     * unit [circleFan] is scaled by an aspect-corrected MVP so it stays round.
+     */
+    private fun drawRecordingIndicator() {
+        if (!recording) return
+        Matrix.setIdentityM(mvpMatrix, 0)
+        mvpMatrix[0] = REC_DOT_RADIUS                  // NDC x radius
+        mvpMatrix[5] = REC_DOT_RADIUS * surfaceAspect  // y radius (aspect-corrected → round)
+        mvpMatrix[12] = REC_DOT_CX
+        mvpMatrix[13] = REC_DOT_CY
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(solidProgram)
+        circleFan.position(0)
+        GLES20.glVertexAttribPointer(solidAPosition, 3, GLES20.GL_FLOAT, false, 0, circleFan)
+        GLES20.glEnableVertexAttribArray(solidAPosition)
+        GLES20.glUniformMatrix4fv(solidUMvp, 1, false, mvpMatrix, 0)
+        GLES20.glUniform4f(solidUColor, 0.90f, 0.12f, 0.12f, 0.95f)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, CIRCLE_HINT_SEGMENTS + 2)
+        GLES20.glDisableVertexAttribArray(solidAPosition)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    /**
      * GL texture for the given drawable, lazily uploaded the first time it's needed.
      * Returns null when no icon set has been registered or the resource resolves to
      * 0. Call on the GL thread.
@@ -3207,7 +3367,7 @@ class WorkspaceRenderer(
         if (screen.yawDeg == 0f) {
             val result = cursorToRectPx(cx, cy, cz, w, h, screen.contentWidthPx, screen.contentHeightPx)
             flatCursorDiagFrame++
-            if (flatCursorDiagFrame % 120 == 0 && result != null) {
+            if (CURSOR_DIAG && flatCursorDiagFrame % 120 == 0 && result != null) {
                 Log.i(
                     TAG,
                     "flat-cursor: ndc=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)}) " +
@@ -3313,7 +3473,7 @@ class WorkspaceRenderer(
             (1f - v) * screen.contentHeightPx,
         )
         curvedCursorDiagFrame++
-        if (curvedCursorDiagFrame % 60 == 0) {
+        if (CURSOR_DIAG && curvedCursorDiagFrame % 60 == 0) {
             Log.i(
                 TAG,
                 "curved-cursor: ndc=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)}) " +
@@ -3363,73 +3523,124 @@ class WorkspaceRenderer(
         return floatArrayOf(worldPoint[0] / w, worldPoint[1] / w, worldPoint[2] / w)
     }
 
-    /** Read back the just-rendered frame and save it as a PNG, for off-device inspection. */
-    private fun saveFrameCapture() {
-        val w = surfaceWidth
-        val h = surfaceHeight
+    /** (Re)create the readback PBO + reusable CPU buffers for the current surface size.
+     *  GL thread only. Surface size is stable for a session, so this runs ~once. */
+    private fun ensureCapturePbo(w: Int, h: Int) {
+        if (capturePboId != 0 && capturePboW == w && capturePboH == h) return
+        if (capturePboId != 0) {
+            GLES30.glDeleteBuffers(1, intArrayOf(capturePboId), 0)
+            capturePboId = 0
+        }
+        val ids = IntArray(1)
+        GLES30.glGenBuffers(1, ids, 0)
+        capturePboId = ids[0]
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, w * h * 4, null, GLES30.GL_STREAM_READ)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+        capturePboW = w; capturePboH = h
+        captureWorkBuf = ByteArray(w * h * 4)
+        capturePixels = IntArray(w * h)
+        captureBitmap = null
+        captureReadbackPending = false
+    }
+
+    /** Kick off an async framebuffer readback into the PBO — returns immediately, no GPU
+     *  stall. The pixels are picked up by [consumeCaptureReadback] on a later frame. */
+    private fun issueCaptureReadback(snapshot: Boolean) {
+        val w = surfaceWidth; val h = surfaceHeight
         if (w == 0 || h == 0) return
-        val buffer = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
-        GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
-        val rgba = ByteArray(w * h * 4)
-        buffer.rewind()
-        buffer.get(rgba)
-        // glReadPixels rows run bottom-to-top; flip into top-down opaque ARGB pixels.
-        val pixels = IntArray(w * h)
-        for (y in 0 until h) {
-            val src = (h - 1 - y) * w * 4
-            val dst = y * w
-            for (x in 0 until w) {
-                val i = src + x * 4
-                val r = rgba[i].toInt() and 0xFF
-                val g = rgba[i + 1].toInt() and 0xFF
-                val b = rgba[i + 2].toInt() and 0xFF
-                pixels[dst + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        ensureCapturePbo(w, h)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        // Offset 0 into the bound PIXEL_PACK_BUFFER — the read DMAs in the background.
+        GLES30.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+        captureReadbackPending = true
+        capturePendingSnapshot = snapshot
+    }
+
+    /** Map the previously-issued readback, copy it into a reusable buffer, and hand it to
+     *  the encode worker. The map doesn't stall: the read was issued frames ago. GL thread. */
+    private fun consumeCaptureReadback() {
+        if (!captureReadbackPending) return
+        captureReadbackPending = false
+        val w = capturePboW; val h = capturePboH
+        if (w == 0 || h == 0 || capturePboId == 0) return
+        val bytes = w * h * 4
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, capturePboId)
+        val mapped = GLES30.glMapBufferRange(
+            GLES30.GL_PIXEL_PACK_BUFFER, 0, bytes, GLES30.GL_MAP_READ_BIT,
+        ) as? ByteBuffer
+        if (mapped != null && captureBusy.compareAndSet(false, true)) {
+            mapped.order(ByteOrder.nativeOrder()).position(0)
+            mapped.get(captureWorkBuf, 0, bytes)
+            // Snapshot the overlay inputs on the GL thread so the worker touches no live state.
+            val snapshot = capturePendingSnapshot
+            val cx = cursorX; val cy = cursorY
+            val overlay = WorkspaceController.captureDebugOverlay
+            val info = "cursor=(${"%.3f".format(cx)},${"%.3f".format(cy)})  " +
+                "layout=${layout.displayName}  screens=${layout.screens.size}"
+            captureExecutor.execute { encodeAndSaveCapture(w, h, cx, cy, overlay, info, snapshot) }
+        }
+        GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+    }
+
+    /** Worker-thread: flip the RGBA bytes to top-down ARGB, draw the optional debug overlay,
+     *  PNG-encode and write the file. Reuses [capturePixels] / [captureBitmap]; clears
+     *  [captureBusy] when done so the next frame can issue another capture. */
+    private fun encodeAndSaveCapture(
+        w: Int, h: Int, cursorPxNdcX: Float, cursorPxNdcY: Float,
+        overlay: Boolean, info: String, snapshot: Boolean,
+    ) {
+        try {
+            val src = captureWorkBuf
+            val px = capturePixels
+            // glReadPixels rows run bottom-to-top; flip into top-down opaque ARGB pixels.
+            for (y in 0 until h) {
+                val s = (h - 1 - y) * w * 4
+                val d = y * w
+                for (x in 0 until w) {
+                    val i = s + x * 4
+                    val r = src[i].toInt() and 0xFF
+                    val g = src[i + 1].toInt() and 0xFF
+                    val b = src[i + 2].toInt() and 0xFF
+                    px[d + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
             }
-        }
-        // Mutable bitmap — we draw a debug overlay on it below. `createBitmap(pixels…)`
-        // produces an immutable bitmap that Canvas refuses, so allocate then setPixels.
-        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
-        // Annotate the capture with what the renderer *thinks* the cursor is doing —
-        // a red circle at the cursor's internal NDC position, plus the coords + the
-        // current press target. Lets us compare the rendered cursor sprite against the
-        // logical state when the two seem to disagree. Gated by a setting so user-
-        // visible captures (e.g. for sharing) can come out clean.
-        val canvas = android.graphics.Canvas(bitmap)
-        val cursorPxX = (cursorX + 1f) / 2f * w
-        val cursorPxY = (1f - cursorY) / 2f * h
-        val ringPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.RED
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = 3f
-        }
-        if (WorkspaceController.captureDebugOverlay) {
-            canvas.drawCircle(cursorPxX, cursorPxY, 28f, ringPaint)
-        }
-        val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.YELLOW
-            textSize = 22f
-            setShadowLayer(3f, 0f, 0f, android.graphics.Color.BLACK)
-        }
-        if (WorkspaceController.captureDebugOverlay) {
-            val info = "cursor=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)})  layout=${layout.displayName}  screens=${layout.screens.size}"
-            canvas.drawText(info, 12f, h - 16f, textPaint)
-        }
-        Thread {
+            var bmp = captureBitmap
+            if (bmp == null || bmp.width != w || bmp.height != h) {
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                captureBitmap = bmp
+            }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+            if (overlay) {
+                val canvas = Canvas(bmp)
+                val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 3f
+                }
+                canvas.drawCircle((cursorPxNdcX + 1f) / 2f * w, (1f - cursorPxNdcY) / 2f * h, 28f, ringPaint)
+                val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.YELLOW; textSize = 22f
+                    setShadowLayer(3f, 0f, 0f, Color.BLACK)
+                }
+                canvas.drawText(info, 12f, h - 16f, textPaint)
+            }
             val dir = File(appContext.getExternalFilesDir(null), "captures").apply { mkdirs() }
             val file = File(dir, "uxspace-${System.currentTimeMillis()}.png")
             val ok = runCatching {
-                FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }.isSuccess
             Log.i(TAG, if (ok) "capture saved: ${file.absolutePath}" else "capture save failed")
-            mainHandler.post {
-                Toast.makeText(
-                    appContext,
-                    if (ok) "Workspace captured" else "Capture failed",
-                    Toast.LENGTH_SHORT,
-                ).show()
+            // Only toast for one-shot snapshots (the phone already toasts on tap, and a
+            // per-frame toast would spam during recording) — and always surface failures.
+            if (snapshot && ok) {
+                mainHandler.post { Toast.makeText(appContext, "Workspace captured", Toast.LENGTH_SHORT).show() }
+            } else if (!ok) {
+                mainHandler.post { Toast.makeText(appContext, "Capture failed", Toast.LENGTH_SHORT).show() }
             }
-        }.start()
+        } finally {
+            captureBusy.set(false)
+        }
     }
 
     private fun bindQuad(quad: FloatBuffer, positionHandle: Int, texCoordHandle: Int) {
@@ -3476,6 +3687,18 @@ class WorkspaceRenderer(
         out[4] = xy - wz; out[5] = 1f - (xx + zz); out[6] = yz + wx; out[7] = 0f
         out[8] = xz + wy; out[9] = yz - wx; out[10] = 1f - (xx + yy); out[11] = 0f
         out[12] = 0f; out[13] = 0f; out[14] = 0f; out[15] = 1f
+
+        // Positional parallax (6DOF tracking only): translate the camera with the head so
+        // moving physically shifts the viewpoint through the fixed workspace. The camera
+        // sits at headPos (scaled + clamped to bound VIO drift); post-multiplying T(-cam)
+        // gives view·p = R·(p - cam), the standard view transform for a translated camera.
+        // headPos is 0 on orientation-only paths, so this is a no-op there.
+        if (PARALLAX_SCALE != 0f && (headPosX != 0f || headPosY != 0f || headPosZ != 0f)) {
+            val cx = (headPosX * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            val cy = (headPosY * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            val cz = (headPosZ * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
+            Matrix.translateM(out, 0, -cx, -cy, -cz)
+        }
     }
 
     /**
@@ -3510,6 +3733,20 @@ class WorkspaceRenderer(
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f
 
+        /**
+         * Positional-parallax gain. 1.0 = true-to-life (1 cm of head motion moves the camera
+         * 1 cm against a workspace placed in metres). Lower it to damp the effect or to mute
+         * VIO position jitter; 0 disables parallax (orientation-only camera).
+         */
+        const val PARALLAX_SCALE = 1.0f
+
+        /**
+         * Hard clamp (metres) on camera displacement from the recentre origin. Carina VIO
+         * position drifts slowly; without a bound the workspace could creep away over a long
+         * session. Bounds the camera to a box around the origin big enough for natural sway.
+         */
+        const val PARALLAX_MAX_M = 0.5f
+
         /** Default render band — the glasses' top/bottom edges are uncomfortable to view. */
         const val DEFAULT_SCREEN_BAND = 0.83f
 
@@ -3537,6 +3774,12 @@ class WorkspaceRenderer(
         const val TOOLBAR_Y = -0.90f
         const val TOOLBAR_HALF_W = 0.42f
         const val TOOLBAR_HALF_H = 0.06f
+
+        // Recording indicator — a red dot just left of the toolbar, shown whenever a
+        // recording is running (independent of the toolbar's expand/collapse state).
+        const val REC_DOT_CX = -0.50f
+        const val REC_DOT_CY = TOOLBAR_Y
+        const val REC_DOT_RADIUS = 0.018f
 
         /**
          * NDC half-width of a button's *hit region* — wider than the icon so the cursor
@@ -3597,6 +3840,13 @@ class WorkspaceRenderer(
 
         /** Cursor moves arrive at touchpad / mouse polling rate; one in N gets logged. */
         const val CURSOR_LOG_EVERY = 8
+
+        /**
+         * Master switch for the per-move / per-frame cursor diagnostics — `moveCursor`,
+         * `flat-cursor`, and `curved-cursor`. Off by default: they flood logcat at input
+         * and frame rate. Flip to true when debugging cursor → screen-pixel mapping.
+         */
+        const val CURSOR_DIAG = false
 
         /**
          * Window placement bands inside a slot (slot's pixel coords): the activity quad

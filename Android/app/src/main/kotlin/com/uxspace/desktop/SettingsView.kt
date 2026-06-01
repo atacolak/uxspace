@@ -599,6 +599,12 @@ class SettingsView(context: Context) : LinearLayout(context) {
                 current = WorkspaceSettings.autoRecenterOnUnlock(),
             ) { WorkspaceSettings.setAutoRecenterOnUnlock(it) },
         )
+        addView(
+            backedToggleRow(
+                label = "6DOF head tracking — positional parallax (applies on reconnect)",
+                current = WorkspaceSettings.carina6Dof(),
+            ) { WorkspaceSettings.setCarina6Dof(it) },
+        )
     }
 
     private fun renderViewMode(mode: ViewMode) {
