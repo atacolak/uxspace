@@ -49,6 +49,33 @@ private const val RAW_MOUSE_WHEEL_GAIN = 0.08f
 private const val BTN_LEFT = 272
 private const val BTN_RIGHT = 273
 
+// Kernel KEY_* editing codes for the hardware-keyboard drawer-search path.
+private const val KEY_BACKSPACE = 14
+private const val KEY_ENTER = 28
+private const val KEY_KPENTER = 96
+
+/**
+ * Map a kernel KEY_* code to the character it types, for the drawer search box. Covers
+ * letters, digits, space and a few name-friendly symbols — enough to search installed
+ * apps. Search matching is case-insensitive, so shift is ignored (letters come back
+ * lowercase). Returns null for keys with no textual character (arrows, F-keys, …).
+ */
+private fun evdevToChar(code: Int): Char? = when (code) {
+    // Letters, in kernel-code order (KEY_Q row, KEY_A row, KEY_Z row).
+    16 -> 'q'; 17 -> 'w'; 18 -> 'e'; 19 -> 'r'; 20 -> 't'
+    21 -> 'y'; 22 -> 'u'; 23 -> 'i'; 24 -> 'o'; 25 -> 'p'
+    30 -> 'a'; 31 -> 's'; 32 -> 'd'; 33 -> 'f'; 34 -> 'g'
+    35 -> 'h'; 36 -> 'j'; 37 -> 'k'; 38 -> 'l'
+    44 -> 'z'; 45 -> 'x'; 46 -> 'c'; 47 -> 'v'; 48 -> 'b'; 49 -> 'n'; 50 -> 'm'
+    // Digits KEY_1..KEY_9, KEY_0.
+    2 -> '1'; 3 -> '2'; 4 -> '3'; 5 -> '4'; 6 -> '5'
+    7 -> '6'; 8 -> '7'; 9 -> '8'; 10 -> '9'; 11 -> '0'
+    57 -> ' '            // KEY_SPACE
+    12 -> '-'            // KEY_MINUS
+    52 -> '.'            // KEY_DOT
+    else -> null
+}
+
 /** Max ms a BTN_LEFT press can stay held before its release is no longer
  *  counted as a click (it was a long-press, intentional discard). */
 private const val MOUSE_CLICK_MAX_MS = 350L
@@ -281,6 +308,28 @@ class UxSpaceApp : Application() {
             }
         }
 
+        // Hardware-keyboard text (non Ctrl+Alt) forwarded from the shell-uid reader. The
+        // desktop Presentation is non-focusable (launched apps keep Android input focus), so
+        // a USB/BT keyboard's keys never reach the drawer's search box on their own — feed it
+        // here. Launched apps still get their own keys via normal focus, so we only act while
+        // the drawer is open, and reset the typed query at the start of each drawer session.
+        PrivilegedService.keyHandler = { keyCode, pressed, _ ->
+            if (pressed && WorkspaceController.isDrawerOpen) {
+                when (keyCode) {
+                    KEY_BACKSPACE ->
+                        if (drawerQuery.isNotEmpty()) drawerQuery.deleteCharAt(drawerQuery.length - 1)
+                    KEY_ENTER, KEY_KPENTER -> Unit // keep the query; the user taps a result
+                    else -> evdevToChar(keyCode)?.let { drawerQuery.append(it) }
+                }
+                WorkspaceController.setDrawerSearchQuery(drawerQuery.toString())
+            }
+        }
+        WorkspaceController.addDrawerStateListener { open, _ -> if (open) drawerQuery.setLength(0) }
+
+        // Two-finger touchpad pinch → workspace zoom, the same entry point the phone
+        // trackpad's pinch uses. [scale] is the per-frame span ratio (>1 = zoom in).
+        PrivilegedService.zoomHandler = { scale -> WorkspaceController.pinch(scale) }
+
         // DOF-stall watchdog: when DOF goes down while the glasses display is
         // still attached AND we had DOF earlier this session, try a USB rescan
         // (helper unbinds + binds the VITURE device). Cap at DOF_RESCAN_MAX
@@ -341,6 +390,9 @@ class UxSpaceApp : Application() {
     private var mousePrimaryDownAtMs = 0L
     private var mouseDragging = false
 
+    /** Text typed on a hardware keyboard into the drawer search box this drawer session. */
+    private val drawerQuery = StringBuilder()
+
     /** Press / release of the left mouse button. Press starts a potential drag;
      *  motion past [MOUSE_DRAG_TICK_THRESHOLD] promotes it. Release ends the
      *  drag if one was running, otherwise fires a click if the hold was short
@@ -380,6 +432,10 @@ class UxSpaceApp : Application() {
         WorkspaceController.pinchEnabled = WorkspaceSettings.pinchEnabled()
         WorkspaceController.autoRecenterOnUnlock = WorkspaceSettings.autoRecenterOnUnlock()
         WorkspaceController.carina6Dof = WorkspaceSettings.carina6Dof()
+        // Screen fill (how much of the glasses display the workspace occupies). Pushed as the
+        // render band so it's applied to the live renderer and re-applied on every reconnect
+        // via WorkspaceController.register(). Replaces the old hardcoded 0.83 band.
+        WorkspaceController.setScreenBand(WorkspaceSettings.screenFill())
         WorkspaceController.maxWindowsPerSlot = WorkspaceSettings.maxWindowsPerSlot()
         WorkspaceController.snapZonesEnabled = WorkspaceSettings.snapZonesEnabled()
         WorkspaceController.resizeHandlesEnabled = WorkspaceSettings.resizeHandlesEnabled()

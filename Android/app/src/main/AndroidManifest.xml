@@ -33,6 +33,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <!--
+      The in-app self-updater (AppUpdater) fetches its publish manifest + APK from the
+      self-hosted dist server over HTTPS, checks connectivity before trying, and hands the
+      downloaded APK to the system PackageInstaller. INTERNET / ACCESS_NETWORK_STATE cover
+      the fetch + the online() pre-check; REQUEST_INSTALL_PACKAGES lets UxSpace launch the
+      install of its own next version. See com.uxspace.update.AppUpdater.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
       UxSpace lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->
@@ -101,6 +112,16 @@
                 <action android:name="com.uxspace.privileged.SUBMIT_PAIRING_CODE" />
             </intent-filter>
         </receiver>
+
+        <!--
+          Receives PackageInstaller session status for the in-app self-updater. On
+          STATUS_PENDING_USER_ACTION it launches the system's install-confirmation screen —
+          a non-privileged app can't install its own update without that final user tap.
+          Not exported: only the app's own PendingIntent delivers here.
+        -->
+        <receiver
+            android:name=".update.AppInstallReceiver"
+            android:exported="false" />
 
         <!--
           Workspace lifecycle anchor. Started by MainActivity when the glasses display

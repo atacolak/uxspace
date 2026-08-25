@@ -11,13 +11,25 @@ android {
         applicationId = "com.uxspace"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
+        versionCode = 4
         versionName = "0.1"
+
+        // Cloudflare Access service-token headers for the in-app self-updater to reach the
+        // gated dist server (https://dist.darkclad.org/uxspace/). Injected at build time by
+        // publish-uxspace.ps1 (reads the untracked creds file and passes
+        // -PCF_ACCESS_CLIENT_ID=… -PCF_ACCESS_CLIENT_SECRET=…). Empty by default, so a plain
+        // `gradlew assembleDebug` produces a LAN-only build whose updater sends no headers.
+        val cfClientId = (project.findProperty("CF_ACCESS_CLIENT_ID") as String?) ?: ""
+        val cfClientSecret = (project.findProperty("CF_ACCESS_CLIENT_SECRET") as String?) ?: ""
+        buildConfigField("String", "CF_ACCESS_CLIENT_ID", "\"$cfClientId\"")
+        buildConfigField("String", "CF_ACCESS_CLIENT_SECRET", "\"$cfClientSecret\"")
     }
 
     buildFeatures {
         viewBinding = true
         aidl = true
+        // AppUpdater reads VERSION_CODE / APPLICATION_ID / CF_ACCESS_* from BuildConfig.
+        buildConfig = true
     }
 
     buildTypes {

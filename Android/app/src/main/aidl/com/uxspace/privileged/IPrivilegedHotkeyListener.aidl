@@ -25,4 +25,22 @@ oneway interface IPrivilegedHotkeyListener {
      * otherwise miss button events too.
      */
     void onMouseButton(int code, boolean pressed) = 3;
+
+    /**
+     * A non-hotkey keyboard key transitioned, forwarded so the workspace can consume
+     * hardware-keyboard text where no Android window holds focus for it — namely the
+     * drawer search box (the desktop Presentation is non-focusable by design, so a USB/BT
+     * keyboard's keys never reach it the way they reach a launched app). [keyCode] is the
+     * kernel KEY_* code; [pressed] is true on press/autorepeat, false on release; [shift]
+     * is the shift-held state at that moment. Ctrl+Alt combos are delivered via [onHotkey]
+     * instead and are never forwarded here.
+     */
+    void onKey(int keyCode, boolean pressed, boolean shift) = 4;
+
+    /**
+     * A two-finger pinch on a touchpad. [scale] is the incremental span ratio for this
+     * frame (>1 = fingers spreading = zoom in, <1 = zoom out). Forwarded so the app can
+     * drive WorkspaceController.pinch, the same way the phone trackpad's pinch does.
+     */
+    void onZoom(float scale) = 5;
 }

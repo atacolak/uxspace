@@ -26,6 +26,10 @@ object WorkspaceSettings {
     private const val KEY_PINCH_ENABLED = "pinch_enabled"
     private const val KEY_AUTO_RECENTER_ON_UNLOCK = "auto_recenter_on_unlock"
     private const val KEY_CARINA_6DOF = "carina_6dof"
+    private const val KEY_SCREEN_FILL = "screen_fill"
+
+    /** Default screen fill — 100%, i.e. the workspace fills the full glasses display. */
+    const val DEFAULT_SCREEN_FILL = 1.0f
 
     /** Default multiplier on per-frame cursor delta; 1.0 = no scaling. */
     const val DEFAULT_CURSOR_SENSITIVITY = 1.0f
@@ -184,6 +188,18 @@ object WorkspaceSettings {
         if (::prefs.isInitialized) prefs.getBoolean(KEY_CARINA_6DOF, false) else false
 
     fun setCarina6Dof(value: Boolean) = putBoolean(KEY_CARINA_6DOF, value)
+
+    /**
+     * Screen fill — the fraction of the glasses' full virtual display the workspace fills,
+     * centred. 1.0 = edge-to-edge (the whole 16:9 display). Lower values letterbox the scene
+     * into a smaller centred window, trading screen real-estate for staying inside the glasses'
+     * sharper central field. Persisted; applied via [com.uxspace.spatial.WorkspaceController.setScreenBand].
+     */
+    fun screenFill(): Float =
+        if (::prefs.isInitialized) prefs.getFloat(KEY_SCREEN_FILL, DEFAULT_SCREEN_FILL)
+        else DEFAULT_SCREEN_FILL
+
+    fun setScreenFill(value: Float) = putFloat(KEY_SCREEN_FILL, value.coerceIn(0.5f, 1.0f))
 
     // Windows
     fun maxWindowsPerSlot(): Int =

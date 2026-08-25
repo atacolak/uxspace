@@ -27,3 +27,7 @@ rootProject.name = "UxSpace"
 include(":glasses")
 include(":spatial")
 include(":app")
+
+// Local-only experiment module (gitignored): VITURE camera-stream test app.
+// Safe to commit — the include is skipped on clones where camtest/ is absent.
+if (file("camtest").exists()) include(":camtest")

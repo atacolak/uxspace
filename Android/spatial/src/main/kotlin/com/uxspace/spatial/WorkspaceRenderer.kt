@@ -1,11 +1,14 @@
 package com.uxspace.spatial
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.os.Build
+import android.provider.MediaStore
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLES30
@@ -3625,22 +3628,72 @@ class WorkspaceRenderer(
                 }
                 canvas.drawText(info, 12f, h - 16f, textPaint)
             }
-            val dir = File(appContext.getExternalFilesDir(null), "captures").apply { mkdirs() }
-            val file = File(dir, "uxspace-${System.currentTimeMillis()}.png")
-            val ok = runCatching {
-                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            }.isSuccess
-            Log.i(TAG, if (ok) "capture saved: ${file.absolutePath}" else "capture save failed")
+            val name = "uxspace-${System.currentTimeMillis()}.png"
+            // One-shot snapshots land in the public Photos/Gallery (Pictures/UxSpace album) so
+            // the user can see and share them. Recording frame-dumps stay in the private app
+            // sandbox — sending hundreds of frames to the gallery would flood it.
+            val ok: Boolean
+            val where: String
+            if (snapshot && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ok = saveSnapshotToGallery(bmp, name)
+                where = "Pictures/$CAPTURE_ALBUM/$name"
+            } else {
+                val dir = File(appContext.getExternalFilesDir(null), "captures").apply { mkdirs() }
+                val file = File(dir, name)
+                ok = runCatching {
+                    FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                }.isSuccess
+                where = file.absolutePath
+            }
+            Log.i(TAG, if (ok) "capture saved: $where" else "capture save failed ($where)")
             // Only toast for one-shot snapshots (the phone already toasts on tap, and a
             // per-frame toast would spam during recording) — and always surface failures.
             if (snapshot && ok) {
-                mainHandler.post { Toast.makeText(appContext, "Workspace captured", Toast.LENGTH_SHORT).show() }
+                mainHandler.post { Toast.makeText(appContext, "Saved to Photos", Toast.LENGTH_SHORT).show() }
             } else if (!ok) {
                 mainHandler.post { Toast.makeText(appContext, "Capture failed", Toast.LENGTH_SHORT).show() }
             }
         } finally {
             captureBusy.set(false)
         }
+    }
+
+    /**
+     * Write a one-shot capture into the public gallery under `Pictures/[CAPTURE_ALBUM]` via
+     * [MediaStore], so it shows up in Photos / the Gallery app. Scoped-storage path (API 29+):
+     * the app owns what it inserts, so no storage permission is needed. Uses the IS_PENDING
+     * flow so a half-written file is never surfaced to the gallery. Worker-thread only.
+     */
+    private fun saveSnapshotToGallery(bmp: Bitmap, displayName: String): Boolean = runCatching {
+        val resolver = appContext.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/$CAPTURE_ALBUM")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val uri = resolver.insert(collection, values)
+            ?: return@runCatching false
+        try {
+            resolver.openOutputStream(uri).use { out ->
+                if (out == null) throw java.io.IOException("null output stream for $uri")
+                if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    throw java.io.IOException("PNG compress failed")
+                }
+            }
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            true
+        } catch (t: Throwable) {
+            // Roll back the pending row so a failed write leaves no orphan in the gallery.
+            runCatching { resolver.delete(uri, null, null) }
+            throw t
+        }
+    }.getOrElse {
+        Log.w(TAG, "gallery save failed: ${it.message}")
+        false
     }
 
     private fun bindQuad(quad: FloatBuffer, positionHandle: Int, texCoordHandle: Int) {
@@ -3729,6 +3782,9 @@ class WorkspaceRenderer(
 
     private companion object {
         const val TAG = "UxSpace/Renderer"
+
+        /** Gallery album (under Pictures/) that one-shot workspace snapshots are saved into. */
+        const val CAPTURE_ALBUM = "UxSpace"
 
         /** The desktop sits just behind the launched-app screens, filling the view. */
         const val DESKTOP_DISTANCE = 4.2f

@@ -120,6 +120,14 @@ object WorkspaceController {
     @Volatile
     var retryHeadTracking: (() -> Unit)? = null
 
+    /**
+     * Trigger a manual in-app update check. Wired by [com.uxspace.MainActivity] (the updater's
+     * dialogs + system install screen are phone-side / activity-context concerns); invoked by the
+     * glasses-side Settings → About "Check for updates" button. No-op when unwired.
+     */
+    @Volatile
+    var checkForUpdates: (() -> Unit)? = null
+
     /** Forward a pinch scale factor (1.0 = identity) into the workspace zoom. */
     fun pinch(scaleFactor: Float) {
         renderer?.requestPinch(scaleFactor)

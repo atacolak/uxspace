@@ -1,6 +1,7 @@
 package com.uxspace
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -36,6 +37,8 @@ import com.uxspace.privileged.PrivilegedService.State
 import com.uxspace.spatial.WorkspaceController
 import com.uxspace.spatial.WorkspacePresentation
 import com.uxspace.spatial.WorkspaceRenderer
+import com.uxspace.update.AppUpdater
+import java.util.Locale
 
 /**
  * The phone-side control panel — UxSpace's input device.
@@ -58,6 +61,9 @@ class MainActivity : ComponentActivity() {
     private var presentation: WorkspacePresentation? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Gate for the once-per-process silent update check (fired from the first [onResume]). */
+    private var appUpdateChecked = false
 
     /** Virtual display id whose text field is currently focused, or -1. Set by the
      *  accessibility service's focus events; drives the auto-open of the phone keyboard
@@ -395,6 +401,10 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        // "Check for updates" in the glasses-side Settings → About panel routes here; the
+        // update dialogs + system install screen are activity-context concerns and show on
+        // the phone (where the final install tap must happen anyway).
+        WorkspaceController.checkForUpdates = { mainHandler.post { checkForAppUpdate(silent = false) } }
 
         // Forward IME keystrokes into the workspace drawer's search field while the drawer
         // is open, or into a focused text field on a launched app's virtual display
@@ -672,6 +682,89 @@ class MainActivity : ComponentActivity() {
         // re-attempt bring-up. Idempotent and no-op once READY.
         PrivilegedService.ensureRunning()
         syncGlasses()
+        // One silent update check per process. Fails soft (offline / up-to-date / error stay
+        // quiet); only a genuinely newer, non-dismissed build pops the dialog.
+        if (!appUpdateChecked) { appUpdateChecked = true; checkForAppUpdate(silent = true) }
+    }
+
+    // --- In-app self-updater --------------------------------------------------
+
+    /**
+     * Check the publish manifest for a newer APK. [silent] auto-checks (on launch) stay quiet when
+     * up to date / offline and honour the "Later" dismissal; a manual check reports every outcome.
+     * All dialogs show on the phone — the final install confirmation must happen there.
+     */
+    private fun checkForAppUpdate(silent: Boolean) {
+        AppUpdater.check(this) { release, error ->
+            when {
+                release != null -> {
+                    if (silent && release.versionCode <= AppUpdater.dismissedCode(this)) return@check
+                    showAppUpdateDialog(release)
+                }
+                silent -> { /* auto-check: never nag on up-to-date / offline / error */ }
+                error == "offline" -> Toast.makeText(this, "No connection — can't check for updates", Toast.LENGTH_SHORT).show()
+                error != null -> Toast.makeText(this, "Update check failed: $error", Toast.LENGTH_LONG).show()
+                else -> Toast.makeText(this, "UxSpace ${BuildConfig.VERSION_NAME} is up to date", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun showAppUpdateDialog(r: AppUpdater.Release) {
+        val mb = if (r.size > 0) String.format(Locale.US, " · %.1f MB", r.size / 1048576.0) else ""
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage(
+                "UxSpace ${r.versionName} (build ${r.versionCode})$mb\n\n" +
+                    "You have ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE}).",
+            )
+            .setPositiveButton("Update") { _, _ -> startAppUpdate(r) }
+            .setNegativeButton("Later") { d, _ -> AppUpdater.setDismissed(this, r.versionCode); d.dismiss() }
+            .show()
+    }
+
+    private fun startAppUpdate(r: AppUpdater.Release) {
+        // On Android 8+ the user must first allow UxSpace to install apps; bounce them to Settings.
+        if (!AppUpdater.canInstall(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("Allow app installs")
+                .setMessage(
+                    "To update itself, UxSpace needs permission to install apps. Enable it on the " +
+                        "next screen, then check for updates again.",
+                )
+                .setPositiveButton("Open settings") { _, _ ->
+                    runCatching { startActivity(AppUpdater.unknownSourcesSettings(this)) }
+                        .onFailure { Toast.makeText(this, "Couldn't open settings", Toast.LENGTH_SHORT).show() }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val progress = AlertDialog.Builder(this)
+            .setTitle("Downloading update")
+            .setMessage("Starting…")
+            .setCancelable(false)
+            .create()
+        progress.show()
+        AppUpdater.downloadAndInstall(
+            this, r,
+            onProgress = { done, total ->
+                progress.setMessage(
+                    if (total > 0) String.format(
+                        Locale.US, "Downloading… %d%%  (%.1f / %.1f MB)",
+                        done * 100 / total, done / 1048576.0, total / 1048576.0,
+                    )
+                    else String.format(Locale.US, "Downloading… %.1f MB", done / 1048576.0),
+                )
+            },
+            onDone = { ok, msg ->
+                progress.dismiss()
+                Toast.makeText(
+                    this,
+                    if (ok) "Opening installer…" else "Update failed: $msg",
+                    if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
+                ).show()
+            },
+        )
     }
 
     override fun onDestroy() {
@@ -689,6 +782,7 @@ class MainActivity : ComponentActivity() {
         if (WorkspaceController.openSoundOutputPicker != null) {
             WorkspaceController.openSoundOutputPicker = null
         }
+        WorkspaceController.checkForUpdates = null
         super.onDestroy()
     }
 

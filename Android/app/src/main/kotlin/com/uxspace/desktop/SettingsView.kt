@@ -55,12 +55,15 @@ class SettingsView(context: Context) : LinearLayout(context) {
     private val tabButtons = mutableMapOf<Tab, TextView>()
     private lateinit var contentHost: FrameLayout
 
+    /** Identity tag marking a view that starts a settings section (for the two-column reflow). */
+    private val SECTION_MARKER = Any()
+
     // --- Tab content controls (lateinit because each is built inside its tab) ---
     private lateinit var viewModePinned: TextView
     private lateinit var viewModeFree: TextView
     private lateinit var zoomLabel: TextView
-    private lateinit var bandValue: TextView
-    private lateinit var bandSeek: SeekBar
+    /** The "Screen fill" option pills, paired with the fraction each selects. */
+    private val fillPills = mutableListOf<Pair<Float, TextView>>()
     private lateinit var recordingButton: TextView
 
     /**
@@ -130,7 +133,7 @@ class SettingsView(context: Context) : LinearLayout(context) {
             Tab.VIEW -> {
                 renderViewMode(WorkspaceController.currentViewMode)
                 renderZoom(WorkspaceController.currentZoom())
-                renderScreenBand(WorkspaceController.currentScreenBand())
+                renderScreenFill(WorkspaceController.currentScreenBand())
             }
             Tab.CAPTURE -> renderRecording(WorkspaceController.isRecording)
             else -> Unit
@@ -188,14 +191,60 @@ class SettingsView(context: Context) : LinearLayout(context) {
             Tab.PRIVILEGED -> buildPrivilegedTab()
             Tab.ABOUT -> buildAboutTab()
         }
+        val laidOut = if (body is LinearLayout) reflowIntoColumns(body) else body
         val scroll = ScrollView(context).apply {
             isFillViewport = true
             overScrollMode = OVER_SCROLL_NEVER
-            addView(body, LayoutParams(MATCH, WRAP))
+            addView(laidOut, LayoutParams(MATCH, WRAP))
         }
         contentHost.addView(scroll, FrameLayout.LayoutParams(MATCH, MATCH))
         renderAll()
     }
+
+    /**
+     * Reflow a single-column tab [body] into two balanced columns, so the wide modal's right
+     * half isn't wasted and long tabs (e.g. Screens) stop overflowing the bottom. The body's
+     * top-level children are partitioned into sections at each [SECTION_MARKER]-tagged child
+     * (a section label, or a self-contained layout row) so a header is never split from the
+     * controls beneath it; whole sections are then greedily packed into whichever column is
+     * currently shorter. Falls back to the untouched full-width column when there's only one
+     * section (nothing to balance).
+     */
+    private fun reflowIntoColumns(body: LinearLayout): View {
+        val children = ArrayList<View>(body.childCount)
+        for (i in 0 until body.childCount) children.add(body.getChildAt(i))
+        val sections = mutableListOf<MutableList<View>>()
+        for (v in children) {
+            if (sections.isEmpty() || v.tag === SECTION_MARKER) sections.add(mutableListOf())
+            sections.last().add(v)
+        }
+        if (sections.size < 2) return body
+
+        body.removeAllViews()
+        val left = LinearLayout(context).apply { orientation = VERTICAL }
+        val right = LinearLayout(context).apply { orientation = VERTICAL }
+        var wLeft = 0
+        var wRight = 0
+        for (section in sections) {
+            val w = section.sumOf { viewWeight(it) }
+            if (wLeft <= wRight) {
+                section.forEach { left.addView(it) }
+                wLeft += w
+            } else {
+                section.forEach { right.addView(it) }
+                wRight += w
+            }
+        }
+        return LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            addView(left, LayoutParams(0, WRAP, 1f).apply { marginEnd = dp(24) })
+            addView(right, LayoutParams(0, WRAP, 1f))
+        }
+    }
+
+    /** Cheap height proxy for column balancing: total view count in the subtree. */
+    private fun viewWeight(v: View): Int =
+        if (v is ViewGroup) 1 + (0 until v.childCount).sumOf { viewWeight(v.getChildAt(it)) } else 1
 
     // endregion
 
@@ -217,7 +266,11 @@ class SettingsView(context: Context) : LinearLayout(context) {
      * intended interaction but the cycle still walks all layouts.
      */
     private fun buildLayoutRow(layout: Layout): View {
-        val container = LinearLayout(context).apply { orientation = VERTICAL }
+        val container = LinearLayout(context).apply {
+            orientation = VERTICAL
+            // A self-contained section (header + controls) — a column-reflow boundary.
+            tag = SECTION_MARKER
+        }
         container.addView(sectionLabel(layout.displayName))
         val enable = CheckBox(context).apply {
             text = "Enabled in unlocked-mode cycle"
@@ -565,31 +618,36 @@ class SettingsView(context: Context) : LinearLayout(context) {
         addView(zoomRow)
         addView(spacer(dp(14)))
 
-        addView(sectionLabel("Render band"))
-        bandValue = TextView(context).apply {
-            setTextColor(LABEL_COLOR)
-            textSize = 13f
-        }
-        bandSeek = SeekBar(context).apply {
-            max = BAND_SEEK_MAX
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    val fraction = bandFractionFromProgress(value)
-                    WorkspaceController.setScreenBand(fraction)
-                    renderScreenBand(fraction)
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) = Unit
-                override fun onStopTrackingTouch(sb: SeekBar?) = Unit
-            })
-        }
-        val bandRow = LinearLayout(context).apply {
+        addView(sectionLabel("Screen fill"))
+        addView(
+            TextView(context).apply {
+                text = "How much of the glasses' display the workspace fills. " +
+                    "100% is edge-to-edge; lower keeps it inside the sharper centre of the lenses."
+                textSize = 11f
+                setTextColor(LABEL_COLOR)
+            },
+        )
+        addView(spacer(dp(6)))
+        fillPills.clear()
+        val fillRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(bandSeek, LayoutParams(0, WRAP, 1f))
-            addView(bandValue, LayoutParams(WRAP, WRAP).apply { marginStart = dp(12); minimumWidth = dp(56) })
         }
-        addView(bandRow)
+        SCREEN_FILL_OPTIONS.forEachIndexed { i, pct ->
+            val fraction = pct / 100f
+            val pill = pillButton("$pct%") {
+                // setScreenFill persists AND (via the WorkspaceSettings change-listener →
+                // loadInputAndViewSettings) pushes the band to the live renderer; the direct
+                // setScreenBand makes the change instant even if the listener is slow.
+                WorkspaceSettings.setScreenFill(fraction)
+                WorkspaceController.setScreenBand(fraction)
+                renderScreenFill(fraction)
+            }
+            fillPills.add(fraction to pill)
+            fillRow.addView(pill, LayoutParams(0, WRAP, 1f).apply { if (i > 0) marginStart = dp(6) })
+        }
+        addView(fillRow)
+        renderScreenFill(WorkspaceSettings.screenFill())
         addView(spacer(dp(14)))
 
         addView(sectionLabel("Behaviour"))
@@ -617,18 +675,11 @@ class SettingsView(context: Context) : LinearLayout(context) {
         if (::zoomLabel.isInitialized) zoomLabel.text = "${(zoom * 100).toInt()}%"
     }
 
-    private fun renderScreenBand(fraction: Float) {
-        if (!::bandSeek.isInitialized) return
-        bandSeek.progress = bandProgressFromFraction(fraction)
-        bandValue.text = "${(fraction * 100).toInt()}%"
-    }
-
-    private fun bandFractionFromProgress(progress: Int): Float =
-        BAND_MIN + (progress / BAND_SEEK_MAX.toFloat()) * (BAND_MAX - BAND_MIN)
-
-    private fun bandProgressFromFraction(fraction: Float): Int {
-        val clamped = fraction.coerceIn(BAND_MIN, BAND_MAX)
-        return (((clamped - BAND_MIN) / (BAND_MAX - BAND_MIN)) * BAND_SEEK_MAX).toInt()
+    /** Highlight the "Screen fill" pill closest to [fraction]. */
+    private fun renderScreenFill(fraction: Float) {
+        if (fillPills.isEmpty()) return
+        val nearest = fillPills.minByOrNull { kotlin.math.abs(it.first - fraction) }?.first
+        fillPills.forEach { (f, pill) -> stylePill(pill, f == nearest) }
     }
 
     // endregion
@@ -862,6 +913,21 @@ class SettingsView(context: Context) : LinearLayout(context) {
             },
         )
         addView(spacer(dp(14)))
+        addView(sectionLabel("Updates"))
+        // Routes to MainActivity (phone-side) via the controller hook; the update dialog and
+        // system install screen appear on the phone, where the final install tap must happen.
+        addView(
+            pillButton("Check for updates") {
+                val wired = WorkspaceController.checkForUpdates
+                if (wired != null) {
+                    wired()
+                    Toast.makeText(context, "Checking for updates… (see phone)", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Updates unavailable right now", Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+        addView(spacer(dp(14)))
         addView(sectionLabel("Maintenance"))
         // Two-tap confirm: first tap arms, second tap within ARM_MS commits. Keeps the
         // panel inside its modal box (no popup dialogs).
@@ -911,6 +977,9 @@ class SettingsView(context: Context) : LinearLayout(context) {
         typeface = Typeface.DEFAULT_BOLD
         letterSpacing = 0.08f
         layoutParams = LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }
+        // Marks the start of a section, so reflowIntoColumns() can group a label with the
+        // controls that follow it and never split them across the two columns.
+        tag = SECTION_MARKER
     }
 
     private fun subLabel(text: String): View = TextView(context).apply {
@@ -1024,9 +1093,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
         const val PILL_INACTIVE_FG = 0xFF3B3D43.toInt()
         const val PILL_ACTIVE_FG = 0xFFFFFFFF.toInt()
 
-        const val BAND_MIN = 0.60f
-        const val BAND_MAX = 1.00f
-        const val BAND_SEEK_MAX = 40
+        /** Discrete "Screen fill" percentages offered in Settings → View. */
+        val SCREEN_FILL_OPTIONS = intArrayOf(100, 95, 90, 85, 80)
 
         const val ZOOM_BACKWARD_STEPS = 4
 

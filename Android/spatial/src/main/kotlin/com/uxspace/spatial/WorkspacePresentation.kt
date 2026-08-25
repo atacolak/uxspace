@@ -5,7 +5,6 @@ import android.content.Context
 import android.os.Bundle
 import android.view.Display
 import android.view.WindowManager
-import com.uxspace.glasses.GlassesUsb
 import com.uxspace.glasses.HeadTracking
 
 /**
@@ -30,9 +29,10 @@ class WorkspacePresentation(
         surfaceView = view
         setContentView(view)
         WorkspaceController.register(view.workspaceRenderer)
-        // On the VITURE glasses the field-of-view edges are hard to see, so render into a
-        // centred band; a plain external display can use its whole height.
-        WorkspaceController.setScreenBand(if (GlassesUsb.isConnected(context)) 0.83f else 1.0f)
+        // The screen-fill (render band) comes from the user's persisted setting, pushed into
+        // the controller by the app and re-applied here by register() → setScreenBand. Default
+        // is 100% (full display); the user can letterbox it down in Settings → View if the
+        // glasses' FOV edges are uncomfortable.
         // Drive the camera from the glasses' head pose, so the screens stay world-fixed.
         // The pose-stream watchdog inside HeadTracking flips the controller's
         // headTrackingActive flag on start/stop transitions, which (a) ungrays the FREE

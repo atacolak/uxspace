@@ -659,10 +659,15 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         @Volatile private var stopped = false
         private val ctrlHeld = AtomicBoolean(false)
         private val altHeld = AtomicBoolean(false)
+        private val shiftHeld = AtomicBoolean(false)
         private val modsHeld = AtomicBoolean(false)
         private var fileObserver: FileObserver? = null
 
+        /** eventN → capability-based device class, from [classifyInputDevices]. */
+        private val deviceClasses = java.util.concurrent.ConcurrentHashMap<String, InputClass>()
+
         fun start() {
+            deviceClasses.putAll(classifyInputDevices())
             val inputDir = File(INPUT_DIR)
             inputDir.listFiles { f -> f.name.startsWith("event") }?.forEach(::spawnReader)
             fileObserver = newFileObserver(inputDir).also { it.startWatching() }
@@ -690,11 +695,22 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
         private fun handleNewDevice(name: String?) {
             if (stopped || name == null || !name.startsWith("event")) return
+            // A newly-attached device (BT keyboard/mouse/touchpad) needs (re)classifying
+            // before we decide how to read it. Cheap: getevent -lp is a one-shot snapshot.
+            deviceClasses.putAll(classifyInputDevices())
             spawnReader(File(INPUT_DIR, name))
         }
 
         private fun spawnReader(dev: File) {
             if (stopped) return
+            val cls = deviceClasses[dev.name] ?: InputClass.OTHER
+            // A touchscreen reports INPUT_PROP_DIRECT — its coordinates map straight to the
+            // panel. Grabbing it would steal the device's own touch input, so never open one
+            // for the workspace. (This is the libinput/AOSP EVIOCGPROP rule.)
+            if (cls == InputClass.TOUCHSCREEN) {
+                Log.i(TAG, "hotkey: skip ${dev.name} (touchscreen)")
+                return
+            }
             val fis = try {
                 FileInputStream(dev)
             } catch (e: Exception) {
@@ -705,7 +721,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             }
             // Logged at INFO so the user can correlate keyboard attach with
             // any downstream USB / DOF disturbance in a single logcat scroll.
-            Log.i(TAG, "hotkey: opened ${dev.name} (${describeInputDevice(dev.name)})")
+            Log.i(TAG, "hotkey: opened ${dev.name} — class=$cls (${describeInputDevice(dev.name)})")
             // Mice (devices that report EV_REL relative motion) get EVIOCGRAB'd so
             // system_server stops seeing them. Without the grab, clicks land on
             // whatever phone UI sits under the (hidden) system pointer — the home
@@ -721,15 +737,18 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             // pairing field; see MainActivity.onCreate). EVIOCGRAB takes the device at
             // the kernel level WITHOUT touching Android's focus system — the only
             // approach compatible with secondary-display apps + the privileged bootstrap.
-            // Strategy-gated. The legacy SYSFS detector decides here, at open time.
-            // The MOTION detector instead defers to readLoop, which grabs once the
-            // node proves itself a pointer from its own event stream (the only path
-            // that works for Bluetooth HID mice, whose sysfs caps are unreadable).
-            if (MOUSE_GRAB_STRATEGY == MouseGrabStrategy.SYSFS && isMouseDevice(dev.name)) {
+            // We classified this node from its evdev capabilities (EVIOCGPROP + EV_* bitmaps
+            // via getevent), so a pointer can be grabbed right here at open time — no need to
+            // wait for the motion probe. MOUSE = relative axes; TOUCHPAD = absolute axes,
+            // converted to relative deltas in the reader. Unclassified (OTHER) nodes fall back
+            // to the strategy-gated probe below. Keyboards are never grabbed (hotkeys only).
+            if (cls == InputClass.MOUSE || cls == InputClass.TOUCHPAD) {
+                grabExclusive(fis, dev.name)
+            } else if (MOUSE_GRAB_STRATEGY == MouseGrabStrategy.SYSFS && isMouseDevice(dev.name)) {
                 grabExclusive(fis, dev.name)
             }
             readers.add(fis)
-            val t = Thread({ readLoop(fis, dev) }, "uxspace-hotkey-${dev.name}").apply {
+            val t = Thread({ readLoop(fis, dev, cls) }, "uxspace-hotkey-${dev.name}").apply {
                 isDaemon = true
             }
             threads.add(t)
@@ -792,6 +811,221 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         /** Which detector gates the EVIOCGRAB. Switchable so the new MOTION layer can
          *  be A/B'd against the legacy SYSFS one and reverted instantly. */
         private enum class MouseGrabStrategy { SYSFS, MOTION }
+
+        /**
+         * Capability-based device class, decided the way libinput / AOSP `EventHub` do it —
+         * from `EVIOCGPROP` (`INPUT_PROP_POINTER` / `INPUT_PROP_DIRECT`) plus the `EV_*`
+         * capability bitmaps. Device- and vendor-agnostic: works for any mouse / touchpad /
+         * keyboard combo, wired or Bluetooth.
+         */
+        enum class InputClass { MOUSE, TOUCHPAD, TOUCHSCREEN, KEYBOARD, OTHER }
+
+        /**
+         * Turns a touchpad's absolute events into the relative motion the workspace consumes —
+         * the "non-trivial absolute→relative transformation" the kernel docs ascribe to
+         * non-direct (INPUT_PROP_POINTER) devices. One instance per touchpad reader thread.
+         *
+         * Two gestures:
+         *  - **One finger** → cursor movement, from the firmware's pointer-emulation axes
+         *    (ABS_X/ABS_Y). [onTouch]`(false)` drops the baseline on lift so the next contact
+         *    doesn't teleport the cursor.
+         *  - **Two fingers** ([onTwoFinger] driven by BTN_TOOL_DOUBLETAP) → vertical scroll,
+         *    from the mean of the two multitouch slots' Y (ABS_MT_SLOT / ABS_MT_POSITION_Y /
+         *    ABS_MT_TRACKING_ID). Cursor motion is suspended while scrolling.
+         *
+         * [onAbs] stashes axis values within a frame; [frame] (called at SYN_REPORT) emits the
+         * delta as (dx, dy, wheelTicks) and re-anchors.
+         */
+        /** One frame's touchpad output: cursor delta, wheel ticks, and a pinch ratio (1 = none). */
+        private class TpDelta(val dx: Int, val dy: Int, val wheel: Int, val zoom: Float)
+
+        private class AbsToRelative {
+            // Single-finger pointer emulation (ABS_X/ABS_Y).
+            private var curX = 0
+            private var curY = 0
+            private var pendingXY = false
+            private var lastX = 0
+            private var lastY = 0
+            private var haveBaseline = false
+
+            // Two-finger gestures from the raw multitouch slots.
+            private var twoFinger = false
+            private var slot = 0
+            private val slotX = intArrayOf(Int.MIN_VALUE, Int.MIN_VALUE)
+            private val slotY = intArrayOf(Int.MIN_VALUE, Int.MIN_VALUE)
+            private val slotActive = booleanArrayOf(false, false)
+            // Gesture lock: 0 = undecided, 1 = scroll, 2 = zoom — chosen on first real movement
+            // and held until the fingers lift, so a scroll never bleeds into zoom and back.
+            private var gesture = 0
+            private var haveTwoBaseline = false
+            private var firstSpan = 0f
+            private var firstCenY = 0
+            private var lastSpan = 0f
+            private var lastCenY = 0
+            private var scrollAccum = 0
+
+            fun onAbs(code: Int, value: Int) {
+                when (code) {
+                    ABS_X -> { curX = value; pendingXY = true }
+                    ABS_Y -> { curY = value; pendingXY = true }
+                    ABS_MT_SLOT -> if (value in 0..1) slot = value
+                    ABS_MT_POSITION_X -> if (slot in 0..1) slotX[slot] = value
+                    ABS_MT_POSITION_Y -> if (slot in 0..1) slotY[slot] = value
+                    ABS_MT_TRACKING_ID -> if (slot in 0..1) slotActive[slot] = value >= 0
+                }
+            }
+
+            fun onTouch(down: Boolean) {
+                if (!down) haveBaseline = false
+            }
+
+            /** BTN_TOOL_DOUBLETAP — enters/exits two-finger mode; re-baselines on either edge. */
+            fun onTwoFinger(down: Boolean) {
+                twoFinger = down
+                haveBaseline = false
+                haveTwoBaseline = false
+                gesture = 0
+                scrollAccum = 0
+            }
+
+            /** Per-frame output, or null when nothing changed. */
+            fun frame(): TpDelta? {
+                if (twoFinger) return twoFingerFrame()
+                // One finger — cursor.
+                if (!pendingXY) return null
+                pendingXY = false
+                if (!haveBaseline) {
+                    lastX = curX; lastY = curY; haveBaseline = true
+                    return null
+                }
+                val dx = curX - lastX
+                val dy = curY - lastY
+                lastX = curX; lastY = curY
+                if (dx == 0 && dy == 0) return null
+                return TpDelta(dx, dy, 0, 1f)
+            }
+
+            private fun twoFingerFrame(): TpDelta? {
+                if (!slotActive[0] || !slotActive[1] ||
+                    slotX[0] == Int.MIN_VALUE || slotX[1] == Int.MIN_VALUE ||
+                    slotY[0] == Int.MIN_VALUE || slotY[1] == Int.MIN_VALUE
+                ) {
+                    return null
+                }
+                val span = kotlin.math.hypot(
+                    (slotX[0] - slotX[1]).toFloat(),
+                    (slotY[0] - slotY[1]).toFloat(),
+                )
+                val cenY = (slotY[0] + slotY[1]) / 2
+                if (!haveTwoBaseline) {
+                    firstSpan = span; firstCenY = cenY; lastSpan = span; lastCenY = cenY
+                    haveTwoBaseline = true
+                    return null
+                }
+                if (gesture == 0) {
+                    // Classify once either the spread or the translation clears the threshold.
+                    val dSpan = kotlin.math.abs(span - firstSpan)
+                    val dCen = kotlin.math.abs(cenY - firstCenY).toFloat()
+                    if (dSpan < GESTURE_CLASSIFY_UNITS && dCen < GESTURE_CLASSIFY_UNITS) return null
+                    gesture = if (dSpan > dCen) 2 else 1
+                    lastSpan = span; lastCenY = cenY
+                }
+                return if (gesture == 2) {
+                    if (span <= 0f || lastSpan <= 0f) return null
+                    val ratio = span / lastSpan
+                    lastSpan = span
+                    if (ratio == 1f) null else TpDelta(0, 0, 0, ratio)
+                } else {
+                    scrollAccum += cenY - lastCenY
+                    lastCenY = cenY
+                    val ticks = scrollAccum / SCROLL_UNITS_PER_TICK
+                    if (ticks == 0) return null
+                    scrollAccum -= ticks * SCROLL_UNITS_PER_TICK
+                    // wheel convention: positive = up. Fingers moving down (Y up) scrolls down.
+                    TpDelta(0, 0, -ticks, 1f)
+                }
+            }
+        }
+
+        /**
+         * Snapshot every `/dev/input/eventN` and classify it from its evdev capabilities,
+         * by parsing `getevent -lp` (a one-shot dump). getevent reads the caps via ioctls
+         * (EVIOCGBIT/EVIOCGPROP) — the same source libinput uses — which still works on
+         * devices where sysfs (the `/sys/class/input/eventN` tree) is SELinux-locked from shell uid, as it
+         * is on recent Samsung One UI. Returns eventName → [InputClass].
+         */
+        private fun classifyInputDevices(): Map<String, InputClass> {
+            val text = runCatching {
+                val p = Runtime.getRuntime().exec(arrayOf("getevent", "-lp"))
+                val out = p.inputStream.bufferedReader().readText()
+                p.waitFor()
+                out
+            }.getOrElse {
+                Log.w(TAG, "classify: getevent -lp failed (${it.message}) — falling back to motion probe")
+                return emptyMap()
+            }
+
+            val map = HashMap<String, InputClass>()
+            var name: String? = null
+            var relX = false; var relY = false
+            var absX = false; var absY = false; var absMtX = false; var absMtY = false
+            var propDirect = false; var propPointer = false
+            var fingerTool = false; var mouseBtn = false; var alphaKeys = false
+
+            fun commit() {
+                val ev = name ?: return
+                val hasAbsXY = (absX && absY) || (absMtX && absMtY)
+                // A real pointer carries a mouse button or the INPUT_PROP_POINTER flag. That
+                // gate is what separates an actual mouse/touchpad from the phone's grip/ALS
+                // sensors, which advertise REL_X/REL_Y capabilities but never behave as mice —
+                // grabbing those would be wrong (and the old motion probe deliberately dodged
+                // them). fingerTool alone is NOT enough: some touchscreens also report it.
+                val isPointer = mouseBtn || propPointer
+                val cls = when {
+                    propDirect -> InputClass.TOUCHSCREEN
+                    hasAbsXY && isPointer -> InputClass.TOUCHPAD
+                    relX && relY && isPointer -> InputClass.MOUSE
+                    alphaKeys -> InputClass.KEYBOARD
+                    else -> InputClass.OTHER
+                }
+                map[ev] = cls
+            }
+
+            for (raw in text.lineSequence()) {
+                val line = raw.trim()
+                if (line.startsWith("add device")) {
+                    commit()
+                    name = Regex("/dev/input/(event\\d+)").find(line)?.groupValues?.get(1)
+                    relX = false; relY = false
+                    absX = false; absY = false; absMtX = false; absMtY = false
+                    propDirect = false; propPointer = false
+                    fingerTool = false; mouseBtn = false; alphaKeys = false
+                    continue
+                }
+                if (name == null) continue
+                // Token-match capability names so ABS_X never matches inside ABS_MT_POSITION_X.
+                for (tok in line.split(Regex("[^A-Z0-9_]+"))) {
+                    when (tok) {
+                        "REL_X" -> relX = true
+                        "REL_Y" -> relY = true
+                        "ABS_X" -> absX = true
+                        "ABS_Y" -> absY = true
+                        "ABS_MT_POSITION_X" -> absMtX = true
+                        "ABS_MT_POSITION_Y" -> absMtY = true
+                        "INPUT_PROP_DIRECT" -> propDirect = true
+                        "INPUT_PROP_POINTER" -> propPointer = true
+                        "BTN_TOOL_FINGER" -> fingerTool = true
+                        "BTN_MOUSE", "BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE" -> mouseBtn = true
+                        // Any letter/space/enter key marks a real typing keyboard (not a
+                        // media-key or power-button pseudo-"keyboard").
+                        "KEY_A", "KEY_Q", "KEY_Z", "KEY_SPACE", "KEY_ENTER" -> alphaKeys = true
+                    }
+                }
+            }
+            commit()
+            Log.i(TAG, "classify: ${map.entries.joinToString { "${it.key}=${it.value}" }}")
+            return map
+        }
 
         /**
          * Call EVIOCGRAB(1) on the device's FD so the kernel routes its events
@@ -870,13 +1104,19 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             }.getOrElse { "name unavailable: ${it.message}" }
         }
 
-        private fun readLoop(fis: FileInputStream, dev: File) {
+        private fun readLoop(fis: FileInputStream, dev: File, cls: InputClass) {
             val buf = ByteArray(INPUT_EVENT_SIZE)
-            // MOTION strategy: identify the pointer from its own event stream and
-            // EVIOCGRAB on first proof. Null under the legacy SYSFS strategy, which
-            // already decided (and grabbed, or not) at open time.
+            // A touchpad reports absolute coordinates; this converts them to the relative
+            // deltas the workspace cursor consumes ("non-direct" input, per the kernel docs).
+            val abs = if (cls == InputClass.TOUCHPAD) AbsToRelative() else null
+            // MOTION probe is only a fallback for nodes we couldn't classify (OTHER). Classified
+            // mice/touchpads were already grabbed at open; keyboards must never be grabbed.
             val pointerProbe =
-                if (MOUSE_GRAB_STRATEGY == MouseGrabStrategy.MOTION) MotionMouseDetector() else null
+                if (cls == InputClass.OTHER && MOUSE_GRAB_STRATEGY == MouseGrabStrategy.MOTION) {
+                    MotionMouseDetector()
+                } else {
+                    null
+                }
             var motionGrabbed = false
             try {
                 while (!stopped) {
@@ -886,7 +1126,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                         if (n <= 0) return
                         read += n
                     }
-                    handle(buf)
+                    handle(buf, abs)
                     if (pointerProbe != null && !motionGrabbed && pointerProbe.observe(
                             u16le(buf, OFFSET_TYPE), u16le(buf, OFFSET_CODE), i32le(buf, OFFSET_VALUE),
                         )
@@ -933,7 +1173,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         private var mouseDyAccum = 0
         private var mouseWheelAccum = 0
 
-        private fun handle(buf: ByteArray) {
+        private fun handle(buf: ByteArray, abs: AbsToRelative?) {
             val type = u16le(buf, OFFSET_TYPE)
             val code = u16le(buf, OFFSET_CODE)
             val value = i32le(buf, OFFSET_VALUE)
@@ -945,7 +1185,27 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 }
                 return
             }
+            // Touchpad absolute motion — stashed until SYN, where it becomes a relative delta.
+            if (type == EV_ABS) {
+                abs?.onAbs(code, value)
+                return
+            }
             if (type == EV_SYN && code == SYN_REPORT) {
+                // Convert this frame's absolute finger position(s) into a relative delta /
+                // scroll / pinch. Cursor + wheel fold into the same accumulators a relative
+                // mouse feeds; a pinch is forwarded straight to the app as a zoom ratio.
+                abs?.frame()?.let { d ->
+                    mouseDxAccum += d.dx
+                    mouseDyAccum += d.dy
+                    mouseWheelAccum += d.wheel
+                    if (d.zoom != 1f) {
+                        try {
+                            listener.onZoom(d.zoom)
+                        } catch (_: RemoteException) {
+                            stop()
+                        }
+                    }
+                }
                 if (mouseDxAccum != 0 || mouseDyAccum != 0 || mouseWheelAccum != 0) {
                     val dx = mouseDxAccum
                     val dy = mouseDyAccum
@@ -962,6 +1222,17 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 return
             }
             if (type != EV_KEY) return
+            // Finger contact on a touchpad — brackets each stroke. On lift we drop the
+            // baseline so the next touch starts fresh instead of teleporting the cursor.
+            if (code == BTN_TOUCH) {
+                abs?.onTouch(value != 0)
+                return
+            }
+            // Two fingers down/up on a touchpad — toggles the absolute converter's scroll mode.
+            if (code == BTN_TOOL_DOUBLETAP) {
+                abs?.onTwoFinger(value != 0)
+                return
+            }
             // Mouse buttons — forward press/release to the app. value==2 is
             // autorepeat which mice don't really emit but skip just in case.
             if (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE) {
@@ -982,27 +1253,40 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                     altHeld.set(value != 0)
                     updateModifiersHeld()
                 }
+                KEY_LEFTSHIFT, KEY_RIGHTSHIFT -> shiftHeld.set(value != 0)
                 else -> {
-                    // value: 0 = up, 1 = down, 2 = autorepeat. Only fire on the
-                    // initial press so a held key doesn't spam zoom steps.
-                    if (value != 1) return
-                    if (!(ctrlHeld.get() && altHeld.get())) return
-                    val hk = when (code) {
-                        KEY_A -> PrivilegedHotkeys.HK_CYCLE_LAYOUT
-                        KEY_Z -> PrivilegedHotkeys.HK_CYCLE_SCREEN_BAND
-                        KEY_X -> PrivilegedHotkeys.HK_TOGGLE_VIEW_MODE
-                        KEY_R -> PrivilegedHotkeys.HK_SDK_RECENTER
-                        KEY_C -> PrivilegedHotkeys.HK_ANCHOR_POSE
-                        KEY_EQUAL, KEY_KPPLUS -> PrivilegedHotkeys.HK_ZOOM_IN
-                        KEY_MINUS, KEY_KPMINUS -> PrivilegedHotkeys.HK_ZOOM_OUT
-                        else -> return
-                    }
-                    try {
-                        listener.onHotkey(hk)
-                    } catch (_: RemoteException) {
-                        // App side died — stop the whole monitor so we don't keep
-                        // racing against a dead Binder.
-                        stop()
+                    if (ctrlHeld.get() && altHeld.get()) {
+                        // Ctrl+Alt+key is a hotkey combo. value: 0 = up, 1 = down,
+                        // 2 = autorepeat — only fire on the initial press so a held key
+                        // doesn't spam zoom steps.
+                        if (value != 1) return
+                        val hk = when (code) {
+                            KEY_A -> PrivilegedHotkeys.HK_CYCLE_LAYOUT
+                            KEY_Z -> PrivilegedHotkeys.HK_CYCLE_SCREEN_BAND
+                            KEY_X -> PrivilegedHotkeys.HK_TOGGLE_VIEW_MODE
+                            KEY_R -> PrivilegedHotkeys.HK_SDK_RECENTER
+                            KEY_C -> PrivilegedHotkeys.HK_ANCHOR_POSE
+                            KEY_EQUAL, KEY_KPPLUS -> PrivilegedHotkeys.HK_ZOOM_IN
+                            KEY_MINUS, KEY_KPMINUS -> PrivilegedHotkeys.HK_ZOOM_OUT
+                            else -> return
+                        }
+                        try {
+                            listener.onHotkey(hk)
+                        } catch (_: RemoteException) {
+                            // App side died — stop the whole monitor so we don't keep
+                            // racing against a dead Binder.
+                            stop()
+                        }
+                    } else {
+                        // Plain typing (no Ctrl+Alt). Forward down + autorepeat as pressed,
+                        // up as release, so the app can drive the drawer search box — the one
+                        // text field no Android window can focus for a hardware keyboard.
+                        if (value != 0 && value != 1 && value != 2) return
+                        try {
+                            listener.onKey(code, value != 0, shiftHeld.get())
+                        } catch (_: RemoteException) {
+                            stop()
+                        }
                     }
                 }
             }
@@ -1044,14 +1328,33 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             private const val EV_SYN = 0
             private const val EV_KEY = 1
             private const val EV_REL = 2
+            private const val EV_ABS = 3
             private const val SYN_REPORT = 0
             private const val REL_X = 0
             private const val REL_Y = 1
             private const val REL_WHEEL = 8
+            // Absolute axes — reported by touchpads (INPUT_PROP_POINTER) and touchscreens.
+            private const val ABS_X = 0
+            private const val ABS_Y = 1
+            // Multitouch protocol-B axes, for two-finger scroll + pinch off a touchpad.
+            private const val ABS_MT_SLOT = 47
+            private const val ABS_MT_POSITION_X = 53
+            private const val ABS_MT_POSITION_Y = 54
+            private const val ABS_MT_TRACKING_ID = 57
+            // Touchpad Y-units per one wheel tick when two-finger scrolling (tuning knob).
+            private const val SCROLL_UNITS_PER_TICK = 12
+            // Two-finger movement (touchpad units) that must accrue before we lock the gesture
+            // as scroll vs. pinch — small enough to feel instant, large enough to disambiguate.
+            private const val GESTURE_CLASSIFY_UNITS = 6f
             // Mouse button kernel codes.
             private const val BTN_LEFT = 272
             private const val BTN_RIGHT = 273
             private const val BTN_MIDDLE = 274
+            // Finger-contact key a touchpad raises while a finger is down; brackets each
+            // stroke so the absolute→relative converter can re-baseline on lift.
+            private const val BTN_TOUCH = 330
+            // Raised while exactly two fingers rest on a touchpad — our two-finger scroll gate.
+            private const val BTN_TOOL_DOUBLETAP = 333
             // _IOW('E', 0x90, int) — exclusive-grab ioctl for evdev devices.
             private const val EVIOCGRAB = 0x40044590
             private const val KEY_MINUS = 12
@@ -1062,6 +1365,8 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             private const val KEY_Z = 44
             private const val KEY_X = 45
             private const val KEY_C = 46
+            private const val KEY_LEFTSHIFT = 42
+            private const val KEY_RIGHTSHIFT = 54
             private const val KEY_LEFTALT = 56
             private const val KEY_KPMINUS = 74
             private const val KEY_KPPLUS = 78

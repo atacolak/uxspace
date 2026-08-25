@@ -329,7 +329,27 @@ object PrivilegedService {
             // them here and the app dispatches workspace clicks ourselves.
             mainHandler.post { mouseButtonHandler?.invoke(code, pressed) }
         }
+        override fun onKey(keyCode: Int, pressed: Boolean, shift: Boolean) {
+            // Hardware-keyboard text (non-hotkey) — the app routes it to the drawer search
+            // box when the drawer is open. keyCode is the kernel KEY_* code.
+            mainHandler.post { keyHandler?.invoke(keyCode, pressed, shift) }
+        }
+        override fun onZoom(scale: Float) {
+            // Two-finger touchpad pinch — driven into the workspace zoom.
+            mainHandler.post { zoomHandler?.invoke(scale) }
+        }
     }
+
+    /** App-level handler for a touchpad pinch ([scale] = incremental span ratio, 1 = none). */
+    @Volatile
+    var zoomHandler: ((scale: Float) -> Unit)? = null
+
+    /**
+     * App-level handler for hardware-keyboard text keys (non Ctrl+Alt). [keyCode] is the
+     * kernel KEY_* code, [pressed] true on press/autorepeat, [shift] the shift-held state.
+     */
+    @Volatile
+    var keyHandler: ((keyCode: Int, pressed: Boolean, shift: Boolean) -> Unit)? = null
 
     /**
      * App-level handler for raw evdev mouse motion (REL_X, REL_Y, REL_WHEEL batched

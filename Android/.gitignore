@@ -18,6 +18,11 @@ _*.png
 # Proprietary VITURE SDK — must NOT be committed or redistributed.
 # Download from https://www.viture.com/developer (kept outside the repo).
 /SDK/
+
+# Local infrastructure — self-hosted APK distribution. NEVER commit (this repo is public):
+# references internal server paths + a Cloudflare Access creds file. Backed up outside the
+# repo at D:\Work\Programming\UxSpace-infra-local\.
+/publish-uxspace.ps1
 /libs/viture-sdk/
 # VITURE SDK binaries/headers vendored into the :glasses module's native build.
 /glasses/src/main/jniLibs/
