@@ -28,6 +28,9 @@ _*.png
 /glasses/src/main/jniLibs/
 /glasses/src/main/cpp/include/
 
+# Fold remote-dev run artifacts (logcat, screenshots, APK copies).
+/.dev/
+
 # Local Claude Code settings (machine-specific).
 .claude/settings.local.json
 

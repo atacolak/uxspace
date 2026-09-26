@@ -13,3 +13,7 @@ f02aa61-build/
 
 # Local experiment: standalone VITURE camera-stream test app (not part of UxSpace)
 /Android/camtest/
+
+# Fold remote-dev run artifacts (logcat, screenshots, APK copies).
+/.dev/
+/Android/.dev/

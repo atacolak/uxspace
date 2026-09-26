@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# UxSpace Fold remote-dev harness.
+# Runs on sfub. Drives the Samsung Fold over:
+#   ssh fold  ->  Fold-local adb-wifi  ->  127.0.0.1 adbd  ->  Android
+# sfub never chases Android's rotating Wireless Debugging port.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ANDROID="$ROOT/Android"
+DEVDIR="$ANDROID/.dev"
+RUNS="$DEVDIR/fold-runs"
+LOCK="$DEVDIR/fold-dev.lock"
+PKG="${FOLD_PKG:-com.uxspace}"
+KEEP_RUNS="${FOLD_KEEP_RUNS:-15}"
+SETTLE_S="${FOLD_SETTLE_S:-8}"
+ADB_WIFI_TIMEOUT_S="${FOLD_ADB_WIFI_TIMEOUT_S:-180}"
+JAVA_HOME="${JAVA_HOME:-/home/sf/.local/opt/jdk-21.0.12.1+1}"
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:${PATH:-}"
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10 -o ServerAliveCountMax=3)
+REMOTE_ENV='export PREFIX=/data/data/com.termux/files/usr
+export HOME=/data/data/com.termux/files/home
+export PATH="$HOME/bin:$PREFIX/bin:/system/bin:/system/xbin:$PATH"
+export ADB_MDNS_OPENSCREEN="${ADB_MDNS_OPENSCREEN:-1}"
+mkdir -p "$HOME/tmp"
+'
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/fold-dev [command]
+
+Commands:
+  cycle | (default)   build -> install -> launch -> smoke (Stage A)
+  build               assembleDebug only
+  adb                 ensure Fold-local wireless ADB is `device`
+  install             transfer + adb install -r current APK (builds if missing)
+  launch              force-stop, launch, wait, classify (no rebuild)
+  smoke               adb + install + launch (no rebuild unless APK missing)
+  logs                print last run classification + crash excerpt
+  pair <code> [port]  pair Termux adb with Wireless Debugging (one-time)
+  status              adb state, installed package, process
+  screenshot          save a phone screenshot into the last/new run dir
+
+Environment:
+  FOLD_PKG  FOLD_SETTLE_S  FOLD_KEEP_RUNS  FOLD_ADB_WIFI_TIMEOUT_S  JAVA_HOME
+EOF
+}
+
+die() { echo "fold-dev: $*" >&2; exit 1; }
+log() { printf '[fold-dev] %s\n' "$*"; }
+
+fold_ssh() {
+  ssh "${SSH_OPTS[@]}" fold "$REMOTE_ENV$*"
+}
+
+fold_adb() {
+  fold_ssh "adb $*"
+}
+
+need_lock() {
+  mkdir -p "$DEVDIR" "$RUNS"
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    die "another fold-dev is running (lock $LOCK)"
+  fi
+}
+
+new_run() {
+  RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+  RUN="$RUNS/$RUN_ID"
+  mkdir -p "$RUN"
+  prune_runs
+  echo "$RUN" >"$DEVDIR/last-run"
+  log "run $RUN_ID"
+}
+
+prune_runs() {
+  local n
+  n="$(find "$RUNS" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+  if [ "$n" -le "$KEEP_RUNS" ]; then
+    return 0
+  fi
+  find "$RUNS" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+    | sort -n | head -n "$((n - KEEP_RUNS))" | awk '{print $2}' \
+    | while read -r d; do rm -rf "$d"; done
+}
+
+classify_write() {
+  local code="$1"
+  shift
+  {
+    echo "status=$code"
+    echo "detail=$*"
+  } | tee "$RUN/classify.txt"
+  echo "$code" >"$RUN/status"
+}
+
+cmd_adb() {
+  log "ensuring Fold-local wireless ADB"
+  if fold_ssh 'adb get-state 2>/dev/null' | grep -qx device; then
+    log "adb already device"
+    fold_adb 'devices -l' | tee "${RUN:-/dev/null}/adb-devices.txt" 2>/dev/null || fold_adb 'devices -l'
+    return 0
+  fi
+  set +e
+  timeout "$ADB_WIFI_TIMEOUT_S" ssh "${SSH_OPTS[@]}" fold "$REMOTE_ENV"'adb-wifi' \
+    | tee "${RUN:-/tmp}/adb-wifi.txt"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -eq 124 ]; then
+    die "adb-wifi timed out after ${ADB_WIFI_TIMEOUT_S}s"
+  fi
+  local state
+  state="$(fold_ssh 'adb get-state 2>/dev/null' || true)"
+  if [ "$state" != "device" ]; then
+    {
+      echo "adb get-state='$state'"
+      echo
+      echo "Termux adb is not paired with Wireless Debugging, or WD is off."
+      echo "This is the one-time OS pairing boundary."
+      echo
+      echo "On the Fold: Developer options -> Wireless debugging -> Pair device with pairing code."
+      echo "Then, from sfub (while that dialog is still up):"
+      echo "  scripts/fold-dev pair <6-digit-code> <pairing-port>"
+      echo
+      echo "After a successful pair, later cycles only need 'ssh fold adb-wifi'."
+    } >&2
+    return 2
+  fi
+  log "adb device"
+  fold_adb 'devices -l'
+}
+
+cmd_build() {
+  log "building :app:assembleDebug"
+  [ -x "$ANDROID/gradlew" ] || chmod +x "$ANDROID/gradlew"
+  (
+    cd "$ANDROID"
+    bash ./gradlew --no-daemon :app:assembleDebug
+  )
+  APK="$ANDROID/app/build/outputs/apk/debug/app-debug.apk"
+  [ -f "$APK" ] || die "gradle succeeded but APK missing: $APK"
+  if [ -n "${RUN:-}" ]; then
+    {
+      echo "sha=$(git -C "$ROOT" rev-parse HEAD)"
+      echo "branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+      echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "apk=$APK"
+      echo "apk_sha256=$(sha256sum "$APK" | awk '{print $1}')"
+      echo "apk_bytes=$(stat -c%s "$APK")"
+      aapt="$(ls /home/sf/.local/opt/android-sdk/build-tools/*/aapt 2>/dev/null | sort | tail -1 || true)"
+      if [ -n "$aapt" ]; then
+        echo "badging:"
+        "$aapt" dump badging "$APK" | head -8
+      fi
+    } | tee "$RUN/build.txt"
+  fi
+  log "apk $APK"
+}
+
+cmd_transfer() {
+  APK="${APK:-$ANDROID/app/build/outputs/apk/debug/app-debug.apk}"
+  [ -f "$APK" ] || die "no APK at $APK — run build first"
+  log "scp APK to fold:~/tmp/uxspace-debug.apk"
+  scp "${SSH_OPTS[@]}" "$APK" fold:tmp/uxspace-debug.apk
+  fold_ssh 'ls -l "$HOME/tmp/uxspace-debug.apk"'
+}
+
+cmd_install() {
+  cmd_adb
+  APK="${APK:-$ANDROID/app/build/outputs/apk/debug/app-debug.apk}"
+  [ -f "$APK" ] || cmd_build
+  cmd_transfer
+  log "adb install -r -d -t"
+  set +e
+  fold_ssh 'adb install -r -d -t "$HOME/tmp/uxspace-debug.apk"' \
+    | tee "${RUN:-/tmp}/install.txt"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  [ "$rc" -eq 0 ] || die "adb install failed (exit $rc)"
+  fold_adb "shell pm path $PKG" | tee -a "${RUN:-/tmp}/install.txt"
+  fold_adb "shell dumpsys package $PKG" 2>/dev/null \
+    | awk '/versionName|versionCode|pkgFlags|codePath|lastUpdateTime/{print; c++} c>=12{exit}' \
+    | tee -a "${RUN:-/tmp}/install.txt" || true
+  log "grant WRITE_SECURE_SETTINGS (idempotent)"
+  fold_adb "shell pm grant $PKG android.permission.WRITE_SECURE_SETTINGS" \
+    >"${RUN:-/tmp}/grant.txt" 2>&1 || true
+  cat "${RUN:-/tmp}/grant.txt" 2>/dev/null || true
+}
+
+resolve_activity() {
+  local act
+  act="$(fold_adb "shell cmd package resolve-activity --brief $PKG" 2>/dev/null \
+    | awk 'NF && $0 !~ /priority|No activity/{print; exit}')"
+  if [ -z "$act" ] || [ "$act" = "No activity found" ]; then
+    act="$(fold_adb "shell cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $PKG" 2>/dev/null \
+      | awk 'NF && $0 ~ /\//{print; exit}')"
+  fi
+  if [ -z "$act" ]; then
+    act="$PKG/.MainActivity"
+  fi
+  printf '%s\n' "$act"
+}
+
+cmd_screenshot() {
+  local dest="${1:-${RUN:-$RUNS}/screen.png}"
+  mkdir -p "$(dirname "$dest")"
+  fold_adb 'exec-out screencap -p' >"$dest" || true
+  if [ -s "$dest" ]; then
+    log "screenshot $dest ($(stat -c%s "$dest") bytes)"
+  else
+    log "screenshot empty"
+  fi
+}
+
+extract_crashes() {
+  local logf="$1"
+  local out="$2"
+  awk '
+    BEGIN { grab=0; n=0 }
+    /FATAL EXCEPTION/ || /Process: com\.uxspace/ { grab=1 }
+    grab {
+      print
+      n++
+      if (n>120) { grab=0; n=0 }
+    }
+    grab && /^[-]+ beginning of/ { grab=0; n=0 }
+    /Fatal signal/ { print; grab=1; n=1 }
+    /DEBUG +: +signal / { print }
+    /DEBUG +: +Abort message/ { print }
+    /DEBUG +: +backtrace:/ { grab=1; n=1 }
+  ' "$logf" >"$out" || true
+}
+
+cmd_launch() {
+  cmd_adb
+  local activity
+  activity="$(resolve_activity)"
+  log "launcher activity: $activity"
+  printf '%s\n' "$activity" >"${RUN:-/tmp}/activity.txt"
+
+  log "clear logcat + force-stop"
+  fold_adb "logcat -c" >/dev/null 2>&1 || true
+  fold_adb "shell am force-stop $PKG" >/dev/null 2>&1 || true
+  sleep 1
+
+  log "am start -W"
+  set +e
+  fold_adb "shell am start -W -n $activity" | tee "${RUN:-/tmp}/launch.txt"
+  local start_rc=${PIPESTATUS[0]}
+  set -e
+
+  log "settling ${SETTLE_S}s"
+  sleep "$SETTLE_S"
+
+  fold_adb "shell pidof $PKG" >"${RUN:-/tmp}/pid.txt" 2>&1 || true
+  fold_adb "shell dumpsys activity activities" >"${RUN:-/tmp}/dumpsys-activities.txt" 2>&1 || true
+  fold_adb "shell dumpsys activity processes" >"${RUN:-/tmp}/dumpsys-processes.txt" 2>&1 || true
+  fold_adb "logcat -d -v threadtime" >"${RUN:-/tmp}/logcat.txt" 2>&1 || true
+  fold_adb "shell run-as $PKG cat files/uxspace-crash.txt" \
+    >"${RUN:-/tmp}/run-as-crash.txt" 2>&1 || true
+  fold_ssh 'cat /storage/emulated/0/uxspace-crash.txt 2>/dev/null; cat /storage/emulated/0/uxspace-alive.txt 2>/dev/null' \
+    >"${RUN:-/tmp}/sdcard-markers.txt" 2>&1 || true
+  cmd_screenshot "${RUN:-/tmp}/screen.png"
+
+  extract_crashes "${RUN:-/tmp}/logcat.txt" "${RUN:-/tmp}/crash-excerpt.txt"
+
+  local pid=""
+  pid="$(tr -d ' \n' <"${RUN:-/tmp}/pid.txt" || true)"
+  local resumed=0
+  if grep -E "resumed=$PKG|mResumedActivity.*$PKG|topResumedActivity.*$PKG|$PKG/.MainActivity" \
+       "${RUN:-/tmp}/dumpsys-activities.txt" >/dev/null 2>&1; then
+    resumed=1
+  fi
+  local fatal=0
+  if grep -E "FATAL EXCEPTION|Fatal signal|Process: $PKG" "${RUN:-/tmp}/crash-excerpt.txt" >/dev/null 2>&1; then
+    fatal=1
+  fi
+  local native=0
+  if grep -E "F DEBUG|Fatal signal|tombstone" "${RUN:-/tmp}/crash-excerpt.txt" >/dev/null 2>&1; then
+    native=1
+  fi
+
+  {
+    echo "activity=$activity"
+    echo "am_start_rc=$start_rc"
+    echo "pid=${pid:-none}"
+    echo "resumed=$resumed"
+    echo "fatal=$fatal"
+    echo "native=$native"
+    echo "settle_s=$SETTLE_S"
+  } | tee "${RUN:-/tmp}/smoke.txt"
+
+  if [ "$fatal" -eq 1 ] || [ "$native" -eq 1 ]; then
+    echo "----- crash excerpt -----"
+    cat "${RUN:-/tmp}/crash-excerpt.txt"
+    classify_write FAIL_CRASH "process crashed; see $RUN/crash-excerpt.txt"
+    return 1
+  fi
+  if [ -z "$pid" ]; then
+    echo "----- last AndroidRuntime / ActivityManager -----"
+    grep -E "AndroidRuntime|ActivityManager|UxSpace|com.uxspace" "${RUN:-/tmp}/logcat.txt" | tail -80 || true
+    classify_write FAIL_DIED "no pid after ${SETTLE_S}s"
+    return 1
+  fi
+  if [ "$start_rc" -ne 0 ]; then
+    classify_write FAIL_LAUNCH "am start rc=$start_rc pid=$pid"
+    return 1
+  fi
+  if [ "$resumed" -ne 1 ]; then
+    classify_write FAIL_NOT_RESUMED "pid=$pid but MainActivity not resumed"
+    return 1
+  fi
+  classify_write PASS_STAGE_A "pid=$pid activity=$activity resumed"
+  return 0
+}
+
+cmd_status() {
+  echo "=== adb ==="
+  fold_ssh 'adb get-state 2>&1; adb devices -l'
+  echo "=== package ==="
+  fold_adb "shell pm path $PKG" 2>&1 || true
+  echo "=== pid ==="
+  fold_adb "shell pidof $PKG" 2>&1 || true
+  echo "=== last run ==="
+  if [ -f "$DEVDIR/last-run" ]; then
+    cat "$DEVDIR/last-run"
+    echo
+    cat "$(cat "$DEVDIR/last-run")/classify.txt" 2>/dev/null || true
+  fi
+}
+
+cmd_logs() {
+  local last
+  last="$(cat "$DEVDIR/last-run" 2>/dev/null || true)"
+  [ -n "$last" ] || die "no previous run"
+  echo "run $last"
+  echo "----- classify -----"
+  cat "$last/classify.txt" 2>/dev/null || true
+  echo "----- smoke -----"
+  cat "$last/smoke.txt" 2>/dev/null || true
+  echo "----- crash excerpt -----"
+  cat "$last/crash-excerpt.txt" 2>/dev/null || true
+  echo "----- launch -----"
+  cat "$last/launch.txt" 2>/dev/null || true
+}
+
+cmd_pair() {
+  local code="${1:-}"
+  local port="${2:-}"
+  [ -n "$code" ] || die "usage: scripts/fold-dev pair <6-digit-code> [port]"
+  if [ -z "$port" ]; then
+    die "pass the pairing port shown in the dialog: scripts/fold-dev pair $code PORT"
+  fi
+  log "adb pair 127.0.0.1:$port"
+  fold_ssh "printf '%s\n' '$code' | adb pair 127.0.0.1:$port"
+  cmd_adb
+}
+
+cmd_cycle() {
+  new_run
+  cmd_build
+  cmd_install
+  cmd_launch
+}
+
+cmd_smoke() {
+  new_run
+  APK="$ANDROID/app/build/outputs/apk/debug/app-debug.apk"
+  [ -f "$APK" ] || cmd_build
+  cmd_install
+  cmd_launch
+}
+
+main() {
+  local cmd="${1:-cycle}"
+  shift || true
+  case "$cmd" in
+    -h|--help|help) usage; exit 0 ;;
+    cycle|full) need_lock; cmd_cycle "$@" ;;
+    build) need_lock; new_run; cmd_build ;;
+    adb) need_lock; new_run; cmd_adb ;;
+    install) need_lock; new_run; cmd_install ;;
+    launch) need_lock; new_run; cmd_launch ;;
+    smoke) need_lock; cmd_smoke ;;
+    pair) cmd_pair "$@" ;;
+    status) cmd_status ;;
+    logs) cmd_logs ;;
+    screenshot) need_lock; new_run; cmd_adb; cmd_screenshot "$RUN/screen.png" ;;
+    *) usage; die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
