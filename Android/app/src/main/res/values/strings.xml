@@ -15,7 +15,7 @@
 
     <string name="privilege_msg_unsupported">Needs Android 11 or newer. UxSpace activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
     <string name="privilege_msg_dev_options">Open Settings → About phone → Software information, then tap “Build number” seven times until it confirms Developer options is unlocked. Return here when done.</string>
-    <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — UxSpace reconnects automatically.</string>
+    <string name="privilege_msg_wireless_debugging">UxSpace tried to enable Wireless Debugging itself. If this screen is still showing, tap Allow on the “wireless debugging on this network” prompt if one appeared, or open Developer options and turn Wireless Debugging on, then return — UxSpace reconnects automatically.</string>
     <string name="privilege_msg_pair">Open Wireless Debugging and tap “Pair device with a pairing code”. With the pair dialog still in front, pull the notification shade down over it and type the 6-digit code into UxSpace\'s pairing notification — that way the dialog never goes to the background, which is what mDNS needs.</string>
     <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
     <string name="privilege_msg_connecting">Connecting to the local ADB service…</string>

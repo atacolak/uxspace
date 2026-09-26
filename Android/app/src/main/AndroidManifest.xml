@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!--
       Wi-Fi multicast filtering normally drops the mDNS replies AdbDiscovery needs to find
@@ -42,6 +43,20 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      Privileged (signature|privileged) permission, granted once over ADB:
+
+          adb shell pm grant com.uxspace android.permission.WRITE_SECURE_SETTINGS
+
+      Lets PrivilegedService.ensureWirelessAdb() flip Settings.Global.adb_wifi_enabled
+      so Wireless Debugging comes back on known/trusted Wi-Fi without opening
+      Developer Options. Does not bypass Android's per-network "Allow wireless
+      debugging on this network" trust prompt. See docs/PRIVILEGE.md.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!--
       UxSpace lists the installed apps the user can launch onto a virtual screen, so it needs

@@ -49,11 +49,20 @@ only ever types the 6-digit code.
 ### Honest limitations (same as Shizuku)
 
 - **API 30+** for the wireless path. `minSdk` stays 26; the setup flow is gated at runtime.
-- The user must enable **Wireless debugging** — UxSpace cannot toggle it (no permission).
+- Ordinary installs still cannot toggle **Wireless debugging** (no permission). On a
+  development device, grant `WRITE_SECURE_SETTINGS` once via ADB:
+
+      adb shell pm grant com.uxspace android.permission.WRITE_SECURE_SETTINGS
+
+  [PrivilegedService.ensureWirelessAdb] then flips `Settings.Global.adb_wifi_enabled`
+  itself. If the setting says on but `_adb-tls-connect._tcp` is missing or stale, it
+  performs **one** off→on reset and rediscovers. It does not loop, does not touch the
+  pairing key, and does not dismiss Android's per-network "Allow wireless debugging on
+  this network" trust prompt.
 - After a **reboot** the helper process is gone and wireless debugging is usually off
-  again. Pairing is *not* lost (the key persists). On next launch UxSpace re-discovers the
-  connect port and restarts the helper; if wireless debugging is off, the setup card asks
-  the user to switch it back on. This is exactly Shizuku's post-reboot behaviour.
+  again. Pairing is *not* lost (the key persists). On next launch UxSpace re-enables
+  Wireless Debugging when permitted, re-discovers the connect port, and restarts the
+  helper. Without the grant, the setup card still asks the user to switch it back on.
 
 ---
 

@@ -172,58 +172,77 @@ object PrivilegedService {
                 setState(State.NEEDS_DEVELOPER_OPTIONS)
                 return@execute
             }
+
+            // Flip adb_wifi_enabled if WRITE_SECURE_SETTINGS is granted. A new Wi-Fi
+            // network may still require Android's "Allow wireless debugging" tap.
+            var wirelessResetUsed = false
+            ensureWirelessAdb(ctx)
+
             if (!hasPaired(ctx)) {
                 setState(State.NEEDS_PAIRING)
                 return@execute
             }
 
-            setState(State.DISCOVERING)
-            val endpoints = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
-            if (endpoints.isEmpty()) {
-                Log.w(TAG, "connect service not advertised — wireless debugging off?")
-                setState(State.NEEDS_WIRELESS_DEBUGGING)
-                return@execute
-            }
-
-            val adb = AdbConnectionManager.getInstance(ctx)
-            if (!adb.isConnected) {
-                setState(State.CONNECTING)
-                // Android can advertise a stale `_adb-tls-connect._tcp` next to the active
-                // one; try each until one accepts the connect, so a refused stale endpoint
-                // doesn't masquerade as "wireless debugging off".
-                var connected = false
-                var lastError: Exception? = null
-                for (endpoint in endpoints) {
-                    try {
-                        if (adb.connect(endpoint.host, endpoint.port)) {
-                            connected = true
-                            break
-                        }
-                        Log.w(TAG, "ADB connect to ${endpoint.host}:${endpoint.port} returned false")
-                    } catch (e: AdbPairingRequiredException) {
-                        // The device no longer trusts our key — wipe the marker and walk
-                        // the user back through pairing. No point trying other endpoints.
-                        Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
-                        markPaired(ctx, false)
-                        setState(State.NEEDS_PAIRING)
-                        return@execute
-                    } catch (e: Exception) {
-                        lastError = e
-                        Log.w(
-                            TAG,
-                            "ADB connect to ${endpoint.host}:${endpoint.port} failed: ${e.message}",
-                        )
+            // At most one 0→1 reset if the setting says on but mDNS is missing/stale.
+            var adb = AdbConnectionManager.getInstance(ctx)
+            ensureLoop@ while (true) {
+                setState(State.DISCOVERING)
+                val endpoints = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
+                if (endpoints.isEmpty()) {
+                    Log.w(TAG, "connect service not advertised — wireless debugging off?")
+                    if (!wirelessResetUsed && resetWirelessAdbOnce(ctx)) {
+                        wirelessResetUsed = true
+                        continue@ensureLoop
                     }
-                }
-                if (!connected) {
-                    Log.e(
-                        TAG,
-                        "all ${endpoints.size} connect endpoint(s) refused — wireless debugging off?",
-                        lastError,
-                    )
                     setState(State.NEEDS_WIRELESS_DEBUGGING)
                     return@execute
                 }
+
+                adb = AdbConnectionManager.getInstance(ctx)
+                if (!adb.isConnected) {
+                    setState(State.CONNECTING)
+                    // Android can advertise a stale `_adb-tls-connect._tcp` next to the active
+                    // one; try each until one accepts the connect, so a refused stale endpoint
+                    // doesn't masquerade as "wireless debugging off".
+                    var connected = false
+                    var lastError: Exception? = null
+                    for (endpoint in endpoints) {
+                        try {
+                            if (adb.connect(endpoint.host, endpoint.port)) {
+                                connected = true
+                                break
+                            }
+                            Log.w(TAG, "ADB connect to ${endpoint.host}:${endpoint.port} returned false")
+                        } catch (e: AdbPairingRequiredException) {
+                            // The device no longer trusts our key — wipe the marker and walk
+                            // the user back through pairing. No point trying other endpoints.
+                            Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
+                            markPaired(ctx, false)
+                            setState(State.NEEDS_PAIRING)
+                            return@execute
+                        } catch (e: Exception) {
+                            lastError = e
+                            Log.w(
+                                TAG,
+                                "ADB connect to ${endpoint.host}:${endpoint.port} failed: ${e.message}",
+                            )
+                        }
+                    }
+                    if (!connected) {
+                        Log.e(
+                            TAG,
+                            "all ${endpoints.size} connect endpoint(s) refused — wireless debugging off?",
+                            lastError,
+                        )
+                        if (!wirelessResetUsed && resetWirelessAdbOnce(ctx)) {
+                            wirelessResetUsed = true
+                            continue@ensureLoop
+                        }
+                        setState(State.NEEDS_WIRELESS_DEBUGGING)
+                        return@execute
+                    }
+                }
+                break@ensureLoop
             }
 
             setState(State.STARTING)
@@ -526,8 +545,58 @@ object PrivilegedService {
         worker.execute { runCatching { block() } }
     }
 
+    /**
+     * Turn Wireless Debugging on if we hold WRITE_SECURE_SETTINGS and it is currently
+     * off. No-op without the grant — the wizard then asks the user to enable it.
+     */
+    private fun ensureWirelessAdb(ctx: Context) {
+        if (!WirelessAdb.canWrite(ctx)) {
+            Log.i(TAG, "WRITE_SECURE_SETTINGS not granted — cannot auto-enable wireless debugging")
+            return
+        }
+        if (WirelessAdb.isEnabled(ctx)) {
+            Log.i(TAG, "adb_wifi_enabled already 1")
+            return
+        }
+        Log.i(TAG, "adb_wifi_enabled is 0 — enabling")
+        if (!WirelessAdb.setEnabled(ctx, true)) {
+            Log.w(TAG, "failed to set adb_wifi_enabled=1")
+            return
+        }
+        sleepQuietly(WIRELESS_ENABLE_SETTLE_MS)
+    }
+
+    /**
+     * One controlled off→on cycle when the setting claims Wireless Debugging is on
+     * but `_adb-tls-connect._tcp` is absent or every resolved endpoint refuses.
+     * Pairing keys are left untouched. Never loops.
+     */
+    private fun resetWirelessAdbOnce(ctx: Context): Boolean {
+        if (!WirelessAdb.canWrite(ctx)) return false
+        Log.w(TAG, "adb_wifi_enabled looks stale — one 0→1 reset")
+        WirelessAdb.setEnabled(ctx, false)
+        sleepQuietly(WIRELESS_RESET_OFF_MS)
+        val ok = WirelessAdb.setEnabled(ctx, true)
+        if (ok) sleepQuietly(WIRELESS_ENABLE_SETTLE_MS)
+        return ok
+    }
+
+    private fun sleepQuietly(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
     /** How long to wait for an mDNS hit before giving up. */
     private const val DISCOVERY_TIMEOUT_MS = 5_000L
+
+    /** Pause after setting adb_wifi_enabled=1 so the daemon + mDNS can come up. */
+    private const val WIRELESS_ENABLE_SETTLE_MS = 1_500L
+
+    /** Pause while Wireless Debugging is off during the single stale-state reset. */
+    private const val WIRELESS_RESET_OFF_MS = 400L
 
     /** How long to wait after a Back press before checking whether it closed the app. */
     private const val BACK_SETTLE_MS = 800L
