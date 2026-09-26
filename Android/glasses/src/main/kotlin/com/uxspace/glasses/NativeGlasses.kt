@@ -17,6 +17,10 @@ object NativeGlasses {
      * check this before the `external` methods — those would throw [UnsatisfiedLinkError].
      */
     val available: Boolean = runCatching {
+        // libglasses dladdr-locates sibling libcarina_vio.so; preload so Android's
+        // library namespace can resolve it (and libcloud_protocol, which carina_vio needs).
+        runCatching { System.loadLibrary("cloud_protocol") }
+        runCatching { System.loadLibrary("carina_vio") }
         System.loadLibrary("glasses_bridge")
         true
     }.onFailure {

@@ -20,4 +20,6 @@ set_target_properties(glasses PROPERTIES
 
 add_library(glasses_bridge SHARED glasses_bridge.cpp)
 target_include_directories(glasses_bridge PRIVATE ${INCLUDE_DIR})
+# Official VITURE demo links 16 KiB max-page-size; required on Android 15 16K devices.
+target_link_options(glasses_bridge PRIVATE "-Wl,-z,max-page-size=16384")
 target_link_libraries(glasses_bridge glasses android log)
