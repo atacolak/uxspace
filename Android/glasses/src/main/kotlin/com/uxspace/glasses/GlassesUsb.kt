@@ -108,7 +108,7 @@ class GlassesUsb(
             0x1011, 0x1013, 0x1015, 0x1017, 0x101B, // Viture One / Lite
             0x1019, 0x101D,                         // Viture Pro
             0x1121, 0x1131, 0x1141, 0x1151,         // Luma / Luma Pro
-            0x1101, 0x1104,                         // Luma Ultra
+            0x1101, 0x1102, 0x1104,                 // Luma Ultra
             0x1201, 0x1211,                         // Beast
         )
 

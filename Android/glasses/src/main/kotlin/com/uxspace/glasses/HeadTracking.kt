@@ -261,8 +261,8 @@ class HeadTracking(
                         if (!firstPoseArrived) {
                             Log.i(
                                 TAG,
-                                "first pose px=%.4f py=%.4f pz=%.4f " +
-                                    "qw=%.4f qx=%.4f qy=%.4f qz=%.4f status=%d".format(
+                                ("first pose px=%.4f py=%.4f pz=%.4f " +
+                                    "qw=%.4f qx=%.4f qy=%.4f qz=%.4f status=%d").format(
                                     pose[0], pose[1], pose[2],
                                     pose[3], pose[4], pose[5], pose[6],
                                     NativeGlasses.getPoseStatus(),

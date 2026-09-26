@@ -12,7 +12,7 @@ RUNS="$DEVDIR/fold-runs"
 LOCK="$DEVDIR/fold-dev.lock"
 PKG="${FOLD_PKG:-com.uxspace}"
 KEEP_RUNS="${FOLD_KEEP_RUNS:-15}"
-SETTLE_S="${FOLD_SETTLE_S:-8}"
+SETTLE_S="${FOLD_SETTLE_S:-12}"
 ADB_WIFI_TIMEOUT_S="${FOLD_ADB_WIFI_TIMEOUT_S:-180}"
 JAVA_HOME="${JAVA_HOME:-/home/sf/.local/opt/jdk-21.0.12.1+1}"
 export JAVA_HOME
@@ -152,7 +152,7 @@ cmd_build() {
       aapt="$(ls /home/sf/.local/opt/android-sdk/build-tools/*/aapt 2>/dev/null | sort | tail -1 || true)"
       if [ -n "$aapt" ]; then
         echo "badging:"
-        "$aapt" dump badging "$APK" | head -8
+        "$aapt" dump badging "$APK" | head -8 || true
       fi
     } | tee "$RUN/build.txt"
   fi
@@ -219,7 +219,8 @@ extract_crashes() {
   local out="$2"
   awk '
     BEGIN { grab=0; n=0 }
-    /FATAL EXCEPTION/ || /Process: com\.uxspace/ { grab=1 }
+    /FATAL EXCEPTION/ { grab=1; n=0 }
+    /FORTIFY:/ { grab=1; n=0 }
     grab {
       print
       n++
@@ -274,7 +275,7 @@ cmd_launch() {
     resumed=1
   fi
   local fatal=0
-  if grep -E "FATAL EXCEPTION|Fatal signal|Process: $PKG" "${RUN:-/tmp}/crash-excerpt.txt" >/dev/null 2>&1; then
+  if grep -E "FATAL EXCEPTION|Fatal signal|FORTIFY:" "${RUN:-/tmp}/crash-excerpt.txt" >/dev/null 2>&1; then
     fatal=1
   fi
   local native=0

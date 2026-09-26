@@ -3,7 +3,10 @@ package com.uxspace.spatial
 import android.app.Presentation
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Display
+import android.view.SurfaceHolder
 import android.util.Log
 import android.view.WindowManager
 import com.uxspace.glasses.HeadTracking
@@ -26,6 +29,11 @@ class WorkspacePresentation(
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Presentation HWUI + GLSurfaceView + libcarina_vio all talk to EGL. On the Fold
+        // that combination aborted HWUI with "pthread_mutex_lock on a destroyed mutex"
+        // during the first glasses frame. Software-composite the Presentation chrome;
+        // the workspace still renders on its own GL surface.
+        window?.clearFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         val view = WorkspaceSurfaceView(context)
         surfaceView = view
         setContentView(view)
@@ -48,17 +56,33 @@ class WorkspacePresentation(
             tracking.onStreamingChanged = { streaming ->
                 WorkspaceController.headTrackingActive = streaming
             }
-            runCatching { tracking.start() }
-                .onFailure { Log.e("UxSpace/Presentation", "head tracking start failed", it) }
         }
+        // Do not dlopen libglasses/libcarina_vio during Presentation/GLSurfaceView
+        // first-frame setup — that raced HWUI on the Fold. Start tracking once the
+        // glasses surface exists and the first GL context has had a chance to bind.
+        view.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                Handler(Looper.getMainLooper()).postDelayed({ startHeadTrackingIfNeeded() }, 400)
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+        })
         // The DOF-retry button's hook (WorkspaceController.retryHeadTracking) is owned by
         // MainActivity, which routes it through restartHeadTracking() and reports the
         // success / failure outcome — so we don't wire it here.
     }
 
+    private fun startHeadTrackingIfNeeded() {
+        val tracking = headTracking ?: return
+        if (tracking.isStarted()) return
+        runCatching { tracking.start() }
+            .onFailure { Log.e("UxSpace/Presentation", "head tracking start failed", it) }
+    }
+
     override fun onStart() {
         super.onStart()
         surfaceView?.onResume()
+        Handler(Looper.getMainLooper()).postDelayed({ startHeadTrackingIfNeeded() }, 800)
     }
 
     /**

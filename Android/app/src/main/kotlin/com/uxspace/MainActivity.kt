@@ -217,7 +217,11 @@ class MainActivity : ComponentActivity() {
     private var lastKnownKeyboardIds: Set<Int> = emptySet()
     private var pendingKeyboardRescan: Runnable? = null
 
-    private val privilegeListener: () -> Unit = { runOnUiThread { renderStatus() } }
+    // READY is reached asynchronously after onResume. The VITURE display is already
+    // attached in the common "glasses were plugged in before launch" case, so
+    // DisplayListener never fires. Re-run syncGlasses on every privilege transition
+    // (it is a no-op while not READY, and claims the existing display once READY).
+    private val privilegeListener: () -> Unit = { runOnUiThread { syncGlasses() } }
 
     /**
      * Result-launcher for POST_NOTIFICATIONS (API 33+). The notification path is the
