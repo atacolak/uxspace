@@ -37,7 +37,12 @@ class GlassesUsb(
     }
 
     /** The connected VITURE glasses' USB device, or `null` if none is attached. */
-    fun find(): UsbDevice? = usbManager.deviceList.values.firstOrNull(::isVitureDevice)
+    fun find(): UsbDevice? {
+        val found = usbManager.deviceList.values.filter(::isVitureDevice)
+        // Luma Ultra enumerates two VITURE interfaces (0x1102 + 0x1104). Prefer 0x1104,
+        // which is the product id the official SDK demo treats as the glasses.
+        return found.firstOrNull { it.productId == 0x1104 } ?: found.firstOrNull()
+    }
 
     /**
      * Open [device], requesting USB permission if needed. The result is delivered to

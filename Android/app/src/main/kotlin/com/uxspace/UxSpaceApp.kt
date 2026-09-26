@@ -88,6 +88,7 @@ private const val MOUSE_CLICK_MAX_MS = 350L
 class UxSpaceApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        installCrashLogger()
         PrivilegedService.init(this)
         // The helper bootstraps over wireless-debugging ADB. Try to bring it up on every
         // launch — if pairing is needed or wireless debugging is off, the state machine

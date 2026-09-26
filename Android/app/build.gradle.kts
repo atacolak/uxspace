@@ -11,7 +11,7 @@ android {
         applicationId = "com.uxspace"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
+        versionCode = 6
         versionName = "0.1"
 
         // Cloudflare Access service-token headers for the in-app self-updater to reach the
@@ -49,6 +49,17 @@ android {
 
     lint {
         abortOnError = false
+    }
+
+    // VITURE's libglasses uses dladdr() to find sibling libcarina_vio.so. That only
+    // works if the .so files are real files next to each other, not mmap'd from the
+    // APK (extractNativeLibs=false). Android 15+ also rejects uncompressed 16 KB ELF
+    // libs that are not 16 KB zip-aligned — the v5 APK hit that and PackageManager
+    // rolled the install back. Extracting jniLibs avoids both.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
