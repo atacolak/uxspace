@@ -817,7 +817,7 @@ class MainActivity : ComponentActivity() {
                     // succeeds. Don't log a full stack trace as if it were a crash.
                     Log.w("UxSpace/Main", "presentation rejected (display not trusted yet): ${e.message}")
                     null
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     Log.e("UxSpace/Main", "could not show workspace on the glasses", e)
                     null
                 }

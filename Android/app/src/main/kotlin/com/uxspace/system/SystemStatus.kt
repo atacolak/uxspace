@@ -111,7 +111,14 @@ object SystemStatus {
     private fun registerBatteryReceiver() {
         val ctx = appContext ?: return
         val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        ctx.registerReceiver(batteryReceiver, filter)
+        // API 33+ requires an exported/not-exported flag; Samsung API 36 throws
+        // SecurityException without it even for sticky system broadcasts.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(batteryReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            ctx.registerReceiver(batteryReceiver, filter)
+        }
     }
 
     private val batteryReceiver = object : BroadcastReceiver() {

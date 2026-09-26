@@ -11,7 +11,7 @@ android {
         applicationId = "com.uxspace"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
+        versionCode = 7
         versionName = "0.1"
 
         // Cloudflare Access service-token headers for the in-app self-updater to reach the

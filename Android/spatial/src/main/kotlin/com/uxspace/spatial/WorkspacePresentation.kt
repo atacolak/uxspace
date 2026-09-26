@@ -4,6 +4,7 @@ import android.app.Presentation
 import android.content.Context
 import android.os.Bundle
 import android.view.Display
+import android.util.Log
 import android.view.WindowManager
 import com.uxspace.glasses.HeadTracking
 
@@ -47,7 +48,8 @@ class WorkspacePresentation(
             tracking.onStreamingChanged = { streaming ->
                 WorkspaceController.headTrackingActive = streaming
             }
-            tracking.start()
+            runCatching { tracking.start() }
+                .onFailure { Log.e("UxSpace/Presentation", "head tracking start failed", it) }
         }
         // The DOF-retry button's hook (WorkspaceController.retryHeadTracking) is owned by
         // MainActivity, which routes it through restartHeadTracking() and reports the

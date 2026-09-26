@@ -55,7 +55,7 @@ object PairingNotifier {
         ).addRemoteInput(remoteInput).build()
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_keyboard)
             .setContentTitle(context.getString(R.string.privilege_notification_title))
             .setContentText(context.getString(R.string.privilege_notification_text))
             .setStyle(

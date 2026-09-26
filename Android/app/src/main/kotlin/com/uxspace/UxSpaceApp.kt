@@ -89,20 +89,27 @@ class UxSpaceApp : Application() {
     override fun onCreate() {
         super.onCreate()
         installCrashLogger()
-        PrivilegedService.init(this)
+        fun safe(label: String, block: () -> Unit) {
+            try {
+                block()
+            } catch (t: Throwable) {
+                Log.e("UxSpaceApp", "init failed: $label", t)
+            }
+        }
+        safe("PrivilegedService.init") { PrivilegedService.init(this) }
         // The helper bootstraps over wireless-debugging ADB. Try to bring it up on every
         // launch — if pairing is needed or wireless debugging is off, the state machine
         // reflects it and MainActivity shows the setup card.
-        PrivilegedService.ensureRunning()
-        SystemStatus.init(this)
-        WorkspaceSettings.init(this)
-        DesktopShortcutsStore.init(this)
-        DesktopWallpaperStore.init(this)
-        loadInputAndViewSettings()
+        safe("PrivilegedService.ensureRunning") { PrivilegedService.ensureRunning() }
+        safe("SystemStatus.init") { SystemStatus.init(this) }
+        safe("WorkspaceSettings.init") { WorkspaceSettings.init(this) }
+        safe("DesktopShortcutsStore.init") { DesktopShortcutsStore.init(this) }
+        safe("DesktopWallpaperStore.init") { DesktopWallpaperStore.init(this) }
+        safe("loadInputAndViewSettings") { loadInputAndViewSettings() }
         WorkspaceSettings.addChangeListener { loadInputAndViewSettings() }
         // Pre-load the app list and rasterise icons on a background thread now, so the
         // drawer's first open is instant and scrolling doesn't hitch on icon draws.
-        AppCache.preload(this)
+        safe("AppCache.preload") { AppCache.preload(this) }
 
         // Keeps the rendering layer free of the desktop UI and the privileged path.
         WorkspaceController.desktopContent = { context, display, slotIdx, showTaskbar ->

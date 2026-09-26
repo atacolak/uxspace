@@ -37,17 +37,21 @@ class WorkspaceService : Service() {
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("UxSpace workspace")
             .setContentText("Glasses session active")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_usb)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "startForeground failed — continuing as a plain service", t)
         }
         Log.i(TAG, "started")
     }
