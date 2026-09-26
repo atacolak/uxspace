@@ -260,8 +260,21 @@ class MainActivity : ComponentActivity() {
         // handled WITHOUT focus, by EVIOCGRAB in the privileged helper (PrivilegedServer
         // .HotkeyMonitor) — the only approach compatible with all three constraints.
         // window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        try {
+            binding = ActivityMainBinding.inflate(layoutInflater)
+            setContentView(binding.root)
+        } catch (t: Throwable) {
+            dumpCrashText("UxSpace UI inflate failed\n${t.stackTraceToString()}")
+            val tv = android.widget.TextView(this).apply {
+                text = "UxSpace UI failed to inflate:\n${t.javaClass.simpleName}: ${t.message}"
+                setTextColor(0xFFFFFFFF.toInt())
+                setPadding(48, 48, 48, 48)
+                textSize = 16f
+            }
+            setContentView(tv)
+            return
+        }
+        writeAliveMarker("mainactivity.ui")
 
         // Hide the Android system pointer while it's anywhere over our window.
         // The workspace cursor (rendered in the glasses) is the only cursor the
@@ -802,6 +815,17 @@ class MainActivity : ComponentActivity() {
 
     /** Show the workspace on the glasses while they are connected; refresh the active scene. */
     private fun syncGlasses() {
+        // Do not touch the glasses Presentation / native VITURE SDK until the
+        // privileged helper is READY. Launching with Luma plugged in used to
+        // construct WorkspacePresentation immediately, load libglasses, and
+        // kill the process before the wizard could show.
+        if (PrivilegedService.state != State.READY) {
+            presentation?.dismiss()
+            presentation = null
+            setWorkspaceServiceRunning(false)
+            renderStatus()
+            return
+        }
         val display = GlassesDisplay.find(this)
         if (display != null) {
             val current = presentation

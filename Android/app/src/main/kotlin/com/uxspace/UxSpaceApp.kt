@@ -89,6 +89,7 @@ class UxSpaceApp : Application() {
     override fun onCreate() {
         super.onCreate()
         installCrashLogger()
+        com.uxspace.writeAliveMarker("application.onCreate")
         fun safe(label: String, block: () -> Unit) {
             try {
                 block()
