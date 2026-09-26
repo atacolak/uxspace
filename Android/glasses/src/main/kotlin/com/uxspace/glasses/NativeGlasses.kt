@@ -12,9 +12,16 @@ package com.uxspace.glasses
  */
 object NativeGlasses {
 
-    init {
+    /**
+     * False when `libglasses_bridge.so` is missing (VITURE SDK not vendored). Callers must
+     * check this before the `external` methods — those would throw [UnsatisfiedLinkError].
+     */
+    val available: Boolean = runCatching {
         System.loadLibrary("glasses_bridge")
-    }
+        true
+    }.onFailure {
+        android.util.Log.w("UxSpace/Native", "glasses_bridge not loaded — VITURE SDK not vendored?", it)
+    }.getOrDefault(false)
 
     /** Version string of the bundled `libglasses.so`. */
     external fun getVersion(): String

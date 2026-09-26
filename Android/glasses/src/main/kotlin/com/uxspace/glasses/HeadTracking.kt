@@ -177,11 +177,21 @@ class HeadTracking(
         this.connection = connection
         val pid = device.productId
         val fd = connection.fileDescriptor
+        Log.i(
+            TAG,
+            "USB opened vid=0x%04X pid=0x%04X fd=%d name=%s".format(
+                device.vendorId, pid, fd, device.productName ?: "?",
+            ),
+        )
         worker.execute { startSdk(pid, fd) }
     }
 
     /** Runs on [worker]: the SDK lifecycle, then the capability-specific tracking path. */
     private fun startSdk(pid: Int, fd: Int) {
+        if (!NativeGlasses.available) {
+            Log.e(TAG, "native glasses_bridge not loaded — VITURE SDK not vendored; head tracking off")
+            return
+        }
         Log.i(TAG, "libglasses ${runCatching { NativeGlasses.getVersion() }.getOrDefault("?")}")
         if (!NativeGlasses.create(pid, fd)) {
             Log.e(TAG, "NativeGlasses.create failed")
@@ -248,6 +258,17 @@ class HeadTracking(
                     val pose = NativeGlasses.getPose()
                     // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
                     if (pose.size >= 7) {
+                        if (!firstPoseArrived) {
+                            Log.i(
+                                TAG,
+                                "first pose px=%.4f py=%.4f pz=%.4f " +
+                                    "qw=%.4f qx=%.4f qy=%.4f qz=%.4f status=%d".format(
+                                    pose[0], pose[1], pose[2],
+                                    pose[3], pose[4], pose[5], pose[6],
+                                    NativeGlasses.getPoseStatus(),
+                                ),
+                            )
+                        }
                         firstPoseArrived = true
                         feedPose(pose[3], pose[4], pose[5], pose[6])
                         // pose[0..2] is the world position (px, py, pz) on Carina only.

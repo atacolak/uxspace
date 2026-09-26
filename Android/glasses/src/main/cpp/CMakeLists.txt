@@ -5,6 +5,14 @@ project(glasses_bridge)
 set(JNILIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
 set(INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+if(NOT EXISTS "${JNILIBS_DIR}/libglasses.so")
+    message(FATAL_ERROR
+        "VITURE SDK libglasses.so not found at ${JNILIBS_DIR}. "
+        "Download the official Glasses SDK from https://www.viture.com/developer "
+        "and vendor arm64-v8a .so files into glasses/src/main/jniLibs/arm64-v8a/ "
+        "plus headers into glasses/src/main/cpp/include/. Do not commit those files.")
+endif()
+
 # The proprietary VITURE SDK, consumed as a prebuilt shared library.
 add_library(glasses SHARED IMPORTED)
 set_target_properties(glasses PROPERTIES

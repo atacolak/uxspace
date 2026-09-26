@@ -49,6 +49,34 @@ object GlassesDisplay {
                 !it.name.startsWith(UXSPACE_SCREEN_PREFIX) && it.state != Display.STATE_OFF
             }
         Log.i(TAG, "glasses display: ${glasses?.let { "id=${it.displayId} '${it.name}'" } ?: "none"}")
+        glasses?.let { dumpModes(it) }
         return glasses
+    }
+
+    /**
+     * Log the current Android mode and every supported mode on the glasses display.
+     * Diagnostic only — does not request 1920x1200@120 globally.
+     */
+    private fun dumpModes(display: Display) {
+        val cur = display.mode
+        Log.i(
+            TAG,
+            "current mode: ${cur.physicalWidth}x${cur.physicalHeight} " +
+                "@ ${cur.refreshRate}Hz id=${cur.modeId}",
+        )
+        var saw1920x1200_120 = false
+        display.supportedModes.forEach { m ->
+            val isTarget = m.physicalWidth == 1920 &&
+                m.physicalHeight == 1200 &&
+                m.refreshRate >= 119.5f
+            if (isTarget) saw1920x1200_120 = true
+            Log.i(
+                TAG,
+                "  supported: ${m.physicalWidth}x${m.physicalHeight} " +
+                    "@ ${"%.2f".format(m.refreshRate)}Hz id=${m.modeId}" +
+                    if (isTarget) "  <-- 1920x1200@120" else "",
+            )
+        }
+        Log.i(TAG, "1920x1200@120 available via Android Display: $saw1920x1200_120")
     }
 }
